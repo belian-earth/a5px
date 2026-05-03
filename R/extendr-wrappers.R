@@ -14,12 +14,16 @@ a5px_get_threads_rs <- function() .Call(wrap__a5px_get_threads_rs)
 #' @param src Path or URL string (file://, http(s)://, s3://, gs://, az://).
 #' @param resolution A5 resolution (0--30).
 #' @param stat One of "mean", "sum", "count", "min", "max".
+#' @param bands_idx 1-based band indices to read. Empty = all (unless
+#'   bands_names is non-empty).
+#' @param bands_names Band names to read (matched against the GDAL DESCRIPTION
+#'   tag, falling back to band_NN). Empty = all (unless bands_idx is non-empty).
 #' @param threads Worker threads (currently used for tile-level concurrency).
 #' @param io_concurrency Number of tiles fetched concurrently.
 #' @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
 #'   vectors per band), and `band_names` (character).
 #' @noRd
 #' @keywords internal
-a5_read_raster_rs <- function(src, resolution, stat, threads, io_concurrency) .Call(wrap__a5_read_raster_rs, src, resolution, stat, threads, io_concurrency)
+a5_read_raster_rs <- function(src, resolution, stat, bands_idx, bands_names, threads, io_concurrency) .Call(wrap__a5_read_raster_rs, src, resolution, stat, bands_idx, bands_names, threads, io_concurrency)
 
 # nolint end

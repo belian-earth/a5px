@@ -78,6 +78,47 @@ test_that("a5_read_raster honours stat selection", {
   expect_lt(max(abs(s_a$B02[fi] - m_a$B02[fi] * n_a$B02[fi])), 1e-6)
 })
 
+test_that("a5_read_raster band subset by index", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  full <- a5_read_raster(path, resolution = 12, stat = "mean")
+  sub  <- a5_read_raster(path, resolution = 12, stat = "mean", bands = c(1L, 4L))
+
+  expect_equal(setdiff(names(sub), "cell"), c("B02", "B08"))
+  expect_equal(nrow(sub), nrow(full))
+  k_full <- a5R::a5_u64_to_hex(full$cell)
+  k_sub  <- a5R::a5_u64_to_hex(sub$cell)
+  ord    <- match(k_sub, k_full)
+  expect_equal(sub$B02, full$B02[ord])
+  expect_equal(sub$B08, full$B08[ord])
+})
+
+test_that("a5_read_raster band subset by name", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  sub <- a5_read_raster(path, resolution = 12, stat = "mean",
+                        bands = c("B04", "SCL"))
+  expect_equal(setdiff(names(sub), "cell"), c("B04", "SCL"))
+  expect_gt(nrow(sub), 0L)
+})
+
+test_that("a5_read_raster errors on bad band selection", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  expect_error(a5_read_raster(path, resolution = 12, bands = 999L),
+               "out of range")
+  expect_error(a5_read_raster(path, resolution = 12, bands = "no_such_band"),
+               "not found")
+  expect_error(a5_read_raster(path, resolution = 12, bands = 0L),
+               "positive")
+})
+
 test_that("a5_read_raster as_vector = TRUE collapses bands to a list column", {
   skip_no_tifs()
   path <- file.path(tif_dir(), "exe_cog.tif")

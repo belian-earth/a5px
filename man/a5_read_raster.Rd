@@ -8,6 +8,7 @@ a5_read_raster(
   src,
   resolution,
   stat = c("mean", "sum", "count", "min", "max"),
+  bands = NULL,
   threads = 1L,
   io_concurrency = 8L,
   as_vector = FALSE
@@ -22,15 +23,22 @@ a5_read_raster(
 \item{stat}{Aggregation. One of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"},
 \code{"max"}. Default \code{"mean"}.}
 
+\item{bands}{Bands to read. One of:
+\itemize{
+\item \code{NULL} (default): read every band.
+\item integer / numeric vector: 1-based band indices to read.
+\item character vector: band names matched against the GDAL \code{DESCRIPTION}
+tag (falling back to \code{band_NN} when descriptions are absent).
+}}
+
 \item{threads}{Tokio worker threads (also caps tile-level concurrency).
 Default 1.}
 
 \item{io_concurrency}{Number of tiles fetched concurrently. Default 8.}
 
-\item{as_vector}{Logical. If \code{TRUE}, collapse all bands into a single list
-column \code{value} of fixed-length numeric vectors (one entry per band, in
-band order). Useful for embedding rasters. Default \code{FALSE} (one numeric
-column per band).}
+\item{as_vector}{Logical. If \code{TRUE}, collapse all (selected) bands into a
+single list column \code{value} of fixed-length numeric vectors. Useful for
+embedding rasters. Default \code{FALSE} (one numeric column per band).}
 }
 \value{
 A \code{\link[tibble:tibble]{tibble::tibble()}} with columns:

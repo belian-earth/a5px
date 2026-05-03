@@ -1,5 +1,6 @@
 use extendr_api::prelude::*;
 
+mod band_fetch;
 mod cell_raw;
 mod error;
 mod geo;

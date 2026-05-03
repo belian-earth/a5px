@@ -19,13 +19,17 @@
 #' @param resolution Integer scalar A5 resolution (0--30).
 #' @param stat Aggregation. One of `"mean"`, `"sum"`, `"count"`, `"min"`,
 #'   `"max"`. Default `"mean"`.
+#' @param bands Bands to read. One of:
+#'   - `NULL` (default): read every band.
+#'   - integer / numeric vector: 1-based band indices to read.
+#'   - character vector: band names matched against the GDAL `DESCRIPTION`
+#'     tag (falling back to `band_NN` when descriptions are absent).
 #' @param threads Tokio worker threads (also caps tile-level concurrency).
 #'   Default 1.
 #' @param io_concurrency Number of tiles fetched concurrently. Default 8.
-#' @param as_vector Logical. If `TRUE`, collapse all bands into a single list
-#'   column `value` of fixed-length numeric vectors (one entry per band, in
-#'   band order). Useful for embedding rasters. Default `FALSE` (one numeric
-#'   column per band).
+#' @param as_vector Logical. If `TRUE`, collapse all (selected) bands into a
+#'   single list column `value` of fixed-length numeric vectors. Useful for
+#'   embedding rasters. Default `FALSE` (one numeric column per band).
 #'
 #' @returns A [tibble::tibble()] with columns:
 #'   - `cell`: an [a5R::a5_cell] vector at `resolution`
@@ -53,6 +57,7 @@
 a5_read_raster <- function(src,
                            resolution,
                            stat = c("mean", "sum", "count", "min", "max"),
+                           bands = NULL,
                            threads = 1L,
                            io_concurrency = 8L,
                            as_vector = FALSE) {
@@ -66,11 +71,14 @@ a5_read_raster <- function(src,
   if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
     cli::cli_abort("{.arg as_vector} must be a length-1 non-NA logical.")
   }
+  band_sel <- parse_bands_arg(bands)
 
   out <- a5_read_raster_rs(
     src = src,
     resolution = resolution,
     stat = stat,
+    bands_idx = band_sel$idx,
+    bands_names = band_sel$names,
     threads = threads,
     io_concurrency = io_concurrency
   )

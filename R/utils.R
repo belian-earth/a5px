@@ -47,3 +47,31 @@ new_a5_cell_from_rs <- function(x) {
     class = "a5_cell"
   )
 }
+
+#' Normalise the user-facing `bands` arg into integer indices or character names.
+#' Returns a list(idx = integer(), names = character()); at most one is non-empty.
+#' @noRd
+parse_bands_arg <- function(bands, call = rlang::caller_env()) {
+  if (is.null(bands)) {
+    return(list(idx = integer(), names = character()))
+  }
+  if (is.character(bands)) {
+    if (anyNA(bands) || !length(bands)) {
+      cli::cli_abort("{.arg bands} character vector must be non-empty and contain no NAs.",
+                     call = call)
+    }
+    return(list(idx = integer(), names = bands))
+  }
+  if (is.numeric(bands)) {
+    idx <- vctrs::vec_cast(bands, integer(), x_arg = "bands")
+    if (anyNA(idx) || !length(idx) || any(idx < 1L)) {
+      cli::cli_abort("{.arg bands} integer vector must be non-empty, positive, and contain no NAs.",
+                     call = call)
+    }
+    return(list(idx = idx, names = character()))
+  }
+  cli::cli_abort(
+    "{.arg bands} must be {.code NULL}, an integer vector, or a character vector.",
+    call = call
+  )
+}

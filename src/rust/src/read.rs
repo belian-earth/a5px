@@ -191,13 +191,15 @@ fn process_tile(
     height: usize,
     tile_w: usize,
     tile_h: usize,
-    n_bands: usize,
+    data_n_bands: usize,
+    data_band_offsets: &[usize],
     src_proj: &Proj,
     dst_proj: &Proj,
     gt: &GeoTransform,
     resolution: i32,
     nodata: Option<f64>,
 ) -> Result<AHashMap<u64, Vec<Accum>>> {
+    let n_out = data_band_offsets.len();
     let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
     let actual_h = tile_h.min(height.saturating_sub(ty * tile_h));
     if actual_w == 0 || actual_h == 0 {
@@ -233,8 +235,8 @@ fn process_tile(
     // strides into the underlying flat buffer
     let (h_stride, w_stride, b_stride): (usize, usize, usize) = match planar {
         PlanarConfiguration::Chunky => {
-            // pixel(r, c, b) = data[r * (tile_w * n_bands) + c * n_bands + b]
-            (tile_w * n_bands, n_bands, 1)
+            // pixel(r, c, b) = data[r * (tile_w * data_n_bands) + c * data_n_bands + b]
+            (tile_w * data_n_bands, data_n_bands, 1)
         }
         PlanarConfiguration::Planar => {
             // pixel(b, r, c) = data[b * (tile_h * tile_w) + r * tile_w + c]
@@ -246,11 +248,11 @@ fn process_tile(
             )));
         }
     };
-    let _ = shape; // shape is implied by tile_w/tile_h/n_bands
+    let _ = shape; // shape is implied by tile_w/tile_h/data_n_bands
 
-    // small stack buffer reused per pixel to hold per-band values + validity
-    let mut band_vals: Vec<f64> = vec![0.0; n_bands];
-    let mut band_valid: Vec<bool> = vec![false; n_bands];
+    // small stack buffer reused per pixel to hold per-selected-band values + validity
+    let mut band_vals: Vec<f64> = vec![0.0; n_out];
+    let mut band_valid: Vec<bool> = vec![false; n_out];
 
     // cell-caching: adjacent pixels at fine A5 resolutions frequently fall in the
     // same cell. Avoid re-hashing into the local map when the cell hasn't changed.
@@ -267,19 +269,19 @@ fn process_tile(
         let pixel_base = r * h_stride + c * w_stride;
         let mut any_valid = false;
         if nodata_some {
-            for b in 0..n_bands {
-                let off = pixel_base + b * b_stride;
+            for (out_b, &src_b) in data_band_offsets.iter().enumerate() {
+                let off = pixel_base + src_b * b_stride;
                 let v = read_pixel_chunky(&data, off);
                 let valid = v != nodata_v;
-                band_vals[b] = v;
-                band_valid[b] = valid;
+                band_vals[out_b] = v;
+                band_valid[out_b] = valid;
                 any_valid |= valid;
             }
         } else {
-            for b in 0..n_bands {
-                let off = pixel_base + b * b_stride;
-                band_vals[b] = read_pixel_chunky(&data, off);
-                band_valid[b] = true;
+            for (out_b, &src_b) in data_band_offsets.iter().enumerate() {
+                let off = pixel_base + src_b * b_stride;
+                band_vals[out_b] = read_pixel_chunky(&data, off);
+                band_valid[out_b] = true;
             }
             any_valid = true;
         }
@@ -304,16 +306,16 @@ fn process_tile(
         // local map). We never mutate `local` between setting and reading the
         // pointer when the cell repeats, so the address stays valid.
         let entry: &mut [Accum] = if last_cell == Some(cell) && !last_entry_ptr.is_null() {
-            unsafe { std::slice::from_raw_parts_mut(last_entry_ptr, n_bands) }
+            unsafe { std::slice::from_raw_parts_mut(last_entry_ptr, n_out) }
         } else {
             let v = local
                 .entry(cell)
-                .or_insert_with(|| vec![Accum::new(); n_bands]);
+                .or_insert_with(|| vec![Accum::new(); n_out]);
             last_cell = Some(cell);
             last_entry_ptr = v.as_mut_ptr();
             v.as_mut_slice()
         };
-        for b in 0..n_bands {
+        for b in 0..n_out {
             if band_valid[b] {
                 entry[b].push(band_vals[b]);
             }
@@ -331,6 +333,8 @@ async fn read_raster_async(
     src: &str,
     resolution: i32,
     stat: Stat,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
     io_concurrency: usize,
 ) -> Result<Output> {
     let (store, path) = parse_src(src)?;
@@ -380,11 +384,48 @@ async fn read_raster_async(
 
     let nodata = parse_nodata(&ifd_owned);
     let band_names_v = parse_band_descriptions(&ifd_owned, n_bands);
-    let band_names: Vec<String> = if band_names_v.is_empty() {
+    let all_band_names: Vec<String> = if band_names_v.is_empty() {
         (0..n_bands).map(|i| format!("band_{:02}", i + 1)).collect()
     } else {
         band_names_v
     };
+
+    // resolve band selection to 0-based indices
+    let selected_bands: Vec<usize> = if !bands_idx.is_empty() {
+        bands_idx
+            .iter()
+            .map(|&i| {
+                if i < 1 || (i as usize) > n_bands {
+                    Err(A5CogError::Invalid(format!(
+                        "band index {i} out of range 1..={n_bands}"
+                    )))
+                } else {
+                    Ok((i - 1) as usize)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else if !bands_names.is_empty() {
+        bands_names
+            .iter()
+            .map(|name| {
+                all_band_names
+                    .iter()
+                    .position(|d| d == name)
+                    .ok_or_else(|| {
+                        A5CogError::Invalid(format!(
+                            "band name {name:?} not found; available: {all_band_names:?}"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        (0..n_bands).collect()
+    };
+    let n_out = selected_bands.len();
+    let band_names: Vec<String> = selected_bands
+        .iter()
+        .map(|&i| all_band_names[i].clone())
+        .collect();
 
     let global = Arc::new(StdMutex::new(AHashMap::<u64, Vec<Accum>>::new()));
 
@@ -392,9 +433,21 @@ async fn read_raster_async(
         .flat_map(|y| (0..n_tiles_x).map(move |x| (x, y)))
         .collect();
 
+    // decide once whether the band-aware fetch path applies
+    let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
+        && n_out < n_bands
+        && matches!(
+            ifd_owned.predictor(),
+            None | Some(async_tiff::tags::Predictor::None)
+        );
+    let identity_offsets: Vec<usize> = (0..n_out).collect();
+
     let ifd_arc = Arc::new(ifd_owned);
     let src_proj_arc = Arc::new(src_proj);
     let dst_proj_arc = Arc::new(dst_proj);
+    let selected_bands_arc: Arc<Vec<usize>> = Arc::new(selected_bands);
+    let identity_offsets_arc: Arc<Vec<usize>> = Arc::new(identity_offsets);
+    let registry_arc: Arc<DecoderRegistry> = Arc::new(DecoderRegistry::default());
 
     stream::iter(tiles)
         .map(|(tx, ty)| {
@@ -402,11 +455,33 @@ async fn read_raster_async(
             let ifd = Arc::clone(&ifd_arc);
             let src_proj = Arc::clone(&src_proj_arc);
             let dst_proj = Arc::clone(&dst_proj_arc);
+            let selected_bands = Arc::clone(&selected_bands_arc);
+            let identity_offsets = Arc::clone(&identity_offsets_arc);
+            let registry = Arc::clone(&registry_arc);
             let global = Arc::clone(&global);
             async move {
-                let tile = ifd.fetch_tile(tx, ty, &reader as &dyn AsyncFileReader).await?;
-                let arr = tile.decode(&DecoderRegistry::default())?;
-                let (data, shape, _dt) = arr.into_inner();
+                let (data, shape, data_n_bands_eff, offsets_arc): (
+                    TypedArray,
+                    [usize; 3],
+                    usize,
+                    Arc<Vec<usize>>,
+                ) = if use_band_fetch {
+                    let (typed, sh) = crate::band_fetch::fetch_planar_subset(
+                        &reader as &dyn AsyncFileReader,
+                        &ifd,
+                        tx,
+                        ty,
+                        &selected_bands,
+                        &registry,
+                    )
+                    .await?;
+                    (typed, sh, n_out, Arc::clone(&identity_offsets))
+                } else {
+                    let tile = ifd.fetch_tile(tx, ty, &reader as &dyn AsyncFileReader).await?;
+                    let arr = tile.decode(&registry)?;
+                    let (data, sh, _dt) = arr.into_inner();
+                    (data, sh, n_bands, Arc::clone(&selected_bands))
+                };
                 let local = tokio::task::spawn_blocking(move || {
                     process_tile(
                         tx,
@@ -418,7 +493,8 @@ async fn read_raster_async(
                         height,
                         tile_w,
                         tile_h,
-                        n_bands,
+                        data_n_bands_eff,
+                        &offsets_arc,
                         &src_proj,
                         &dst_proj,
                         &gt,
@@ -431,7 +507,7 @@ async fn read_raster_async(
 
                 let mut g = global.lock().unwrap();
                 for (cell, accs) in local {
-                    let entry = g.entry(cell).or_insert_with(|| vec![Accum::new(); n_bands]);
+                    let entry = g.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
                     for (i, a) in accs.iter().enumerate() {
                         entry[i].merge(a);
                     }
@@ -450,7 +526,7 @@ async fn read_raster_async(
 
     let n = map.len();
     let mut cells = Vec::with_capacity(n);
-    let mut values: Vec<Vec<f64>> = (0..n_bands).map(|_| Vec::with_capacity(n)).collect();
+    let mut values: Vec<Vec<f64>> = (0..n_out).map(|_| Vec::with_capacity(n)).collect();
     for (cell, accs) in map {
         cells.push(cell);
         for (b, a) in accs.iter().enumerate() {
@@ -479,6 +555,10 @@ struct Output {
 /// @param src Path or URL string (file://, http(s)://, s3://, gs://, az://).
 /// @param resolution A5 resolution (0--30).
 /// @param stat One of "mean", "sum", "count", "min", "max".
+/// @param bands_idx 1-based band indices to read. Empty = all (unless
+///   bands_names is non-empty).
+/// @param bands_names Band names to read (matched against the GDAL DESCRIPTION
+///   tag, falling back to band_NN). Empty = all (unless bands_idx is non-empty).
 /// @param threads Worker threads (currently used for tile-level concurrency).
 /// @param io_concurrency Number of tiles fetched concurrently.
 /// @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
@@ -490,6 +570,8 @@ fn a5_read_raster_rs(
     src: &str,
     resolution: i32,
     stat: &str,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
     threads: i32,
     io_concurrency: i32,
 ) -> Result<Robj> {
@@ -497,6 +579,11 @@ fn a5_read_raster_rs(
         return Err(A5CogError::Invalid(format!(
             "resolution must be 0..=30, got {resolution}"
         )));
+    }
+    if !bands_idx.is_empty() && !bands_names.is_empty() {
+        return Err(A5CogError::Invalid(
+            "specify bands by index OR by name, not both".into(),
+        ));
     }
     let stat = Stat::parse(stat)?;
     let threads = threads.max(1) as usize;
@@ -508,7 +595,14 @@ fn a5_read_raster_rs(
         .build()
         .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
 
-    let out: Output = runtime.block_on(read_raster_async(src, resolution, stat, io_concurrency))?;
+    let out: Output = runtime.block_on(read_raster_async(
+        src,
+        resolution,
+        stat,
+        bands_idx,
+        bands_names,
+        io_concurrency,
+    ))?;
 
     let cell_list = u64s_to_raw8_list(&out.cells);
 
