@@ -4,7 +4,7 @@
 # can be read either with or without the polygon-prep cost.
 
 suppressMessages({
-  library(a5cog); library(a5R); library(terra); library(dplyr); library(tibble)
+  library(a5px); library(a5R); library(terra); library(dplyr); library(tibble)
 })
 
 PATH <- "test-tifs/test_cog.tif"

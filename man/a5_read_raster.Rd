@@ -68,7 +68,7 @@ not yet supported.
 }
 \examples{
 \dontrun{
-  path <- system.file("extdata", "example.tif", package = "a5cog")
+  path <- system.file("extdata", "example.tif", package = "a5px")
   tbl <- a5_read_raster(path, resolution = 14)
   tbl
 }

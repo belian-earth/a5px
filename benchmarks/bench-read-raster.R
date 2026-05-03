@@ -1,6 +1,6 @@
 # quick-and-dirty perf probe — install the package first:
 #   R CMD INSTALL --no-test-load --no-docs .
-library(a5cog)
+library(a5px)
 library(a5R)
 
 path <- "test-tifs/test_cog.tif"

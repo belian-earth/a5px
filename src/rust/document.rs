@@ -6,13 +6,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         # nolint start\n\
         \n\
         #' @usage NULL\n\
-        #' @useDynLib a5cog, .registration = TRUE\n\
+        #' @useDynLib a5px, .registration = TRUE\n\
         NULL\n\
         \n\
     ";
     let footer = "# nolint end\n";
-    let wrappers = a5cog::get_a5cog_metadata()
-        .make_r_wrappers(true, "a5cog")
+    let wrappers = a5px::get_a5px_metadata()
+        .make_r_wrappers(true, "a5px")
         .map_err(|e| format!("failed to generate wrappers: {e}"))?;
     std::fs::write(wrapper_path, format!("{header}{wrappers}{footer}"))
         .map_err(|e| format!("failed to write {wrapper_path}: {e}"))?;

@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "a5cog"
+name = "a5px"
 version = "0.1.0"
 dependencies = [
  "a5",

@@ -1,4 +1,4 @@
 library(testthat)
-library(a5cog)
+library(a5px)
 
-test_check("a5cog")
+test_check("a5px")

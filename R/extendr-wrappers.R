@@ -2,12 +2,12 @@
 # nolint start
 
 #' @usage NULL
-#' @useDynLib a5cog, .registration = TRUE
+#' @useDynLib a5px, .registration = TRUE
 NULL
 
-a5cog_set_threads_rs <- function(n) .Call(wrap__a5cog_set_threads_rs, n)
+a5px_set_threads_rs <- function(n) .Call(wrap__a5px_set_threads_rs, n)
 
-a5cog_get_threads_rs <- function() .Call(wrap__a5cog_get_threads_rs)
+a5px_get_threads_rs <- function() .Call(wrap__a5px_get_threads_rs)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells.
 #'

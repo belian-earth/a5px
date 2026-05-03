@@ -1,4 +1,4 @@
-Package: a5cog
+Package: a5px
 Title: Read GeoTIFF and Cloud-Optimised GeoTIFF Rasters as A5 Cells
 Version: 0.0.0.9000
 Authors@R: c(
@@ -13,8 +13,8 @@ Description: Rust-backed reader that aggregates raster pixels directly into
     min, max). Designed to keep large rasters out of memory and skip the vector
     polygonisation step in classical zonal-statistics pipelines.
 License: Apache License (>= 2)
-URL: https://github.com/belian-earth/a5cog
-BugReports: https://github.com/belian-earth/a5cog/issues
+URL: https://github.com/belian-earth/a5px
+BugReports: https://github.com/belian-earth/a5px/issues
 Depends:
     R (>= 4.2)
 Imports:

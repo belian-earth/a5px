@@ -37,17 +37,17 @@ where
 }
 
 #[extendr]
-fn a5cog_set_threads_rs(n: i32) {
+fn a5px_set_threads_rs(n: i32) {
     set_num_threads(n as usize);
 }
 
 #[extendr]
-fn a5cog_get_threads_rs() -> i32 {
+fn a5px_get_threads_rs() -> i32 {
     get_num_threads() as i32
 }
 
 extendr_module! {
     mod threading;
-    fn a5cog_set_threads_rs;
-    fn a5cog_get_threads_rs;
+    fn a5px_set_threads_rs;
+    fn a5px_get_threads_rs;
 }

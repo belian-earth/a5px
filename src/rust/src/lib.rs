@@ -7,7 +7,7 @@ mod read;
 mod threading;
 
 extendr_module! {
-    mod a5cog;
+    mod a5px;
     use threading;
     use read;
 }

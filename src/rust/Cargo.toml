@@ -1,5 +1,5 @@
 [package]
-name = 'a5cog'
+name = 'a5px'
 publish = false
 version = '0.1.0'
 edition = '2021'
@@ -7,7 +7,7 @@ rust-version = '1.80'
 
 [lib]
 crate-type = [ 'rlib', 'staticlib' ]
-name = 'a5cog'
+name = 'a5px'
 
 [[bin]]
 name = 'document'

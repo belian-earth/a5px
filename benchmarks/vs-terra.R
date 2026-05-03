@@ -1,9 +1,9 @@
-# compare a5cog against the two natural terra pipelines for the same job:
+# compare a5px against the two natural terra pipelines for the same job:
 # aggregate every pixel of a Sentinel-2 COG into A5 cells (mean per band).
 # Run after `R CMD INSTALL --no-test-load --no-docs .`
 
 suppressMessages({
-  library(a5cog); library(a5R); library(terra); library(dplyr); library(tibble)
+  library(a5px); library(a5R); library(terra); library(dplyr); library(tibble)
 })
 
 PATH <- "test-tifs/test_cog.tif"
@@ -18,10 +18,10 @@ time_it <- function(label, expr) {
   invisible(list(label = label, t = dt, val = val))
 }
 
-# ---------------------------------------------------------------- a5cog -----
-cat("\n=== a5cog ===\n")
-a5cog_set_threads(8)
-a5_out <- time_it("a5cog mean (8 thr)", {
+# ---------------------------------------------------------------- a5px -----
+cat("\n=== a5px ===\n")
+a5px_set_threads(8)
+a5_out <- time_it("a5px mean (8 thr)", {
   a5_read_raster(PATH, resolution = RES, stat = "mean",
                  threads = 8L, io_concurrency = 16L)
 })$val
@@ -48,7 +48,7 @@ terra_fwd <- time_it("terra forward total", {
 cat(sprintf("  cells: %d\n", nrow(terra_fwd)))
 
 # --------- terra: zonal pipeline (a5_grid -> polygons -> terra::extract) ----
-# This is the "obvious" pre-a5cog approach. Often slow because of polygon
+# This is the "obvious" pre-a5px approach. Often slow because of polygon
 # rasterisation cost. Skip if expected runtime is unreasonable.
 RUN_ZONAL <- TRUE
 if (RUN_ZONAL) {
