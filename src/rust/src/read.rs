@@ -17,9 +17,61 @@ use object_store::path::Path as ObjPath;
 use proj4rs::Proj;
 use proj4rs::transform::transform as proj_transform;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
+
 use crate::cell_raw::u64s_to_raw8_list;
 use crate::error::{A5CogError, Result};
 use crate::geo::{GeoTransform, extract_geotransform, parse_band_descriptions, parse_nodata};
+
+// stage timers (only emit if A5PX_PROFILE env var is set, e.g. A5PX_PROFILE=1)
+static T_FETCH_NS: AtomicU64 = AtomicU64::new(0);
+static T_DECODE_NS: AtomicU64 = AtomicU64::new(0);
+static T_BUILD_PTS_NS: AtomicU64 = AtomicU64::new(0);
+static T_PROJ_NS: AtomicU64 = AtomicU64::new(0);
+static T_INDEX_NS: AtomicU64 = AtomicU64::new(0);
+static T_MERGE_NS: AtomicU64 = AtomicU64::new(0);
+// sub-stage timers inside the per-pixel loop
+static T_PIX_READ_NS: AtomicU64 = AtomicU64::new(0);
+static T_A5_CELL_NS: AtomicU64 = AtomicU64::new(0);
+static T_HM_NS: AtomicU64 = AtomicU64::new(0);
+static T_PUSH_NS: AtomicU64 = AtomicU64::new(0);
+
+fn profile_enabled() -> bool {
+    std::env::var_os("A5PX_PROFILE").is_some()
+}
+
+fn reset_timers() {
+    for t in [
+        &T_FETCH_NS, &T_DECODE_NS, &T_BUILD_PTS_NS, &T_PROJ_NS,
+        &T_INDEX_NS, &T_MERGE_NS,
+        &T_PIX_READ_NS, &T_A5_CELL_NS, &T_HM_NS, &T_PUSH_NS,
+    ] {
+        t.store(0, Ordering::Relaxed);
+    }
+}
+
+fn print_timers(total: f64) {
+    let one = |label: &str, ns: u64| {
+        let s = ns as f64 / 1e9;
+        eprintln!(
+            "  {label:<22} {s:>7.3} s  ({:>5.1}%)",
+            100.0 * s / total
+        )
+    };
+    eprintln!("[a5px profile, total {:.3} s, sum across tile workers]", total);
+    one("io fetch", T_FETCH_NS.load(Ordering::Relaxed));
+    one("decode", T_DECODE_NS.load(Ordering::Relaxed));
+    one("build points", T_BUILD_PTS_NS.load(Ordering::Relaxed));
+    one("proj transform", T_PROJ_NS.load(Ordering::Relaxed));
+    one("a5 index + accum", T_INDEX_NS.load(Ordering::Relaxed));
+    eprintln!("    of which:");
+    one("  pixel read+nodata", T_PIX_READ_NS.load(Ordering::Relaxed));
+    one("  a5 lonlat->cell", T_A5_CELL_NS.load(Ordering::Relaxed));
+    one("  hashmap lookup", T_HM_NS.load(Ordering::Relaxed));
+    one("  push to accums", T_PUSH_NS.load(Ordering::Relaxed));
+    one("merge into global", T_MERGE_NS.load(Ordering::Relaxed));
+}
 
 // ---------------------------------------------------------------------------
 // stat selector
@@ -209,8 +261,11 @@ fn process_tile(
     let src_is_latlong = src_proj.is_latlong();
     let dst_is_latlong = dst_proj.is_latlong();
 
+    let prof = profile_enabled();
+
     // build per-pixel projected coords, transform en-masse
     let n = actual_w * actual_h;
+    let t_pts = Instant::now();
     let mut points: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
     for r in 0..actual_h {
         let row_g = ty * tile_h + r;
@@ -224,8 +279,15 @@ fn process_tile(
             points.push((x, y, 0.0));
         }
     }
+    if prof {
+        T_BUILD_PTS_NS.fetch_add(t_pts.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
+    let t_proj = Instant::now();
     proj_transform(src_proj, dst_proj, &mut points[..])?;
+    if prof {
+        T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
     let mut local: AHashMap<u64, Vec<Accum>> = AHashMap::with_capacity(n / 4);
 
@@ -254,19 +316,30 @@ fn process_tile(
     let mut band_vals: Vec<f64> = vec![0.0; n_out];
     let mut band_valid: Vec<bool> = vec![false; n_out];
 
-    // cell-caching: adjacent pixels at fine A5 resolutions frequently fall in the
-    // same cell. Avoid re-hashing into the local map when the cell hasn't changed.
+    // cell-caching: adjacent pixels at fine A5 resolutions almost always fall in
+    // the same cell. Keep the previous cell's A5Cell and try
+    // `a5cell_contains_point` (a single projection + pentagon test) before
+    // falling back to the full search-based `a5::lonlat_to_cell` (~26 estimates).
     let mut last_cell: Option<u64> = None;
+    let mut last_a5cell: Option<a5::A5Cell> = None;
     let mut last_entry_ptr: *mut Accum = std::ptr::null_mut();
     let nodata_some = nodata.is_some();
     let nodata_v = nodata.unwrap_or(0.0);
 
+    // local sub-stage accumulators (reduced once at end-of-tile)
+    let mut sub_pix: u64 = 0;
+    let mut sub_a5: u64 = 0;
+    let mut sub_hm: u64 = 0;
+    let mut sub_push: u64 = 0;
+
+    let t_idx = Instant::now();
     for (idx, &(lon_o, lat_o, _)) in points.iter().enumerate() {
         let r = idx / actual_w;
         let c = idx % actual_w;
 
         // gather pixel values + validity first; skip pixel entirely if all-nodata
         let pixel_base = r * h_stride + c * w_stride;
+        let t = if prof { Some(Instant::now()) } else { None };
         let mut any_valid = false;
         if nodata_some {
             for (out_b, &src_b) in data_band_offsets.iter().enumerate() {
@@ -285,6 +358,7 @@ fn process_tile(
             }
             any_valid = true;
         }
+        if let Some(t0) = t { sub_pix += t0.elapsed().as_nanos() as u64; }
         if !any_valid {
             continue;
         }
@@ -295,12 +369,31 @@ fn process_tile(
             continue;
         }
 
+        let t = if prof { Some(Instant::now()) } else { None };
         let lonlat = a5::LonLat::new(lon_deg, lat_deg);
-        let cell = match a5::lonlat_to_cell(lonlat, resolution) {
-            Ok(id) => id,
-            Err(_) => continue,
+        let cell = if let (Some(prev_id), Some(prev_a5)) = (last_cell, last_a5cell.as_ref()) {
+            match a5::core::cell::a5cell_contains_point(prev_a5, lonlat) {
+                Ok(d) if d > 0.0 => prev_id,
+                _ => match a5::lonlat_to_cell(lonlat, resolution) {
+                    Ok(id) => {
+                        last_a5cell = a5::core::serialization::deserialize(id).ok();
+                        id
+                    }
+                    Err(_) => continue,
+                },
+            }
+        } else {
+            match a5::lonlat_to_cell(lonlat, resolution) {
+                Ok(id) => {
+                    last_a5cell = a5::core::serialization::deserialize(id).ok();
+                    id
+                }
+                Err(_) => continue,
+            }
         };
+        if let Some(t0) = t { sub_a5 += t0.elapsed().as_nanos() as u64; }
 
+        let t = if prof { Some(Instant::now()) } else { None };
         // SAFETY: `last_entry_ptr` is only dereferenced when `last_cell == Some(cell)`,
         // and the underlying Vec it points into lives in `local` (this function's
         // local map). We never mutate `local` between setting and reading the
@@ -315,11 +408,22 @@ fn process_tile(
             last_entry_ptr = v.as_mut_ptr();
             v.as_mut_slice()
         };
+        if let Some(t0) = t { sub_hm += t0.elapsed().as_nanos() as u64; }
+
+        let t = if prof { Some(Instant::now()) } else { None };
         for b in 0..n_out {
             if band_valid[b] {
                 entry[b].push(band_vals[b]);
             }
         }
+        if let Some(t0) = t { sub_push += t0.elapsed().as_nanos() as u64; }
+    }
+    if prof {
+        T_INDEX_NS.fetch_add(t_idx.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        T_PIX_READ_NS.fetch_add(sub_pix, Ordering::Relaxed);
+        T_A5_CELL_NS.fetch_add(sub_a5, Ordering::Relaxed);
+        T_HM_NS.fetch_add(sub_hm, Ordering::Relaxed);
+        T_PUSH_NS.fetch_add(sub_push, Ordering::Relaxed);
     }
 
     Ok(local)
@@ -460,12 +564,14 @@ async fn read_raster_async(
             let registry = Arc::clone(&registry_arc);
             let global = Arc::clone(&global);
             async move {
+                let prof = profile_enabled();
                 let (data, shape, data_n_bands_eff, offsets_arc): (
                     TypedArray,
                     [usize; 3],
                     usize,
                     Arc<Vec<usize>>,
                 ) = if use_band_fetch {
+                    let t = Instant::now();
                     let (typed, sh) = crate::band_fetch::fetch_planar_subset(
                         &reader as &dyn AsyncFileReader,
                         &ifd,
@@ -475,10 +581,23 @@ async fn read_raster_async(
                         &registry,
                     )
                     .await?;
+                    if prof {
+                        T_FETCH_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
                     (typed, sh, n_out, Arc::clone(&identity_offsets))
                 } else {
+                    let t_fetch = Instant::now();
                     let tile = ifd.fetch_tile(tx, ty, &reader as &dyn AsyncFileReader).await?;
+                    if prof {
+                        T_FETCH_NS
+                            .fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                    let t_dec = Instant::now();
                     let arr = tile.decode(&registry)?;
+                    if prof {
+                        T_DECODE_NS
+                            .fetch_add(t_dec.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
                     let (data, sh, _dt) = arr.into_inner();
                     (data, sh, n_bands, Arc::clone(&selected_bands))
                 };
@@ -505,12 +624,16 @@ async fn read_raster_async(
                 .await
                 .map_err(|e| A5CogError::Invalid(format!("tile join error: {e}")))??;
 
+                let t_merge = Instant::now();
                 let mut g = global.lock().unwrap();
                 for (cell, accs) in local {
                     let entry = g.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
                     for (i, a) in accs.iter().enumerate() {
                         entry[i].merge(a);
                     }
+                }
+                if prof {
+                    T_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
                 Ok::<(), A5CogError>(())
             }
@@ -595,6 +718,12 @@ fn a5_read_raster_rs(
         .build()
         .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
 
+    let prof = profile_enabled();
+    if prof {
+        reset_timers();
+    }
+    let t0 = Instant::now();
+
     let out: Output = runtime.block_on(read_raster_async(
         src,
         resolution,
@@ -603,6 +732,10 @@ fn a5_read_raster_rs(
         bands_names,
         io_concurrency,
     ))?;
+
+    if prof {
+        print_timers(t0.elapsed().as_secs_f64());
+    }
 
     let cell_list = u64s_to_raw8_list(&out.cells);
 
