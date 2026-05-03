@@ -1,2 +1,12 @@
 ^a5cog\.Rproj$
 ^\.Rproj\.user$
+^\.vscode$
+^\.claude$
+^src/\.cargo$
+^src/rust/vendor$
+^src/rust/target$
+^src/Makevars$
+^src/Makevars\.win$
+^benchmarks$
+^test-tifs$
+^NOTES\.md$

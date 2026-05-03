@@ -4,3 +4,13 @@
 .httr-oauth
 .DS_Store
 .quarto
+src/rust/vendor
+src/rust/target
+src/Makevars
+src/Makevars.win
+src/*.so
+src/*.o
+test-tifs/
+.vscode/
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

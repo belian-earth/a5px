@@ -1,0 +1,13 @@
+use extendr_api::prelude::*;
+
+mod cell_raw;
+mod error;
+mod geo;
+mod read;
+mod threading;
+
+extendr_module! {
+    mod a5cog;
+    use threading;
+    use read;
+}
