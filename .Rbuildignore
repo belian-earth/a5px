@@ -10,3 +10,4 @@
 ^benchmarks$
 ^test-tifs$
 ^NOTES\.md$
+^dev\.R$
