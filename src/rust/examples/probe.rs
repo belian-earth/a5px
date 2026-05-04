@@ -1,9 +1,13 @@
-use async_tiff::reader::ObjectReader;
+//! Diagnostic probe for inspecting GeoTIFF metadata as exposed by async-tiff.
+//! Hard-codes a remote URL; prints samples_per_pixel, gdal_nodata, and the
+//! first 4 KiB of GDAL_METADATA. Useful when debugging nodata / band-name
+//! parsing on a new dataset. Run with: `cargo run --release --example probe`.
+
 use async_tiff::metadata::TiffMetadataReader;
 use async_tiff::metadata::cache::ReadaheadMetadataCache;
+use async_tiff::reader::ObjectReader;
 use object_store::ObjectStore;
 use std::sync::Arc;
-use object_store::http::HttpBuilder;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
