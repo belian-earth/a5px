@@ -11,3 +11,4 @@
 ^test-tifs$
 ^NOTES\.md$
 ^dev\.R$
+^README\.Rmd$

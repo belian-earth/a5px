@@ -1,0 +1,201 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "man/figures/README-",
+  out.width = "100%"
+)
+```
+
+# a5px
+
+<!-- badges: start -->
+[![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+<!-- badges: end -->
+
+a5px is a Rust-backed R package that streams GeoTIFF / Cloud-Optimised
+GeoTIFF rasters from local files or cloud object stores and aggregates
+their pixels into [A5 pentagonal DGGS](https://a5geo.org/) cells in a
+single pass.
+
+The output is a tibble (or Arrow table, or Parquet file on disk) keyed
+by `a5R::a5_cell`, ready for SQL-style queries against the resulting
+embeddings or summary statistics. On a 12-band Sentinel-2 COG it is
+roughly **7x faster** than `gdal raster zonal-stats` end-to-end and
+**11x faster** than a hand-rolled `terra + dplyr` pipeline.
+
+## Installation
+
+a5px is not on CRAN. Install the development version from GitHub:
+
+``` r
+# install.packages("pak")
+pak::pak("belian-earth/a5px")
+```
+
+You will need a working [Rust toolchain](https://rustup.rs/) (`cargo`
+and `rustc` >= 1.85) and a recent version of
+[`a5R`](https://github.com/belian-earth/a5R) in your library.
+
+## Quick example
+
+A complete read of a public Cloud-Optimised GeoTIFF (the EOx 2020
+Sentinel-2 cloudless mosaic, RGB) into A5 cells, then a quick
+visualisation:
+
+``` r
+library(a5px)
+
+url <- "https://s2downloads.eox.at/demo/EOxCloudless/2020/rgb_corrected_geodetic/3/0/0.tif"
+
+a5px_set_threads(8)
+EOx <- a5_read_raster(
+  url,
+  resolution     = 6L,
+  stat           = "mean",
+  threads        = 8L,
+  io_concurrency = 16L
+)
+EOx
+#> # A tibble: ... x 4
+#>   cell             band_01 band_02 band_03
+#>   <a5_cell>          <dbl>   <dbl>   <dbl>
+#> ...
+
+# Render the three bands as RGB and view on the globe
+EOx$rgb <- grDevices::rgb(
+  red   = scales::rescale(EOx$band_01, to = c(0, 255)),
+  green = scales::rescale(EOx$band_02, to = c(0, 255)),
+  blue  = scales::rescale(EOx$band_03, to = c(0, 255)),
+  maxColorValue = 255
+)
+
+a5view::a5_view(EOx, fill = rgb, fill_identity = TRUE,
+                border = NULL, globe = TRUE, opacity = 1)
+```
+
+## API surface
+
+### Three reader entry points, same engine
+
+```r
+# 1. tibble path: one numeric column per band, easy R interactivity
+tbl <- a5_read_raster(src, resolution, stat, bands, threads, io_concurrency,
+                      as_vector = FALSE)
+
+# 2. arrow Table path: cell + FixedSizeList<float, n_bands> value column
+arr <- a5_read_raster_arrow(src, resolution, stat, bands, threads,
+                            io_concurrency, value_type = "float64")
+
+# 3. Rust-direct Parquet path: skips the R-side Arrow round-trip entirely
+a5_raster_to_parquet(src, dest, resolution, stat, bands, value_type,
+                     compression, threads, io_concurrency)
+
+# Convenience writer for either (1) or (2)
+a5_write_parquet(x, dest, compression = "zstd", ...)
+```
+
+All three readers share the same arguments:
+
+- `src` --- path or URL. Schemes: local, `file://`, `http(s)://`,
+  `s3://`, `gs://`, `az://`. Cloud reads stream byte ranges; the full
+  file is never materialised.
+- `resolution` --- A5 resolution (0--30); see `a5R::a5_cell_area()`.
+- `stat` --- one or more of `"mean"`, `"sum"`, `"count"`, `"min"`,
+  `"max"`. A vector emits one column per (band, stat) pair on the
+  tibble path and one FixedSizeList per stat on the Arrow / Parquet
+  paths.
+- `bands` --- `NULL` (all), integer indices (1-based), or character
+  band names matched against the GDAL `DESCRIPTION` tag.
+- `threads`, `io_concurrency` --- tile-level concurrency.
+
+### Multi-stat in one pass
+
+```r
+# sum and count let you merge multi-tile aggregates without re-reading
+agg <- a5_read_raster(src, resolution = 14L,
+                      stat = c("mean", "sum", "count"))
+# columns: cell, B02__mean, B02__sum, B02__count, B03__mean, ...
+```
+
+### Band selection on the wire
+
+For planar (`INTERLEAVE=BAND`) COGs --- common in embedding rasters
+like Alpha Earth Foundations --- requesting `bands = 1:8` only fetches
+the byte ranges of those bands. Reading 8 of 64 bands from a 2.8 GB
+AEF tile drops from 62 s to 24 s end-to-end.
+
+```r
+url <- "https://data.source.coop/.../tile.tiff"
+a5_raster_to_parquet(
+  url, "embeddings.parquet",
+  resolution     = 14L,
+  bands          = 1:8,
+  value_type     = "float32",
+  compression    = "zstd",
+  threads        = 16L,
+  io_concurrency = 16L
+)
+```
+
+### Configuration
+
+```r
+a5px_set_threads(8)                  # global default
+a5px_get_threads()                   # current
+options(a5px.threads = 8)            # picked up at .onLoad
+Sys.setenv(A5PX_NUM_THREADS = "8")   # ditto
+Sys.setenv(A5PX_PROFILE = "1")       # dump stage timings to stderr
+```
+
+## What's supported
+
+- **Formats** --- tiled GeoTIFF and Cloud-Optimised GeoTIFF, ZSTD /
+  Deflate / LZW / JPEG / uncompressed.
+- **CRS resolution** --- EPSG codes, WKT in citation fields, and
+  reconstruction from explicit GeoKey parameters. Custom centered
+  projections written by GDAL (`+proj=laea +lon_0=... +lat_0=...`,
+  Albers, LCC, polar stereographic, etc.) are recognised without
+  needing an EPSG number.
+- **NoData** --- dataset-wide `TIFFTAG_GDAL_NODATA` is honoured with
+  NaN-safe comparison.
+
+## Not yet supported
+
+- Strip-based GeoTIFFs (errors with a clear message).
+- Per-band nodata --- a GeoTIFF spec limitation; will land with VRT
+  support.
+- Inverse / cell-driven mode for `pixel_area > cell_area`.
+- Antimeridian-crossing rasters.
+
+## Stack
+
+- [`async-tiff`](https://crates.io/crates/async-tiff) +
+  [`object_store`](https://crates.io/crates/object_store) for streamed
+  reads.
+- [`proj4rs`](https://crates.io/crates/proj4rs) for pure-Rust CRS
+  reprojection;
+  [`proj4wkt`](https://crates.io/crates/proj4wkt) for the WKT-only
+  fallback.
+- [`a5`](https://crates.io/crates/a5) for cell math.
+- [`arrow-array`](https://crates.io/crates/arrow-array) +
+  [`parquet`](https://crates.io/crates/parquet) for the Rust-direct
+  Parquet writer.
+- [`extendr-api`](https://extendr.rs/extendr/extendr_api/) for the R
+  bindings.
+
+## Acknowledgements
+
+Built on the [a5 Rust crate](https://github.com/felixpalmer/a5-rs) by
+[Felix Palmer](https://github.com/felixpalmer) and
+[`a5R`](https://github.com/belian-earth/a5R) for the cell type and
+Arrow interop. Streaming I/O and TIFF parsing courtesy of the
+[`async-tiff`](https://github.com/developmentseed/async-tiff) team at
+Development Seed.
