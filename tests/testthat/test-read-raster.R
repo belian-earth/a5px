@@ -145,6 +145,21 @@ test_that("a5_read_raster validates resolution", {
   expect_error(a5_read_raster(path, resolution = -1), "must be between")
 })
 
+test_that("NaN nodata is filtered (NaN-safe comparison)", {
+  path <- system.file("extdata", "nan_nodata.tif", package = "a5px")
+  skip_if(path == "", "nan_nodata.tif not installed")
+
+  m   <- a5_read_raster(path, resolution = 16L, stat = "mean")
+  cnt <- a5_read_raster(path, resolution = 16L, stat = "count")
+
+  expect_setequal(setdiff(names(m), "cell"), c("x", "y"))
+  expect_false(any(is.nan(m$x)))
+  expect_false(any(is.nan(m$y)))
+  # raster is 32x32 with 5 NaN-nodata pixels per band -> 1019 valid pixels each
+  expect_equal(sum(cnt$x), 1019)
+  expect_equal(sum(cnt$y), 1019)
+})
+
 test_that("a5_read_raster errors on non-georeferenced TIFF", {
   skip_no_tifs()
   path <- file.path(tif_dir(), "test_non_geo.tif")

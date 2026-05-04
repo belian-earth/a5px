@@ -22,7 +22,9 @@ use std::time::Instant;
 
 use crate::cell_raw::u64s_to_raw8_list;
 use crate::error::{A5CogError, Result};
-use crate::geo::{GeoTransform, extract_geotransform, parse_band_descriptions, parse_nodata};
+use crate::geo::{
+    GeoTransform, extract_geotransform, is_nodata, parse_band_descriptions, parse_nodata,
+};
 
 // stage timers (only emit if A5PX_PROFILE env var is set, e.g. A5PX_PROFILE=1)
 static T_FETCH_NS: AtomicU64 = AtomicU64::new(0);
@@ -323,8 +325,8 @@ fn process_tile(
     let mut last_cell: Option<u64> = None;
     let mut last_a5cell: Option<a5::A5Cell> = None;
     let mut last_entry_ptr: *mut Accum = std::ptr::null_mut();
-    let nodata_some = nodata.is_some();
-    let nodata_v = nodata.unwrap_or(0.0);
+    // hoist nodata branch out of the per-pixel loop
+    let nodata_v = nodata;
 
     // local sub-stage accumulators (reduced once at end-of-tile)
     let mut sub_pix: u64 = 0;
@@ -341,11 +343,11 @@ fn process_tile(
         let pixel_base = r * h_stride + c * w_stride;
         let t = if prof { Some(Instant::now()) } else { None };
         let mut any_valid = false;
-        if nodata_some {
+        if let Some(nd) = nodata_v {
             for (out_b, &src_b) in data_band_offsets.iter().enumerate() {
                 let off = pixel_base + src_b * b_stride;
                 let v = read_pixel_chunky(&data, off);
-                let valid = v != nodata_v;
+                let valid = !is_nodata(v, nd);
                 band_vals[out_b] = v;
                 band_valid[out_b] = valid;
                 any_valid |= valid;

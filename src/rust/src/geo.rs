@@ -61,9 +61,35 @@ pub(crate) fn extract_geotransform(ifd: &ImageFileDirectory) -> Result<GeoTransf
     Ok(GeoTransform([gt0, gt1, gt2, gt3, gt4, gt5]))
 }
 
+/// Dataset-wide nodata, parsed from the `TIFFTAG_GDAL_NODATA` ASCII tag that
+/// async-tiff exposes via [`ImageFileDirectory::gdal_nodata`].
+///
+/// GeoTIFF only supports a single nodata value per dataset; if the writer
+/// originally had per-band nodata, GDAL collapses to the most recent value
+/// (with a warning) and writes the single tag. True per-band nodata requires
+/// VRT or a sidecar metadata file, which a5px does not yet read.
+///
+/// Parses common GDAL spellings: integers, decimals, scientific notation,
+/// `nan`, `+nan`, `inf`, `-inf`. Returns `None` if the tag is absent or the
+/// value can't be parsed as f64.
 pub(crate) fn parse_nodata(ifd: &ImageFileDirectory) -> Option<f64> {
     let s = ifd.gdal_nodata()?;
-    s.trim().parse::<f64>().ok()
+    let t = s.trim();
+    // case-insensitive nan: f64::from_str only accepts lowercase
+    let lc = t.to_ascii_lowercase();
+    lc.parse::<f64>().ok()
+}
+
+/// Compare a pixel value against a nodata sentinel, with NaN-safe semantics.
+/// `nodata` of `NaN` matches any pixel where `v.is_nan()` (since NaN != NaN
+/// under IEEE 754, a naive `v == nodata` would never match).
+#[inline]
+pub(crate) fn is_nodata(v: f64, nodata: f64) -> bool {
+    if nodata.is_nan() {
+        v.is_nan()
+    } else {
+        v == nodata
+    }
 }
 
 /// Parse GDAL's per-band `<Item name="DESCRIPTION" sample="N">band_name</Item>`
@@ -76,7 +102,23 @@ pub(crate) fn parse_band_descriptions(ifd: &ImageFileDirectory, n_bands: usize) 
     };
     let mut out: Vec<String> = (0..n_bands).map(|i| format!("band_{:02}", i + 1)).collect();
     let mut found_any = false;
-    // crude tag scan; full XML parser unnecessary for this single shape
+    walk_items(xml, |sample, attrs, body| {
+        if !attr_eq(attrs, "name", "DESCRIPTION") {
+            return;
+        }
+        if let Some(s) = sample {
+            if s < n_bands {
+                out[s] = body.trim().to_string();
+                found_any = true;
+            }
+        }
+    });
+    if found_any { out } else { Vec::new() }
+}
+
+/// Walk every `<Item ...>body</Item>` element and call `f(sample, attrs, body)`.
+/// `sample` is the parsed value of the `sample="N"` attribute, if present.
+fn walk_items<F: FnMut(Option<usize>, &str, &str)>(xml: &str, mut f: F) {
     let mut rest = xml;
     while let Some(idx) = rest.find("<Item") {
         rest = &rest[idx..];
@@ -90,21 +132,20 @@ pub(crate) fn parse_band_descriptions(ifd: &ImageFileDirectory, n_bands: usize) 
             None => break,
         };
         let body = &rest[close + 1..body_end];
-        if attrs.contains("name=\"DESCRIPTION\"") {
-            // sample="N"
-            if let Some(s_idx) = attrs.find("sample=\"") {
-                let tail = &attrs[s_idx + "sample=\"".len()..];
-                if let Some(q) = tail.find('"') {
-                    if let Ok(sample) = tail[..q].parse::<usize>() {
-                        if sample < n_bands {
-                            out[sample] = body.trim().to_string();
-                            found_any = true;
-                        }
-                    }
-                }
-            }
-        }
+        let sample = parse_attr(attrs, "sample").and_then(|s| s.parse::<usize>().ok());
+        f(sample, attrs, body);
         rest = &rest[body_end + "</Item>".len()..];
     }
-    if found_any { out } else { Vec::new() }
+}
+
+fn parse_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("{}=\"", name);
+    let i = attrs.find(&needle)?;
+    let tail = &attrs[i + needle.len()..];
+    let q = tail.find('"')?;
+    Some(&tail[..q])
+}
+
+fn attr_eq(attrs: &str, name: &str, value: &str) -> bool {
+    parse_attr(attrs, name) == Some(value)
 }
