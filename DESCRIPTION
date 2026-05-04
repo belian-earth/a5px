@@ -24,8 +24,11 @@ Imports:
     tibble,
     vctrs (>= 0.6.0)
 Suggests:
+    a5view,
     testthat (>= 3.0.0),
     withr
+Remotes:
+    belian-earth/a5view
 Config/testthat/edition: 3
 Config/rextendr/version: 0.5.0
 SystemRequirements: Cargo (Rust's package manager), rustc >= 1.80.0
