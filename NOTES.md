@@ -1,124 +1,198 @@
-# a5px — overnight prototype notes
+# a5px — current state
 
-Status as of 2026-05-02 ~01:30. Forward (pixel-driven) raster → A5 cell engine
-is built, tested, and benchmarked. Ready for you to drive next.
+Last updated 2026-05-04. Forward (pixel-driven) raster → A5 cell engine,
+streamed via async-tiff + object_store, with three output paths
+(tibble / Arrow Table / direct-to-Parquet) and a verified cloud read of
+Source Cooperative AEF embeddings.
 
-## What works
+## Public API
 
-- `a5_read_raster(src, resolution, stat = "mean", threads, io_concurrency, as_vector)`
-  - `src`: local path now; URL/HTTP/S3/GCS/Azure paths are wired through but
-    not exercised this session.
-  - `stat`: `mean` / `sum` / `count` / `min` / `max`.
-  - `as_vector = TRUE`: collapses bands into a single list-column `value`
-    (length-N numeric vectors per cell). Default off — one numeric col per band.
-  - Output: a `tibble` keyed by `cell` (`a5R::a5_cell` — interoperable with the
-    rest of the a5R toolchain, including `a5R::a5_cell_to_arrow()` for Parquet).
-- Threading: `a5px_set_threads(n)` and `a5px_get_threads()`. Per-call
-  override via the `threads` / `io_concurrency` args.
-- Validates against `terra::extract` to within ~0.2–0.5% on test rasters
-  (residual = cell-mean-of-means vs pixel-mean weighting).
+### Reading
+
+- `a5_read_raster(src, resolution, stat, bands, threads, io_concurrency, as_vector)`
+  → `tibble` keyed by `cell` (`a5R::a5_cell`) with one numeric column per band.
+- `a5_read_raster_arrow(src, resolution, stat, bands, threads, io_concurrency, value_type)`
+  → `arrow::Table` with `cell:uint64` and `value:FixedSizeList<float, n_bands>`.
+  `value_type` is `"float64"` or `"float32"`. Schema metadata captures band names,
+  resolution, stat (preserved through Parquet round-trip).
+- `a5_raster_to_parquet(src, dest, resolution, stat, bands, value_type, compression, ...)`
+  Rust-direct: read + RecordBatch build + Parquet write all in Rust. Skips the
+  per-cell list-of-vectors materialisation that the R-Arrow path pays.
+
+### Writing
+
+- `a5_write_parquet(x, dest, compression = "zstd", ...)` — accepts the Arrow
+  Table from `a5_read_raster_arrow()` or any `data.frame` from
+  `a5_read_raster()` (per-band columns or `as_vector` list column).
+
+### Args common to all readers
+
+- `src`: local path **or** URL (`http(s)://`, `s3://`, `gs://`, `az://`, `file://`).
+  S3/GCS/Azure go through `object_store::parse_url` with the matching feature
+  enabled.
+- `bands`: `NULL` (all), integer vector (1-based indices), or character vector
+  (matched against the GDAL `DESCRIPTION` tag, falling back to `band_NN`).
+- `stat`: `mean` / `sum` / `count` / `min` / `max`.
+- `threads`, `io_concurrency`: tile-level concurrency knobs. Defaults `1` and `8`.
+
+### Threading helpers
+
+- `a5px_set_threads(n)` / `a5px_get_threads()`. Also picks up `A5PX_NUM_THREADS`
+  env or `options(a5px.threads = ...)` via `.onLoad`.
+
+### Profiler
+
+- Set env `A5PX_PROFILE=1` to dump stage and sub-stage timings to stderr
+  (io fetch / decode / build points / proj transform / a5 lonlat→cell /
+  hashmap / push / merge). Sums across tile workers; divide by effective
+  concurrency for wall.
 
 ## Stack
 
-- `async-tiff` 0.3 + `object_store` 0.13 (object-store schemes enabled: aws,
-  gcp, azure, http) — streamed, never loads the full raster.
-- `proj4rs` 0.1 with `crs-definitions` — pure-Rust CRS reprojection, EPSG-driven.
+- `async-tiff` 0.3 with `tokio` + `object_store` + `reqwest` features.
+- `object_store` 0.13 (aws / gcp / azure / http enabled).
+- `proj4rs` 0.1 with `crs-definitions` for EPSG → proj string.
 - `a5` 0.7.3 for cell math.
-- `tokio` (multi-thread) for tile I/O concurrency, plus `spawn_blocking` for
-  the per-tile CPU work.
-- `extendr-api` 0.9 for R bindings; rextendr 0.5 scaffold.
+- `arrow-array` / `arrow-buffer` / `arrow-schema` 58 + `parquet` 58 for the
+  Rust-direct Parquet writer (zstd + snappy codecs enabled).
+- `extendr-api` 0.9 + rextendr 0.5.
+- Rust 1.85 (parquet 58 requirement).
 
-## Benchmark snapshot
+## Performance
 
-`test-tifs/test_cog.tif` (Sentinel-2, 4959 × 4190 × 12 bands, UInt16, COG,
-EPSG:32650, ≈26 M pixels) → A5 res 16 mean:
+### Local Sentinel-2 COG (test_cog.tif: 4959 × 4190 × 12 bands, A5 res 16)
 
-| threads | io_conc | median (s) | cells   |
-|---------|---------|-----------:|--------:|
-| 1       | 4       |      26.1  | 254 420 |
-| 2       | 4       |      24.4  | 254 420 |
-| 4       | 4       |      23.3  | 254 420 |
-| 8       | 8       |      14.4  | 254 420 |
-| 16      | 16      |      10.3  | 254 420 |
+| Stage | Wall |
+|---|---:|
+| Single-threaded baseline (post-cache) | 8.8 s |
+| 8 threads | 5.0 s |
+| 16 threads | 5.0 s (plateau) |
 
-Best pipeline run on this machine: ~9.6 s (release build, 8 threads).
+Started at ~9.5 s with 8 threads; the A5-cell cache (a `a5cell_contains_point`
+fast-path before the search-based `lonlat_to_cell`) dropped it to ~5 s. Over 16
+cores the bottleneck is now CPU-bound a5 indexing (~190 ns/px on cache hits,
+26 M pixels), not I/O or HashMap merge.
 
-### vs other pipelines (same job, same machine, 12-band COG → A5 res 16 mean)
+### Comparison vs other pipelines (same job)
 
-| Pipeline                                         | Wall (s) | vs a5px |
-|--------------------------------------------------|---------:|---------:|
-| **a5px**                                        |   **9.54** |       — |
-| GDAL `gdal raster zonal-stats` (raster strategy, CLI only) | 38.69 | 4.1× |
-| GDAL `gdal raster zonal-stats` total (incl. polygon prep)  | 70.73 | 7.4× |
-| terra forward (R reproject + a5_lonlat_to_cell + dplyr) | 102.65 | 10.8× |
-| terra zonal (`a5_grid` → polys → `terra::extract`)         |    killed |       — |
+| Pipeline | Wall |
+|---|---:|
+| **a5px** | **5.0 s** |
+| GDAL `gdal raster zonal-stats` (CLI only, raster strategy) | 38.7 s |
+| GDAL `gdal raster zonal-stats` total (incl. polygon prep) | 70.7 s |
+| terra forward (R reproject + a5R + dplyr) | 102.7 s |
+| terra zonal (`a5_grid` → polys → `terra::extract`) | killed |
 
-Polygon prep alone (a5_grid + boundary + project + writeVector) costs ≈ 32 s
-for 264 k cells covering this raster. a5px skips this entirely.
+### Cloud (AEF on Source Cooperative, 8192² × 64 Int8 ZSTD planar COG)
 
-The 1→16 thread plateau (~2.5× speedup) suggests Mutex contention on the
-global cell map or per-tile alloc churn rather than CPU saturation. Next
-session, profile with `perf` and compare:
-- replace `Mutex<AHashMap>` with rayon parallel iter + tree-reduce of
-  per-tile maps;
-- pool the per-tile `Vec<(f64,f64,f64)>` projection buffer;
-- specialise `read_pixel_chunky` per `TypedArray` variant once per tile
-  instead of matching per pixel.
+| Path | bands | Wall |
+|---|---:|---:|
+| 64 (full) | 64 | 61.8 s |
+| 1 (band-aware fetch) | 1 | 22.2 s |
+| 8 → arrow → parquet (R Arrow path) | 8 | 31.3 s |
+| 8 → parquet (Rust-direct) | 8 | **24.2 s** |
+
+`a5_raster_to_parquet` produces bit-identical Parquet to the R-Arrow path
+(verified by test). The 7 s saving is the eliminated R-side
+list-of-vectors construction; it scales with `n_cells × n_bands`.
 
 ## Correctness / behaviour
 
 - Pixels with all-bands == nodata are dropped before the cell entry is
-  registered (no spurious all-NaN rows).
-- Per-band nodata via `GDAL_METADATA` XML is **not** parsed yet — only the
-  dataset-level `GDAL_NODATA` tag. Sentinel-2 sets a uniform 0 nodata so this
-  is fine for now; multi-band heterogeneous nodata is a TODO.
-- `Scale` / `Offset` are **not** applied. Returned values are in the raster's
-  native domain. The user can apply per-band scale/offset on the R side.
-- Source CRS detection currently relies on the EPSG code in the GeoKeyDirectory
-  (`projected_type` or `geographic_type`). If a GeoTIFF embeds a WKT-only CRS
-  with no EPSG code, the read will error with "missing geokey: EPSG code".
-  Fallback path (parse PROJ string from explicit GeoKeys) is queued for next
-  session.
+  registered.
+- **Nodata is dataset-wide** by GeoTIFF spec (`TIFFTAG_GDAL_NODATA`). a5px
+  parses that tag with case-insensitive `nan` / `inf` support and uses a
+  NaN-safe comparison so a NaN sentinel actually matches NaN pixels (the
+  IEEE-754 `==` gotcha). Per-band nodata in GeoTIFF is not possible; VRT
+  is the future per-band path (see Open work).
+- `Scale` / `Offset` are not applied. Returned values are in the raster's
+  native domain.
+- CRS detection uses the EPSG code in the GeoKeyDirectory
+  (`projected_type` or `geographic_type`). WKT-only CRS without an EPSG
+  code errors with "missing geokey: EPSG code". (See Open work.)
+- Cross-checked against `terra::extract` to within ~0.2–0.5 % (residual is
+  cell-mean-of-means vs pixel-mean weighting at cell edges).
 
-## Files added / changed
+## Tests
+
+`devtools::test()` → 58/58.
+
+- `tests/testthat/test-read-raster.R` covers core read, stat semantics
+  (`min ≤ mean ≤ max`, `sum = mean × count`), `as_vector`, band selection
+  (by index and by name), invalid resolution, missing file, non-georef
+  TIFF rejection, NaN nodata filtering.
+- `tests/testthat/test-arrow.R` covers `a5_read_raster_arrow()` schema +
+  metadata + value-equality vs the tibble path, `a5_write_parquet`
+  round-trip for both inputs (Arrow Table and tibble), and bit-equality
+  between the R-Arrow and Rust-direct Parquet outputs.
+
+Test fixtures:
+
+- `test-tifs/` (gitignored, large) — Sentinel-2 + Exeter COGs for local
+  benchmarks and core tests.
+- `inst/extdata/nan_nodata.tif` (8 KiB, committed) — NaN-nodata regression
+  fixture, ships with the package.
+
+## File map
 
 ```
-DESCRIPTION                          # populated, Imports a5R + cli + rlang + tibble + vctrs
-NAMESPACE                             # generated by rextendr::document()
-NOTES.md                              # this file
+DESCRIPTION                          # Imports a5R, arrow (Suggests), ...
+NAMESPACE
+NOTES.md                             # this file
 R/
-  read.R                              # a5_read_raster()
-  threads.R                           # a5px_set_threads / a5px_get_threads
-  utils.R                             # check_resolution, new_a5_cell_from_rs, etc.
-  zzz.R                               # .onLoad — picks up A5PX_NUM_THREADS / option
-  extendr-wrappers.R                  # auto-generated, do not edit
-src/rust/Cargo.toml                   # async-tiff + object_store + proj4rs + a5 + tokio + rayon
+  arrow.R                            # a5_read_raster_arrow, a5_write_parquet, a5_raster_to_parquet
+  read.R                             # a5_read_raster
+  threads.R                          # a5px_set_threads / a5px_get_threads
+  utils.R                            # check_resolution, new_a5_cell_from_rs, parse_bands_arg
+  zzz.R                              # .onLoad — A5PX_NUM_THREADS / options(a5px.threads=)
+  extendr-wrappers.R                 # auto-generated by rextendr
+inst/extdata/
+  nan_nodata.tif                     # 32x32 Float32 fixture for NaN-nodata test
+src/rust/Cargo.toml                  # async-tiff, object_store, proj4rs, a5, arrow*, parquet, ...
 src/rust/src/
   lib.rs
-  threading.rs                        # rayon pool (mirror of a5R)
-  cell_raw.rs                         # u64 → b1..b8 list
+  threading.rs                       # rayon pool
+  cell_raw.rs                        # u64 → b1..b8 list
   error.rs
-  geo.rs                              # geotransform, nodata, band-name parsing
-  read.rs                             # async pipeline + process_tile + extendr binding
-benchmarks/bench-read-raster.R
-tests/testthat/test-read-raster.R     # 21 passing tests
+  geo.rs                             # geotransform, nodata, band-name parsing
+  band_fetch.rs                      # planar tile band-subset fetch path
+  read.rs                            # async pipeline + process_tile + extendr bindings
+  parquet_write.rs                   # Rust-direct RecordBatch + Parquet writer
+src/rust/examples/probe.rs           # diagnostic dump of GDAL metadata for a remote COG
+benchmarks/
+  bench-read-raster.R                # thread sweep
+  vs-terra.R                         # a5px vs terra
+  vs-gdal-zonal.R                    # a5px vs gdal raster zonal-stats CLI
+tests/testthat/
+  test-read-raster.R
+  test-arrow.R
 ```
 
 ## Open work (in priority order)
 
-1. URL / HTTP / S3 path testing — code path is wired but not exercised.
-2. Profile and remove the multi-thread plateau (see "Benchmark snapshot").
-3. Per-band nodata parsing from GDAL_METADATA XML.
-4. `as_vector = TRUE` Arrow-fixed-size-list output for embedding rasters
-   (currently it materialises an R list, fine but not zero-copy to Parquet).
-5. Strip-based (non-tiled) GeoTIFF support — currently errors with a clear
-   "MVP requires tiled TIFF" message.
-6. Inverse / cell-driven mode for the case `pixel_area > cell_area`.
-7. Bench against the current pipeline (`a5embeddings` / whatever lives in
-   that repo) to confirm the bottleneck is actually moved.
+1. **VRT support** — opens up per-band nodata, on-the-fly CRS warp, multi-tile
+   mosaics. Async-tiff doesn't read VRT directly so this needs a thin
+   reader (probably `gdalraster` for setup + a custom URL list resolver).
+2. **WKT-only CRS fallback** — when a GeoTIFF has a CRS-by-WKT but no EPSG
+   code, fall back to `proj4wkt-rs` to extract a proj string. Currently
+   errors with "missing geokey: EPSG code".
+3. **Multi-thread plateau past 8 cores** — at 16 threads the local read
+   gains nothing over 8. Profile with `perf` to confirm whether it's
+   genuine CPU saturation, AHashMap-merge contention, or `spawn_blocking`
+   pool overhead. Possible fixes: rayon par_iter over tiles + tree-reduce
+   instead of tokio + Mutex; per-thread map pool.
+4. **Strip-based GeoTIFFs** — currently errors with a clear "MVP requires
+   tiled TIFF" message. Most modern COGs are tiled, but plain TIFFs
+   sometimes aren't.
+5. **Inverse / cell-driven mode** — for the case where `pixel_area >
+   cell_area` (rare for embeddings, common for ML probability rasters
+   sampled to a coarser DGGS).
+6. **Tighter perf around a5 indexing** — `a5::lonlat_to_cell_with_hint`
+   upstream PR would replace our `a5cell_contains_point` fast-path with
+   a proper API and clean up the unsafe pointer caching of the previous
+   cell entry.
 
-## Permissions / settings note
+## Permissions / settings
 
-`.claude/settings.local.json` was rewritten a few times during this session;
-the version in tree at end-of-session has the broad allowlist (`Bash(cargo *)`,
-`Bash(Rscript *)`, etc). If you'd rather a tighter list, narrow it.
+`.claude/settings.local.json` is gitignored and contains the broad project
+allowlist (`Bash(cargo *)`, `Bash(Rscript *)`, etc). Tighten if desired.
