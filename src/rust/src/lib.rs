@@ -1,5 +1,8 @@
 use extendr_api::prelude::*;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod band_fetch;
 mod cell_raw;
 mod error;
