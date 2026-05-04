@@ -75,6 +75,35 @@ test_that("a5_write_parquet accepts a tibble from a5_read_raster (per-band)", {
   expect_setequal(names(back), c("cell", "B02", "B03"))
 })
 
+test_that("multi-stat arrow path produces one FSL per stat", {
+  testthat::skip_if_not_installed("arrow")
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  tbl <- a5_read_raster_arrow(path, resolution = 12L,
+                              stat = c("mean", "count"),
+                              bands = c("B02", "B03"))
+  expect_setequal(names(tbl), c("cell", "mean", "count"))
+  expect_match(tbl$mean$type$ToString(),  "fixed_size_list<[A-Za-z]+: double>\\[2\\]")
+  expect_match(tbl$count$type$ToString(), "fixed_size_list<[A-Za-z]+: double>\\[2\\]")
+  expect_equal(tbl$schema$metadata$a5px_stats, "mean\ncount")
+})
+
+test_that("multi-stat parquet (Rust-direct) round-trips", {
+  testthat::skip_if_not_installed("arrow")
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  dest <- withr::local_tempfile(fileext = ".parquet")
+  a5_raster_to_parquet(path, dest, resolution = 12L,
+                       stat = c("mean", "count"), bands = 1:2)
+  back <- arrow::read_parquet(dest, as_data_frame = FALSE)
+  expect_setequal(names(back), c("cell", "mean", "count"))
+  expect_equal(back$schema$metadata$a5px_stats, "mean\ncount")
+})
+
 test_that("a5_raster_to_parquet matches the R-Arrow path bit-for-bit", {
   testthat::skip_if_not_installed("arrow")
   skip_no_tifs()

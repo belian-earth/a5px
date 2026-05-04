@@ -48,6 +48,31 @@ new_a5_cell_from_rs <- function(x) {
   )
 }
 
+#' Validate the user-facing `stat` arg into a non-empty character vector of
+#' valid stat names.
+#' @noRd
+check_stats <- function(stat, call = rlang::caller_env()) {
+  valid <- c("mean", "sum", "count", "min", "max")
+  if (!is.character(stat) || length(stat) == 0L || anyNA(stat)) {
+    cli::cli_abort(
+      "{.arg stat} must be a non-empty character vector with no NAs.",
+      call = call
+    )
+  }
+  bad <- setdiff(stat, valid)
+  if (length(bad) > 0L) {
+    cli::cli_abort(
+      c("Unknown stat(s): {.val {bad}}.",
+        "i" = "Valid: {.val {valid}}."),
+      call = call
+    )
+  }
+  if (anyDuplicated(stat) > 0L) {
+    cli::cli_abort("{.arg stat} must not contain duplicates.", call = call)
+  }
+  invisible(stat)
+}
+
 #' Normalise the user-facing `bands` arg into integer indices or character names.
 #' Returns a list(idx = integer(), names = character()); at most one is non-empty.
 #' @noRd

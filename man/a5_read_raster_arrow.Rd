@@ -7,7 +7,7 @@
 a5_read_raster_arrow(
   src,
   resolution,
-  stat = c("mean", "sum", "count", "min", "max"),
+  stat = "mean",
   bands = NULL,
   threads = 1L,
   io_concurrency = 8L,

@@ -8,7 +8,7 @@ a5_raster_to_parquet(
   src,
   dest,
   resolution,
-  stat = c("mean", "sum", "count", "min", "max"),
+  stat = "mean",
   bands = NULL,
   value_type = c("float64", "float32"),
   compression = c("zstd", "snappy", "none"),

@@ -29,7 +29,7 @@
 #' }
 a5_read_raster_arrow <- function(src,
                                  resolution,
-                                 stat = c("mean", "sum", "count", "min", "max"),
+                                 stat = "mean",
                                  bands = NULL,
                                  threads = 1L,
                                  io_concurrency = 8L,
@@ -39,7 +39,7 @@ a5_read_raster_arrow <- function(src,
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
-  stat <- rlang::arg_match(stat)
+  stats <- check_stats(stat)
   threads <- check_scalar_count(threads, "threads")
   io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
   value_type <- rlang::arg_match(value_type)
@@ -48,7 +48,7 @@ a5_read_raster_arrow <- function(src,
   out <- a5_read_raster_flat_rs(
     src = src,
     resolution = resolution,
-    stat = stat,
+    stats = stats,
     bands_idx = band_sel$idx,
     bands_names = band_sel$names,
     threads = threads,
@@ -58,27 +58,38 @@ a5_read_raster_arrow <- function(src,
   cells <- new_a5_cell_from_rs(out$cell)
   band_names <- as.character(out$band_names)
   n_bands <- as.integer(out$n_bands)
-  flat <- out$value_flat
+  stats_out <- as.character(out$stats)
 
   cell_arr <- a5R::a5_cell_to_arrow(cells)
-
   inner_type <- switch(value_type, float64 = arrow::float64(), float32 = arrow::float32())
   fsl_type   <- arrow::fixed_size_list_of(inner_type, n_bands)
+  n_cells    <- length(cells)
 
-  # cell-major flat buffer -> n_cells x n_bands matrix (one row per cell)
-  # -> list of length-n_bands numeric vectors via asplit (faster than split())
-  # -> FixedSizeListArray via Array$create
-  n_cells <- length(flat) %/% n_bands
-  mat <- matrix(flat, nrow = n_cells, ncol = n_bands, byrow = TRUE)
-  rows <- asplit(mat, 1L)
-  value_arr <- arrow::Array$create(rows, type = fsl_type)
+  flat_to_fsl <- function(flat) {
+    mat  <- matrix(flat, nrow = n_cells, ncol = n_bands, byrow = TRUE)
+    rows <- asplit(mat, 1L)
+    arrow::Array$create(rows, type = fsl_type)
+  }
 
-  tbl <- arrow::Table$create(cell = cell_arr, value = value_arr)
-  tbl$ReplaceSchemaMetadata(list(
+  cols <- list(cell = cell_arr)
+  if (length(stats_out) == 1L) {
+    cols$value <- flat_to_fsl(out$value_flat[[1]])
+  } else {
+    for (s in stats_out) {
+      cols[[s]] <- flat_to_fsl(out$value_flat[[s]])
+    }
+  }
+
+  tbl <- do.call(arrow::Table$create, cols)
+  meta <- list(
     a5px_band_names = paste(band_names, collapse = "\n"),
     a5px_resolution = as.character(resolution),
-    a5px_stat       = stat
-  ))
+    a5px_stats      = paste(stats_out, collapse = "\n")
+  )
+  if (length(stats_out) == 1L) {
+    meta$a5px_stat <- stats_out[[1]]  # legacy single-stat key
+  }
+  tbl$ReplaceSchemaMetadata(meta)
 }
 
 #' Read a raster and write it straight to Parquet (Rust-direct)
@@ -116,7 +127,7 @@ a5_read_raster_arrow <- function(src,
 a5_raster_to_parquet <- function(src,
                                  dest,
                                  resolution,
-                                 stat = c("mean", "sum", "count", "min", "max"),
+                                 stat = "mean",
                                  bands = NULL,
                                  value_type = c("float64", "float32"),
                                  compression = c("zstd", "snappy", "none"),
@@ -127,7 +138,7 @@ a5_raster_to_parquet <- function(src,
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
-  stat <- rlang::arg_match(stat)
+  stats <- check_stats(stat)
   value_type <- rlang::arg_match(value_type)
   compression <- rlang::arg_match(compression)
   threads <- check_scalar_count(threads, "threads")
@@ -138,7 +149,7 @@ a5_raster_to_parquet <- function(src,
     src = src,
     dest = dest,
     resolution = resolution,
-    stat = stat,
+    stats = stats,
     bands_idx = band_sel$idx,
     bands_names = band_sel$names,
     value_type = value_type,

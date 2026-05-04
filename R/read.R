@@ -56,7 +56,7 @@
 #' }
 a5_read_raster <- function(src,
                            resolution,
-                           stat = c("mean", "sum", "count", "min", "max"),
+                           stat = "mean",
                            bands = NULL,
                            threads = 1L,
                            io_concurrency = 8L,
@@ -65,7 +65,7 @@ a5_read_raster <- function(src,
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
-  stat <- rlang::arg_match(stat)
+  stats <- check_stats(stat)
   threads <- check_scalar_count(threads, "threads")
   io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
   if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
@@ -76,7 +76,7 @@ a5_read_raster <- function(src,
   out <- a5_read_raster_rs(
     src = src,
     resolution = resolution,
-    stat = stat,
+    stats = stats,
     bands_idx = band_sel$idx,
     bands_names = band_sel$names,
     threads = threads,
@@ -85,10 +85,21 @@ a5_read_raster <- function(src,
 
   cells <- new_a5_cell_from_rs(out$cell)
   bands <- out$bands
-  band_names <- as.character(out$band_names)
-  names(bands) <- band_names
+  # Rust returns names via the named list itself, but be explicit
+  if (length(stats) == 1L) {
+    names(bands) <- as.character(out$band_names)
+  } else {
+    band_names <- as.character(out$band_names)
+    # Rust iterates stat-major (outer = stat, inner = band), producing
+    # [B0__s0, B1__s0, ..., B0__s1, B1__s1, ...]. outer(bands, stats) flattens
+    # column-major to that exact order.
+    names(bands) <- as.vector(outer(band_names, stats, paste, sep = "__"))
+  }
 
   if (as_vector) {
+    if (length(stats) > 1L) {
+      cli::cli_abort("{.arg as_vector} = TRUE is only supported for a single stat.")
+    }
     n <- length(cells)
     n_bands <- length(bands)
     mat <- vapply(bands, identity, numeric(n))

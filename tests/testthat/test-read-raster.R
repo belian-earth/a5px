@@ -145,6 +145,38 @@ test_that("a5_read_raster validates resolution", {
   expect_error(a5_read_raster(path, resolution = -1), "must be between")
 })
 
+test_that("multi-stat in one pass produces band__stat columns", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  out <- a5_read_raster(path, resolution = 12L,
+                        stat = c("mean", "count", "sum"),
+                        bands = c("B02", "B03"))
+  expect_setequal(
+    setdiff(names(out), "cell"),
+    c("B02__mean", "B02__count", "B02__sum",
+      "B03__mean", "B03__count", "B03__sum")
+  )
+  fi <- is.finite(out$B02__mean) & is.finite(out$B02__count)
+  expect_true(all(out$B02__count[fi] >= 1))
+  expect_lt(max(abs(out$B02__sum[fi] - out$B02__mean[fi] * out$B02__count[fi])), 1e-6)
+
+  # single-stat path is unchanged (column = band name)
+  s1 <- a5_read_raster(path, resolution = 12L, stat = "mean", bands = "B02")
+  expect_setequal(setdiff(names(s1), "cell"), "B02")
+})
+
+test_that("multi-stat errors on duplicate or unknown stats", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+  expect_error(a5_read_raster(path, resolution = 12L, stat = c("mean", "mean")),
+               "duplicates")
+  expect_error(a5_read_raster(path, resolution = 12L, stat = c("mean", "median")),
+               "Unknown")
+})
+
 test_that("NaN nodata is filtered (NaN-safe comparison)", {
   path <- system.file("extdata", "nan_nodata.tif", package = "a5px")
   skip_if(path == "", "nan_nodata.tif not installed")

@@ -98,6 +98,23 @@ impl Stat {
             other => Err(A5CogError::Invalid(format!("unknown stat: {other}"))),
         }
     }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Mean => "mean",
+            Self::Sum => "sum",
+            Self::Count => "count",
+            Self::Min => "min",
+            Self::Max => "max",
+        }
+    }
+}
+
+fn parse_stats(stats: &[String]) -> Result<Vec<Stat>> {
+    if stats.is_empty() {
+        return Err(A5CogError::Invalid("at least one stat is required".into()));
+    }
+    stats.iter().map(|s| Stat::parse(s.as_str())).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -438,7 +455,7 @@ fn process_tile(
 async fn read_raster_async(
     src: &str,
     resolution: i32,
-    stat: Stat,
+    stats: Vec<Stat>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     io_concurrency: usize,
@@ -649,31 +666,39 @@ async fn read_raster_async(
         .into_inner()
         .unwrap();
 
+    let n_stats = stats.len();
     let n = map.len();
     let mut cells = Vec::with_capacity(n);
-    // cell-major flat layout: pos i*n_out + b is band b of cell i
-    let mut flat: Vec<f64> = Vec::with_capacity(n * n_out);
+    // cell-major flat layout per stat: flat_values[s][i*n_out + b] is the s-th
+    // stat of band b of cell i.
+    let mut flat_per_stat: Vec<Vec<f64>> =
+        (0..n_stats).map(|_| Vec::with_capacity(n * n_out)).collect();
     for (cell, accs) in map {
         cells.push(cell);
         for a in accs.iter() {
-            flat.push(a.finalise(stat));
+            for (s_i, s) in stats.iter().enumerate() {
+                flat_per_stat[s_i].push(a.finalise(*s));
+            }
         }
     }
 
     Ok(Output {
         cells,
-        flat_values: flat,
+        flat_values: flat_per_stat,
         n_bands: n_out,
         band_names,
+        stats: stats.iter().map(|s| s.as_str().to_string()).collect(),
     })
 }
 
 struct Output {
     cells: Vec<u64>,
-    /// Cell-major flat values: cell i band b is at index `i * n_bands + b`.
-    flat_values: Vec<f64>,
+    /// One Vec per stat. Each Vec is cell-major flat: cell `i` band `b` is at
+    /// index `i * n_bands + b`. Outer index matches the order of `stats`.
+    flat_values: Vec<Vec<f64>>,
     n_bands: usize,
     band_names: Vec<String>,
+    stats: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -683,7 +708,8 @@ struct Output {
 ///
 /// @param src Path or URL string (file://, http(s)://, s3://, gs://, az://).
 /// @param resolution A5 resolution (0--30).
-/// @param stat One of "mean", "sum", "count", "min", "max".
+/// @param stats Character vector of stats: subset of "mean", "sum", "count",
+///   "min", "max". Length-1 behaves identically to the previous scalar API.
 /// @param bands_idx 1-based band indices to read. Empty = all (unless
 ///   bands_names is non-empty).
 /// @param bands_names Band names to read (matched against the GDAL DESCRIPTION
@@ -691,14 +717,15 @@ struct Output {
 /// @param threads Worker threads (currently used for tile-level concurrency).
 /// @param io_concurrency Number of tiles fetched concurrently.
 /// @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
-///   vectors per band), and `band_names` (character).
+///   vectors; key form is `<band>` for length-1 stats and `<band>__<stat>`
+///   for length>1), `band_names`, and `stats` (character).
 /// @noRd
 /// @keywords internal
 #[extendr]
 fn a5_read_raster_rs(
     src: &str,
     resolution: i32,
-    stat: &str,
+    stats: Vec<String>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     threads: i32,
@@ -714,7 +741,7 @@ fn a5_read_raster_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let stat = Stat::parse(stat)?;
+    let stats_e = parse_stats(&stats)?;
     let threads = threads.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
@@ -733,7 +760,7 @@ fn a5_read_raster_rs(
     let out: Output = runtime.block_on(read_raster_async(
         src,
         resolution,
-        stat,
+        stats_e,
         bands_idx,
         bands_names,
         io_concurrency,
@@ -745,24 +772,34 @@ fn a5_read_raster_rs(
 
     let cell_list = u64s_to_raw8_list(&out.cells);
 
-    // de-interleave the flat cell-major buffer into one Vec<f64> per band
+    // de-interleave each per-stat flat buffer into one Vec<f64> per band per stat
     let n_cells = out.cells.len();
     let n_bands = out.n_bands;
-    let mut band_pairs: Vec<(String, Robj)> = Vec::with_capacity(n_bands);
-    for (b, name) in out.band_names.iter().enumerate() {
-        let mut col: Vec<f64> = Vec::with_capacity(n_cells);
-        for i in 0..n_cells {
-            col.push(out.flat_values[i * n_bands + b]);
+    let n_stats = out.stats.len();
+    let mut band_pairs: Vec<(String, Robj)> = Vec::with_capacity(n_bands * n_stats);
+    for (s_i, s_name) in out.stats.iter().enumerate() {
+        for (b, b_name) in out.band_names.iter().enumerate() {
+            let mut col: Vec<f64> = Vec::with_capacity(n_cells);
+            for i in 0..n_cells {
+                col.push(out.flat_values[s_i][i * n_bands + b]);
+            }
+            let key = if n_stats == 1 {
+                b_name.clone()
+            } else {
+                format!("{}__{}", b_name, s_name)
+            };
+            band_pairs.push((key, Robj::from(col)));
         }
-        band_pairs.push((name.clone(), Robj::from(col)));
     }
     let bands = List::from_pairs(band_pairs);
     let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
+    let stats_out: Vec<&str> = out.stats.iter().map(|s| s.as_str()).collect();
 
     Ok(list!(
         cell = cell_list,
         bands = bands,
-        band_names = band_names
+        band_names = band_names,
+        stats = stats_out
     )
     .into())
 }
@@ -773,23 +810,23 @@ fn a5_read_raster_rs(
 ///
 /// @param src Path or URL string.
 /// @param resolution A5 resolution (0--30).
-/// @param stat One of "mean", "sum", "count", "min", "max".
+/// @param stats Character vector of stats (subset of mean/sum/count/min/max).
 /// @param bands_idx 1-based band indices to read (empty for all unless
 ///   `bands_names` is provided).
 /// @param bands_names Band names to read (matched against the GDAL
 ///   DESCRIPTION tag).
 /// @param threads Worker threads.
 /// @param io_concurrency Number of tiles fetched concurrently.
-/// @returns A list with `cell` (b1..b8 raw), `value_flat` (numeric of length
-///   `n_cells * n_bands`, cell-major), `band_names` (character), and
-///   `n_bands` (integer scalar).
+/// @returns A list with `cell` (b1..b8 raw), `value_flat` (named list of
+///   numeric vectors, one per stat in `stats` order, each of length
+///   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
 /// @noRd
 /// @keywords internal
 #[extendr]
 fn a5_read_raster_flat_rs(
     src: &str,
     resolution: i32,
-    stat: &str,
+    stats: Vec<String>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     threads: i32,
@@ -805,7 +842,7 @@ fn a5_read_raster_flat_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let stat = Stat::parse(stat)?;
+    let stats_e = parse_stats(&stats)?;
     let threads = threads.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
@@ -824,7 +861,7 @@ fn a5_read_raster_flat_rs(
     let out: Output = runtime.block_on(read_raster_async(
         src,
         resolution,
-        stat,
+        stats_e,
         bands_idx,
         bands_names,
         io_concurrency,
@@ -837,11 +874,21 @@ fn a5_read_raster_flat_rs(
     let cell_list = u64s_to_raw8_list(&out.cells);
     let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
     let n_bands = out.n_bands as i32;
+    let stats_out: Vec<&str> = out.stats.iter().map(|s| s.as_str()).collect();
+
+    let value_pairs: Vec<(String, Robj)> = out
+        .stats
+        .iter()
+        .zip(out.flat_values.into_iter())
+        .map(|(s, v)| (s.clone(), Robj::from(v)))
+        .collect();
+    let value_flat = List::from_pairs(value_pairs);
 
     Ok(list!(
         cell = cell_list,
-        value_flat = Robj::from(out.flat_values),
+        value_flat = value_flat,
         band_names = band_names,
+        stats = stats_out,
         n_bands = n_bands
     )
     .into())
@@ -862,7 +909,7 @@ impl From<A5CogError> for extendr_api::Error {
 /// @param src Path or URL string.
 /// @param dest Output Parquet path.
 /// @param resolution A5 resolution (0--30).
-/// @param stat One of "mean", "sum", "count", "min", "max".
+/// @param stats Character vector of stats (subset of mean/sum/count/min/max).
 /// @param bands_idx,bands_names Band selection (see `a5_read_raster_rs`).
 /// @param value_type Storage type for the value column ("float64" | "float32").
 /// @param compression Parquet compression codec ("zstd" | "snappy" | "none").
@@ -876,7 +923,7 @@ fn a5_raster_to_parquet_rs(
     src: &str,
     dest: &str,
     resolution: i32,
-    stat: &str,
+    stats: Vec<String>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     value_type: &str,
@@ -894,7 +941,7 @@ fn a5_raster_to_parquet_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let stat_e = Stat::parse(stat)?;
+    let stats_e = parse_stats(&stats)?;
     let value_type_e = crate::parquet_write::ValueType::parse(value_type)?;
     let compression_e = crate::parquet_write::CompressionChoice::parse(compression)?;
     let threads = threads.max(1) as usize;
@@ -915,7 +962,7 @@ fn a5_raster_to_parquet_rs(
     let out: Output = runtime.block_on(read_raster_async(
         src,
         resolution,
-        stat_e,
+        stats_e,
         bands_idx,
         bands_names,
         io_concurrency,
@@ -925,16 +972,14 @@ fn a5_raster_to_parquet_rs(
         print_timers(t0.elapsed().as_secs_f64());
     }
 
-    let n_bands = out.n_bands;
-    let band_names = out.band_names;
     crate::parquet_write::write_arrow_parquet(
         dest,
         out.cells,
         out.flat_values,
-        n_bands,
-        &band_names,
+        out.n_bands,
+        &out.band_names,
+        &out.stats,
         resolution,
-        stat,
         value_type_e,
         compression_e,
     )?;
