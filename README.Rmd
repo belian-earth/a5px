@@ -50,24 +50,23 @@ A complete read of a public Cloud-Optimised GeoTIFF (the EOx 2020
 Sentinel-2 cloudless mosaic, RGB) into A5 cells, then a quick
 visualisation:
 
-``` r
+
+
+``` {r}
 library(a5px)
+
 
 url <- "https://s2downloads.eox.at/demo/EOxCloudless/2020/rgb_corrected_geodetic/3/0/0.tif"
 
 a5px_set_threads(8)
 EOx <- a5_read_raster(
   url,
-  resolution     = 6L,
+  resolution     = 5L,
   stat           = "mean",
   threads        = 8L,
   io_concurrency = 16L
 )
-EOx
-#> # A tibble: ... x 4
-#>   cell             band_01 band_02 band_03
-#>   <a5_cell>          <dbl>   <dbl>   <dbl>
-#> ...
+EOx 
 
 # Render the three bands as RGB and view on the globe
 EOx$rgb <- grDevices::rgb(
@@ -77,8 +76,16 @@ EOx$rgb <- grDevices::rgb(
   maxColorValue = 255
 )
 
-a5view::a5_view(EOx, fill = rgb, fill_identity = TRUE,
-                border = NULL, globe = TRUE, opacity = 1)
+a5view::a5_view(EOx, 
+                fill = rgb, 
+                fill_identity = TRUE,
+                border = "#ffffff", 
+                border_width = 0.25,
+                globe = TRUE, 
+                opacity = 1,
+                zoom=2,
+                lng = 0,
+                lat = 44)
 ```
 
 ## API surface

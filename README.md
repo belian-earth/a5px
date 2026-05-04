@@ -43,22 +43,34 @@ visualisation:
 
 ``` r
 library(a5px)
+#> Loading required package: a5R
+
 
 url <- "https://s2downloads.eox.at/demo/EOxCloudless/2020/rgb_corrected_geodetic/3/0/0.tif"
 
 a5px_set_threads(8)
 EOx <- a5_read_raster(
   url,
-  resolution     = 6L,
+  resolution     = 5L,
   stat           = "mean",
   threads        = 8L,
   io_concurrency = 16L
 )
-EOx
-#> # A tibble: ... x 4
-#>   cell             band_01 band_02 band_03
-#>   <a5_cell>          <dbl>   <dbl>   <dbl>
-#> ...
+EOx 
+#> # A tibble: 7,928 × 4
+#>    cell             band_01 band_02 band_03
+#>    <a5_cell>          <dbl>   <dbl>   <dbl>
+#>  1 22aa000000000000    7.67    15      17.7
+#>  2 654a000000000000   55.6     62.4    38.7
+#>  3 8382000000000000   11.3     27.3    22.1
+#>  4 952a000000000000    5.98    16.8    26.2
+#>  5 c47e000000000000  221.     230.    235. 
+#>  6 975a000000000000    3.38    11.3    24.9
+#>  7 781e000000000000   28.4     43.5    49.7
+#>  8 33ce000000000000   24.2     30.6    36.9
+#>  9 0502000000000000    7.51    19.0    16.1
+#> 10 4d62000000000000   13.5     23.9    24.4
+#> # ℹ 7,918 more rows
 
 # Render the three bands as RGB and view on the globe
 EOx$rgb <- grDevices::rgb(
@@ -68,9 +80,19 @@ EOx$rgb <- grDevices::rgb(
   maxColorValue = 255
 )
 
-a5view::a5_view(EOx, fill = rgb, fill_identity = TRUE,
-                border = NULL, globe = TRUE, opacity = 1)
+a5view::a5_view(EOx, 
+                fill = rgb, 
+                fill_identity = TRUE,
+                border = "#ffffff", 
+                border_width = 0.25,
+                globe = TRUE, 
+                opacity = 1,
+                zoom=2,
+                lng = 0,
+                lat = 44)
 ```
+
+<img src="man/figures/README-unnamed-chunk-2-1.png" alt="" width="100%" />
 
 ## API surface
 
