@@ -192,6 +192,22 @@ test_that("NaN nodata is filtered (NaN-safe comparison)", {
   expect_equal(sum(cnt$y), 1019)
 })
 
+test_that("user-defined CRS is reconstructed from GeoKey fields (LAEA)", {
+  path <- system.file("extdata", "laea_custom.tif", package = "a5px")
+  skip_if(path == "", "laea_custom.tif not installed")
+
+  out <- a5_read_raster(path, resolution = 16L, stat = "mean")
+  expect_gt(nrow(out), 0L)
+  expect_setequal(setdiff(names(out), "cell"), "band_01")
+
+  # raster is centered on lon=-3, lat=51 in projected space (0, 0).
+  # cell centroids should cluster tightly around there.
+  ll <- a5R::a5_cell_to_lonlat(out$cell)
+  xy <- as.matrix(wk::as_xy(ll))
+  expect_lt(max(abs(xy[, 1] - (-3))), 0.5)
+  expect_lt(max(abs(xy[, 2] - 51)), 0.5)
+})
+
 test_that("a5_read_raster errors on non-georeferenced TIFF", {
   skip_no_tifs()
   path <- file.path(tif_dir(), "test_non_geo.tif")

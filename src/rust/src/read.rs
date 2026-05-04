@@ -23,7 +23,8 @@ use std::time::Instant;
 use crate::cell_raw::u64s_to_raw8_list;
 use crate::error::{A5CogError, Result};
 use crate::geo::{
-    GeoTransform, extract_geotransform, is_nodata, parse_band_descriptions, parse_nodata,
+    GeoTransform, build_src_proj, extract_geotransform, is_nodata, parse_band_descriptions,
+    parse_nodata,
 };
 
 // stage timers (only emit if A5PX_PROFILE env var is set, e.g. A5PX_PROFILE=1)
@@ -478,11 +479,8 @@ async fn read_raster_async(
     let geo = ifd_owned
         .geo_key_directory()
         .ok_or(A5CogError::MissingGeoKey("GeoKeyDirectory"))?;
-    let epsg = geo
-        .epsg_code()
-        .ok_or(A5CogError::MissingGeoKey("EPSG code"))?;
 
-    let src_proj = Proj::from_epsg_code(epsg)?;
+    let src_proj = build_src_proj(geo)?;
     let dst_proj = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
 
     let gt = extract_geotransform(&ifd_owned)?;

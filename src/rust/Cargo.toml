@@ -19,6 +19,7 @@ a5 = '0.7.3'
 async-tiff = { version = '0.3', default-features = false, features = ['object_store', 'reqwest', 'tokio'] }
 object_store = { version = '0.13', features = ['aws', 'gcp', 'azure', 'http'] }
 proj4rs = { version = '0.1', default-features = false, features = ['crs-definitions'] }
+proj4wkt = '0.1'
 tokio = { version = '1', features = ['rt-multi-thread', 'sync', 'macros'] }
 rayon = '1.11'
 futures = '0.3'
