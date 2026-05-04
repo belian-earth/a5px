@@ -270,6 +270,7 @@ fn process_tile(
     gt: &GeoTransform,
     resolution: i32,
     nodata: Option<f64>,
+    bbox_lonlat: Option<[f64; 4]>,
 ) -> Result<AHashMap<u64, Vec<Accum>>> {
     let n_out = data_band_offsets.len();
     let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
@@ -389,6 +390,12 @@ fn process_tile(
             continue;
         }
 
+        if let Some(b) = bbox_lonlat {
+            if lon_deg < b[0] || lon_deg > b[2] || lat_deg < b[1] || lat_deg > b[3] {
+                continue;
+            }
+        }
+
         let t = if prof { Some(Instant::now()) } else { None };
         let lonlat = a5::LonLat::new(lon_deg, lat_deg);
         let cell = if let (Some(prev_id), Some(prev_a5)) = (last_cell, last_a5cell.as_ref()) {
@@ -459,6 +466,8 @@ async fn read_raster_async(
     stats: Vec<Stat>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
+    bbox_lonlat: Option<[f64; 4]>,
+    src_nodata_override: Option<f64>,
     io_concurrency: usize,
 ) -> Result<Output> {
     let (store, path) = parse_src(src)?;
@@ -548,11 +557,34 @@ async fn read_raster_async(
         .map(|&i| all_band_names[i].clone())
         .collect();
 
+    // override nodata if user specified it; otherwise use what async-tiff exposed
+    let nodata = src_nodata_override.or(nodata);
+
     let global = Arc::new(StdMutex::new(AHashMap::<u64, Vec<Accum>>::new()));
 
-    let tiles: Vec<(usize, usize)> = (0..n_tiles_y)
-        .flat_map(|y| (0..n_tiles_x).map(move |x| (x, y)))
-        .collect();
+    // Bbox-driven tile filter. For most projections the bbox of 4 corners +
+    // 4 edge midpoints (re-projected to the raster CRS) is a sufficient
+    // axis-aligned envelope to pick the candidate tiles. The per-pixel
+    // lon/lat check inside process_tile then exact-filters at the boundary.
+    let tiles: Vec<(usize, usize)> = if let Some(b) = bbox_lonlat {
+        let (tx_lo, ty_lo, tx_hi, ty_hi) = match projected_tile_range(
+            b, &src_proj, &dst_proj, &gt, width, height, tile_w, tile_h,
+        )? {
+            Some(rng) => rng,
+            None => return Ok(empty_output(band_names, n_out, &stats)),
+        };
+        let mut v = Vec::with_capacity((tx_hi - tx_lo + 1) * (ty_hi - ty_lo + 1));
+        for ty in ty_lo..=ty_hi {
+            for tx in tx_lo..=tx_hi {
+                v.push((tx, ty));
+            }
+        }
+        v
+    } else {
+        (0..n_tiles_y)
+            .flat_map(|y| (0..n_tiles_x).map(move |x| (x, y)))
+            .collect()
+    };
 
     // decide once whether the band-aware fetch path applies
     let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
@@ -570,6 +602,7 @@ async fn read_raster_async(
     let identity_offsets_arc: Arc<Vec<usize>> = Arc::new(identity_offsets);
     let registry_arc: Arc<DecoderRegistry> = Arc::new(DecoderRegistry::default());
 
+    let bbox_for_tile = bbox_lonlat;
     stream::iter(tiles)
         .map(|(tx, ty)| {
             let reader = reader.clone();
@@ -580,6 +613,7 @@ async fn read_raster_async(
             let identity_offsets = Arc::clone(&identity_offsets_arc);
             let registry = Arc::clone(&registry_arc);
             let global = Arc::clone(&global);
+            let bbox_lonlat = bbox_for_tile;
             async move {
                 let prof = profile_enabled();
                 let (data, shape, data_n_bands_eff, offsets_arc): (
@@ -636,6 +670,7 @@ async fn read_raster_async(
                         &gt,
                         resolution,
                         nodata,
+                        bbox_lonlat,
                     )
                 })
                 .await
@@ -699,6 +734,150 @@ struct Output {
     stats: Vec<String>,
 }
 
+fn parse_bbox_arg(v: Vec<f64>) -> Result<Option<[f64; 4]>> {
+    if v.is_empty() {
+        return Ok(None);
+    }
+    if v.len() != 4 {
+        return Err(A5CogError::Invalid(format!(
+            "bbox must be length 4 (xmin, ymin, xmax, ymax) in WGS84; got len {}",
+            v.len()
+        )));
+    }
+    if v.iter().any(|x| !x.is_finite()) {
+        return Err(A5CogError::Invalid(
+            "bbox must contain finite numeric values".into(),
+        ));
+    }
+    Ok(Some([v[0], v[1], v[2], v[3]]))
+}
+
+fn parse_src_nodata_arg(v: Vec<f64>) -> Result<Option<f64>> {
+    if v.is_empty() {
+        return Ok(None);
+    }
+    if v.len() != 1 {
+        return Err(A5CogError::Invalid(format!(
+            "src_nodata must be a length-1 numeric (or NULL); got len {}",
+            v.len()
+        )));
+    }
+    Ok(Some(v[0]))
+}
+
+fn empty_output(band_names: Vec<String>, n_out: usize, stats: &[Stat]) -> Output {
+    Output {
+        cells: Vec::new(),
+        flat_values: stats.iter().map(|_| Vec::new()).collect(),
+        n_bands: n_out,
+        band_names,
+        stats: stats.iter().map(|s| s.as_str().to_string()).collect(),
+    }
+}
+
+/// Reproject a WGS84 lon/lat bbox into the raster CRS, take the axis-aligned
+/// bounding box of the resulting points, clamp to the raster, and return the
+/// inclusive tile-index range that covers it. Returns `Ok(None)` if the bbox
+/// reproject yields nothing inside the raster.
+#[allow(clippy::too_many_arguments)]
+fn projected_tile_range(
+    bbox_lonlat: [f64; 4],
+    src_proj: &Proj,
+    dst_proj: &Proj,
+    gt: &GeoTransform,
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+) -> Result<Option<(usize, usize, usize, usize)>> {
+    let (xmin_ll, ymin_ll, xmax_ll, ymax_ll) =
+        (bbox_lonlat[0], bbox_lonlat[1], bbox_lonlat[2], bbox_lonlat[3]);
+    if xmin_ll >= xmax_ll || ymin_ll >= ymax_ll {
+        return Err(A5CogError::Invalid(format!(
+            "bbox must satisfy xmin<xmax & ymin<ymax; got [{xmin_ll}, {ymin_ll}, {xmax_ll}, {ymax_ll}]"
+        )));
+    }
+    let xmid = (xmin_ll + xmax_ll) * 0.5;
+    let ymid = (ymin_ll + ymax_ll) * 0.5;
+    // 4 corners + 4 edge midpoints. Curved projections rarely bulge enough
+    // for this to miss; per-pixel filter inside `process_tile` is the exact one.
+    let mut points: Vec<(f64, f64, f64)> = vec![
+        (xmin_ll, ymin_ll, 0.0),
+        (xmax_ll, ymin_ll, 0.0),
+        (xmin_ll, ymax_ll, 0.0),
+        (xmax_ll, ymax_ll, 0.0),
+        (xmid, ymin_ll, 0.0),
+        (xmid, ymax_ll, 0.0),
+        (xmin_ll, ymid, 0.0),
+        (xmax_ll, ymid, 0.0),
+    ];
+    // dst_proj is +proj=longlat +datum=WGS84; latlong needs radians
+    let dst_is_latlong = dst_proj.is_latlong();
+    if dst_is_latlong {
+        for p in &mut points {
+            p.0 = p.0.to_radians();
+            p.1 = p.1.to_radians();
+        }
+    }
+    // forward direction: WGS84 (dst) -> raster CRS (src)
+    proj_transform(dst_proj, src_proj, &mut points[..])?;
+    if src_proj.is_latlong() {
+        for p in &mut points {
+            p.0 = p.0.to_degrees();
+            p.1 = p.1.to_degrees();
+        }
+    }
+    let mut xmin = f64::INFINITY;
+    let mut ymin = f64::INFINITY;
+    let mut xmax = f64::NEG_INFINITY;
+    let mut ymax = f64::NEG_INFINITY;
+    for &(x, y, _) in &points {
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        if x < xmin { xmin = x; }
+        if x > xmax { xmax = x; }
+        if y < ymin { ymin = y; }
+        if y > ymax { ymax = y; }
+    }
+    if !xmin.is_finite() || !xmax.is_finite() {
+        return Err(A5CogError::Invalid(
+            "could not reproject bbox into raster CRS (all points NaN)".into(),
+        ));
+    }
+
+    // Invert the (axis-aligned) geotransform to map projected x/y -> pixel.
+    if gt.0[2] != 0.0 || gt.0[4] != 0.0 {
+        return Err(A5CogError::Unsupported(
+            "rotated geotransform with bbox is not yet supported".into(),
+        ));
+    }
+    let col_from_x = |x: f64| -> f64 { (x - gt.0[0]) / gt.0[1] };
+    let row_from_y = |y: f64| -> f64 { (y - gt.0[3]) / gt.0[5] };
+    let cols = [col_from_x(xmin), col_from_x(xmax)];
+    let rows = [row_from_y(ymin), row_from_y(ymax)];
+    let col_lo_f = cols[0].min(cols[1]).floor();
+    let col_hi_f = cols[0].max(cols[1]).ceil();
+    let row_lo_f = rows[0].min(rows[1]).floor();
+    let row_hi_f = rows[0].max(rows[1]).ceil();
+
+    let w_f = width as f64;
+    let h_f = height as f64;
+    if col_hi_f < 0.0 || col_lo_f >= w_f || row_hi_f < 0.0 || row_lo_f >= h_f {
+        return Ok(None);
+    }
+    let col_lo = col_lo_f.max(0.0) as usize;
+    let col_hi = col_hi_f.min(w_f - 1.0).max(0.0) as usize;
+    let row_lo = row_lo_f.max(0.0) as usize;
+    let row_hi = row_hi_f.min(h_f - 1.0).max(0.0) as usize;
+
+    let tx_lo = col_lo / tile_w;
+    let tx_hi = col_hi / tile_w;
+    let ty_lo = row_lo / tile_h;
+    let ty_hi = row_hi / tile_h;
+    Ok(Some((tx_lo, ty_lo, tx_hi, ty_hi)))
+}
+
 // ---------------------------------------------------------------------------
 // extendr binding
 
@@ -726,6 +905,8 @@ fn a5_read_raster_rs(
     stats: Vec<String>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
+    bbox: Vec<f64>,
+    src_nodata: Vec<f64>,
     threads: i32,
     io_concurrency: i32,
 ) -> Result<Robj> {
@@ -755,12 +936,17 @@ fn a5_read_raster_rs(
     }
     let t0 = Instant::now();
 
+    let bbox_opt = parse_bbox_arg(bbox)?;
+    let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
+
     let out: Output = runtime.block_on(read_raster_async(
         src,
         resolution,
         stats_e,
         bands_idx,
         bands_names,
+        bbox_opt,
+        src_nodata_opt,
         io_concurrency,
     ))?;
 
@@ -827,6 +1013,8 @@ fn a5_read_raster_flat_rs(
     stats: Vec<String>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
+    bbox: Vec<f64>,
+    src_nodata: Vec<f64>,
     threads: i32,
     io_concurrency: i32,
 ) -> Result<Robj> {
@@ -856,12 +1044,17 @@ fn a5_read_raster_flat_rs(
     }
     let t0 = Instant::now();
 
+    let bbox_opt = parse_bbox_arg(bbox)?;
+    let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
+
     let out: Output = runtime.block_on(read_raster_async(
         src,
         resolution,
         stats_e,
         bands_idx,
         bands_names,
+        bbox_opt,
+        src_nodata_opt,
         io_concurrency,
     ))?;
 
@@ -924,6 +1117,8 @@ fn a5_raster_to_parquet_rs(
     stats: Vec<String>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
+    bbox: Vec<f64>,
+    src_nodata: Vec<f64>,
     value_type: &str,
     compression: &str,
     threads: i32,
@@ -957,12 +1152,17 @@ fn a5_raster_to_parquet_rs(
     }
     let t0 = Instant::now();
 
+    let bbox_opt = parse_bbox_arg(bbox)?;
+    let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
+
     let out: Output = runtime.block_on(read_raster_async(
         src,
         resolution,
         stats_e,
         bands_idx,
         bands_names,
+        bbox_opt,
+        src_nodata_opt,
         io_concurrency,
     ))?;
 

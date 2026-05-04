@@ -9,6 +9,8 @@ a5_read_raster(
   resolution,
   stat = "mean",
   bands = NULL,
+  bbox = NULL,
+  src_nodata = NULL,
   threads = 1L,
   io_concurrency = 8L,
   as_vector = FALSE
@@ -30,6 +32,16 @@ a5_read_raster(
 \item character vector: band names matched against the GDAL \code{DESCRIPTION}
 tag (falling back to \code{band_NN} when descriptions are absent).
 }}
+
+\item{bbox}{Optional spatial subset, as a numeric \code{c(xmin, ymin, xmax, ymax)} in WGS 84 lon/lat. Same convention as \code{\link[a5R:a5_grid]{a5R::a5_grid()}}. When
+supplied, only tiles overlapping the bbox (in raster CRS) are fetched
+from the COG, and pixels outside the bbox are skipped. \code{NULL} (default)
+reads the whole raster.}
+
+\item{src_nodata}{Optional numeric scalar overriding the source nodata.
+Use this when the file's \code{TIFFTAG_GDAL_NODATA} tag is missing or wrong;
+it takes precedence over the metadata value when set. \code{NULL} (default)
+uses whatever \code{async-tiff} exposes.}
 
 \item{threads}{Tokio worker threads (also caps tile-level concurrency).
 Default 1.}

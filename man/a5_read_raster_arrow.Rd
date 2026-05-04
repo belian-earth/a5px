@@ -9,6 +9,8 @@ a5_read_raster_arrow(
   resolution,
   stat = "mean",
   bands = NULL,
+  bbox = NULL,
+  src_nodata = NULL,
   threads = 1L,
   io_concurrency = 8L,
   value_type = c("float64", "float32")

@@ -31,6 +31,8 @@ a5_read_raster_arrow <- function(src,
                                  resolution,
                                  stat = "mean",
                                  bands = NULL,
+                                 bbox = NULL,
+                                 src_nodata = NULL,
                                  threads = 1L,
                                  io_concurrency = 8L,
                                  value_type = c("float64", "float32")) {
@@ -44,6 +46,8 @@ a5_read_raster_arrow <- function(src,
   io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
   value_type <- rlang::arg_match(value_type)
   band_sel <- parse_bands_arg(bands)
+  bbox_v <- check_bbox(bbox)
+  src_nodata_v <- check_src_nodata(src_nodata)
 
   out <- a5_read_raster_flat_rs(
     src = src,
@@ -51,6 +55,8 @@ a5_read_raster_arrow <- function(src,
     stats = stats,
     bands_idx = band_sel$idx,
     bands_names = band_sel$names,
+    bbox = bbox_v,
+    src_nodata = src_nodata_v,
     threads = threads,
     io_concurrency = io_concurrency
   )
@@ -129,6 +135,8 @@ a5_raster_to_parquet <- function(src,
                                  resolution,
                                  stat = "mean",
                                  bands = NULL,
+                                 bbox = NULL,
+                                 src_nodata = NULL,
                                  value_type = c("float64", "float32"),
                                  compression = c("zstd", "snappy", "none"),
                                  threads = 1L,
@@ -144,6 +152,8 @@ a5_raster_to_parquet <- function(src,
   threads <- check_scalar_count(threads, "threads")
   io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
   band_sel <- parse_bands_arg(bands)
+  bbox_v <- check_bbox(bbox)
+  src_nodata_v <- check_src_nodata(src_nodata)
 
   invisible(a5_raster_to_parquet_rs(
     src = src,
@@ -152,6 +162,8 @@ a5_raster_to_parquet <- function(src,
     stats = stats,
     bands_idx = band_sel$idx,
     bands_names = band_sel$names,
+    bbox = bbox_v,
+    src_nodata = src_nodata_v,
     value_type = value_type,
     compression = compression,
     threads = threads,

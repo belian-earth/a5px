@@ -26,7 +26,7 @@ a5px_get_threads_rs <- function() .Call(wrap__a5px_get_threads_rs)
 #'   for length>1), `band_names`, and `stats` (character).
 #' @noRd
 #' @keywords internal
-a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, threads, io_concurrency) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, threads, io_concurrency)
+a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, threads, io_concurrency) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, threads, io_concurrency)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells, returning a
 #' flat cell-major numeric buffer suitable for direct construction of an
@@ -46,7 +46,7 @@ a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, th
 #'   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
 #' @noRd
 #' @keywords internal
-a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, threads, io_concurrency) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, threads, io_concurrency)
+a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, threads, io_concurrency) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, threads, io_concurrency)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF straight into a Parquet
 #' file. RecordBatch construction and Parquet write happen in Rust without
@@ -65,6 +65,6 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @returns The destination path (character scalar) on success.
 #' @noRd
 #' @keywords internal
-a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, value_type, compression, threads, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, value_type, compression, threads, io_concurrency)
+a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, threads, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, threads, io_concurrency)
 
 # nolint end

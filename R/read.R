@@ -24,6 +24,15 @@
 #'   - integer / numeric vector: 1-based band indices to read.
 #'   - character vector: band names matched against the GDAL `DESCRIPTION`
 #'     tag (falling back to `band_NN` when descriptions are absent).
+#' @param bbox Optional spatial subset, as a numeric `c(xmin, ymin, xmax,
+#'   ymax)` in WGS 84 lon/lat. Same convention as [a5R::a5_grid()]. When
+#'   supplied, only tiles overlapping the bbox (in raster CRS) are fetched
+#'   from the COG, and pixels outside the bbox are skipped. `NULL` (default)
+#'   reads the whole raster.
+#' @param src_nodata Optional numeric scalar overriding the source nodata.
+#'   Use this when the file's `TIFFTAG_GDAL_NODATA` tag is missing or wrong;
+#'   it takes precedence over the metadata value when set. `NULL` (default)
+#'   uses whatever `async-tiff` exposes.
 #' @param threads Tokio worker threads (also caps tile-level concurrency).
 #'   Default 1.
 #' @param io_concurrency Number of tiles fetched concurrently. Default 8.
@@ -58,6 +67,8 @@ a5_read_raster <- function(src,
                            resolution,
                            stat = "mean",
                            bands = NULL,
+                           bbox = NULL,
+                           src_nodata = NULL,
                            threads = 1L,
                            io_concurrency = 8L,
                            as_vector = FALSE) {
@@ -72,6 +83,8 @@ a5_read_raster <- function(src,
     cli::cli_abort("{.arg as_vector} must be a length-1 non-NA logical.")
   }
   band_sel <- parse_bands_arg(bands)
+  bbox_v <- check_bbox(bbox)
+  src_nodata_v <- check_src_nodata(src_nodata)
 
   out <- a5_read_raster_rs(
     src = src,
@@ -79,6 +92,8 @@ a5_read_raster <- function(src,
     stats = stats,
     bands_idx = band_sel$idx,
     bands_names = band_sel$names,
+    bbox = bbox_v,
+    src_nodata = src_nodata_v,
     threads = threads,
     io_concurrency = io_concurrency
   )

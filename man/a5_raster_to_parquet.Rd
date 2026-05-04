@@ -10,6 +10,8 @@ a5_raster_to_parquet(
   resolution,
   stat = "mean",
   bands = NULL,
+  bbox = NULL,
+  src_nodata = NULL,
   value_type = c("float64", "float32"),
   compression = c("zstd", "snappy", "none"),
   threads = 1L,

@@ -48,6 +48,44 @@ new_a5_cell_from_rs <- function(x) {
   )
 }
 
+#' Validate a user-supplied bbox.
+#' @noRd
+check_bbox <- function(bbox, call = rlang::caller_env()) {
+  if (is.null(bbox)) {
+    return(numeric(0))
+  }
+  v <- vctrs::vec_cast(bbox, double(), x_arg = "bbox")
+  if (length(v) != 4L || anyNA(v)) {
+    cli::cli_abort(
+      "{.arg bbox} must be a length-4 numeric {.code c(xmin, ymin, xmax, ymax)} in WGS 84.",
+      call = call
+    )
+  }
+  if (v[1] >= v[3] || v[2] >= v[4]) {
+    cli::cli_abort(
+      "{.arg bbox} must satisfy {.code xmin < xmax} and {.code ymin < ymax}.",
+      call = call
+    )
+  }
+  v
+}
+
+#' Validate a user-supplied src_nodata override.
+#' @noRd
+check_src_nodata <- function(src_nodata, call = rlang::caller_env()) {
+  if (is.null(src_nodata)) {
+    return(numeric(0))
+  }
+  v <- vctrs::vec_cast(src_nodata, double(), x_arg = "src_nodata")
+  if (length(v) != 1L) {
+    cli::cli_abort(
+      "{.arg src_nodata} must be a length-1 numeric (or NULL).",
+      call = call
+    )
+  }
+  v
+}
+
 #' Validate the user-facing `stat` arg into a non-empty character vector of
 #' valid stat names.
 #' @noRd

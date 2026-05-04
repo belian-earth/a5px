@@ -192,6 +192,77 @@ test_that("NaN nodata is filtered (NaN-safe comparison)", {
   expect_equal(sum(cnt$y), 1019)
 })
 
+test_that("bbox subset returns only cells inside the bbox", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  full <- a5_read_raster(path, resolution = 14L, stat = "mean", bands = 1L)
+  full_xy <- as.matrix(wk::as_xy(a5R::a5_cell_to_lonlat(full$cell)))
+  # take the central quarter of the tile in lon/lat
+  rng_x <- range(full_xy[, 1]); rng_y <- range(full_xy[, 2])
+  qx <- diff(rng_x) / 4; qy <- diff(rng_y) / 4
+  bb <- c(rng_x[1] + qx, rng_y[1] + qy, rng_x[2] - qx, rng_y[2] - qy)
+
+  sub <- a5_read_raster(path, resolution = 14L, stat = "mean",
+                        bands = 1L, bbox = bb)
+  expect_gt(nrow(sub), 0L)
+  expect_lt(nrow(sub), nrow(full))
+
+  # bbox filters PIXELS, not cells: a cell straddling the boundary can show
+  # up in the subset with a centroid slightly outside (and a partial
+  # aggregate). Allow ~half a cell of slop.
+  sub_xy <- as.matrix(wk::as_xy(a5R::a5_cell_to_lonlat(sub$cell)))
+  cell_w_deg <- diff(rng_x) / sqrt(nrow(full))  # rough cell width in lon
+  cell_h_deg <- diff(rng_y) / sqrt(nrow(full))
+  slop_x <- cell_w_deg
+  slop_y <- cell_h_deg
+  expect_true(all(sub_xy[, 1] >= bb[1] - slop_x & sub_xy[, 1] <= bb[3] + slop_x))
+  expect_true(all(sub_xy[, 2] >= bb[2] - slop_y & sub_xy[, 2] <= bb[4] + slop_y))
+
+  # cells with centroids well inside the bbox (no boundary truncation) should
+  # have identical values in the two reads
+  inside <- sub_xy[, 1] > bb[1] + slop_x & sub_xy[, 1] < bb[3] - slop_x &
+            sub_xy[, 2] > bb[2] + slop_y & sub_xy[, 2] < bb[4] - slop_y
+  expect_gt(sum(inside), 0L)
+  k_full <- a5R::a5_u64_to_hex(full$cell)
+  k_sub  <- a5R::a5_u64_to_hex(sub$cell[inside])
+  ord <- match(k_sub, k_full)
+  expect_false(anyNA(ord))
+  expect_equal(sub$B02[inside], full$B02[ord])
+})
+
+test_that("bbox arg validates", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+  expect_error(a5_read_raster(path, resolution = 12L, bbox = c(0, 0)),
+               "length-4")
+  expect_error(a5_read_raster(path, resolution = 12L, bbox = c(2, 0, 1, 1)),
+               "xmin < xmax")
+})
+
+test_that("src_nodata overrides metadata nodata", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  default <- a5_read_raster(path, resolution = 14L, stat = "count", bands = 1L)
+  # exe_cog.tif uses nodata=0; override to a sentinel that never appears so
+  # all pixels are treated as valid -> per-cell counts go up.
+  forced  <- a5_read_raster(path, resolution = 14L, stat = "count", bands = 1L,
+                            src_nodata = -9999)
+
+  # both produce the same cell set at this resolution; counts in `forced`
+  # should be >= counts in `default` (no pixels filtered as nodata)
+  k_d <- a5R::a5_u64_to_hex(default$cell)
+  k_f <- a5R::a5_u64_to_hex(forced$cell)
+  ord <- match(k_d, k_f)
+  expect_false(anyNA(ord))
+  expect_true(all(forced$B02[ord] >= default$B02))
+  expect_true(sum(forced$B02) > sum(default$B02))
+})
+
 test_that("user-defined CRS is reconstructed from GeoKey fields (LAEA)", {
   path <- system.file("extdata", "laea_custom.tif", package = "a5px")
   skip_if(path == "", "laea_custom.tif not installed")
