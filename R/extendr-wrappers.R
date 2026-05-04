@@ -26,4 +26,24 @@ a5px_get_threads_rs <- function() .Call(wrap__a5px_get_threads_rs)
 #' @keywords internal
 a5_read_raster_rs <- function(src, resolution, stat, bands_idx, bands_names, threads, io_concurrency) .Call(wrap__a5_read_raster_rs, src, resolution, stat, bands_idx, bands_names, threads, io_concurrency)
 
+#' Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells, returning a
+#' flat cell-major numeric buffer suitable for direct construction of an
+#' Arrow `FixedSizeList<float64, n_bands>` array on the R side.
+#'
+#' @param src Path or URL string.
+#' @param resolution A5 resolution (0--30).
+#' @param stat One of "mean", "sum", "count", "min", "max".
+#' @param bands_idx 1-based band indices to read (empty for all unless
+#'   `bands_names` is provided).
+#' @param bands_names Band names to read (matched against the GDAL
+#'   DESCRIPTION tag).
+#' @param threads Worker threads.
+#' @param io_concurrency Number of tiles fetched concurrently.
+#' @returns A list with `cell` (b1..b8 raw), `value_flat` (numeric of length
+#'   `n_cells * n_bands`, cell-major), `band_names` (character), and
+#'   `n_bands` (integer scalar).
+#' @noRd
+#' @keywords internal
+a5_read_raster_flat_rs <- function(src, resolution, stat, bands_idx, bands_names, threads, io_concurrency) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stat, bands_idx, bands_names, threads, io_concurrency)
+
 # nolint end

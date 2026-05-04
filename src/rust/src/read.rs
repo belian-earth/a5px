@@ -649,24 +649,28 @@ async fn read_raster_async(
 
     let n = map.len();
     let mut cells = Vec::with_capacity(n);
-    let mut values: Vec<Vec<f64>> = (0..n_out).map(|_| Vec::with_capacity(n)).collect();
+    // cell-major flat layout: pos i*n_out + b is band b of cell i
+    let mut flat: Vec<f64> = Vec::with_capacity(n * n_out);
     for (cell, accs) in map {
         cells.push(cell);
-        for (b, a) in accs.iter().enumerate() {
-            values[b].push(a.finalise(stat));
+        for a in accs.iter() {
+            flat.push(a.finalise(stat));
         }
     }
 
     Ok(Output {
         cells,
-        values,
+        flat_values: flat,
+        n_bands: n_out,
         band_names,
     })
 }
 
 struct Output {
     cells: Vec<u64>,
-    values: Vec<Vec<f64>>,
+    /// Cell-major flat values: cell i band b is at index `i * n_bands + b`.
+    flat_values: Vec<f64>,
+    n_bands: usize,
     band_names: Vec<String>,
 }
 
@@ -739,9 +743,16 @@ fn a5_read_raster_rs(
 
     let cell_list = u64s_to_raw8_list(&out.cells);
 
-    let mut band_pairs: Vec<(String, Robj)> = Vec::with_capacity(out.values.len());
-    for (name, vals) in out.band_names.iter().zip(out.values.into_iter()) {
-        band_pairs.push((name.clone(), Robj::from(vals)));
+    // de-interleave the flat cell-major buffer into one Vec<f64> per band
+    let n_cells = out.cells.len();
+    let n_bands = out.n_bands;
+    let mut band_pairs: Vec<(String, Robj)> = Vec::with_capacity(n_bands);
+    for (b, name) in out.band_names.iter().enumerate() {
+        let mut col: Vec<f64> = Vec::with_capacity(n_cells);
+        for i in 0..n_cells {
+            col.push(out.flat_values[i * n_bands + b]);
+        }
+        band_pairs.push((name.clone(), Robj::from(col)));
     }
     let bands = List::from_pairs(band_pairs);
     let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
@@ -750,6 +761,86 @@ fn a5_read_raster_rs(
         cell = cell_list,
         bands = bands,
         band_names = band_names
+    )
+    .into())
+}
+
+/// Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells, returning a
+/// flat cell-major numeric buffer suitable for direct construction of an
+/// Arrow `FixedSizeList<float64, n_bands>` array on the R side.
+///
+/// @param src Path or URL string.
+/// @param resolution A5 resolution (0--30).
+/// @param stat One of "mean", "sum", "count", "min", "max".
+/// @param bands_idx 1-based band indices to read (empty for all unless
+///   `bands_names` is provided).
+/// @param bands_names Band names to read (matched against the GDAL
+///   DESCRIPTION tag).
+/// @param threads Worker threads.
+/// @param io_concurrency Number of tiles fetched concurrently.
+/// @returns A list with `cell` (b1..b8 raw), `value_flat` (numeric of length
+///   `n_cells * n_bands`, cell-major), `band_names` (character), and
+///   `n_bands` (integer scalar).
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_read_raster_flat_rs(
+    src: &str,
+    resolution: i32,
+    stat: &str,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
+    threads: i32,
+    io_concurrency: i32,
+) -> Result<Robj> {
+    if !(0..=30).contains(&resolution) {
+        return Err(A5CogError::Invalid(format!(
+            "resolution must be 0..=30, got {resolution}"
+        )));
+    }
+    if !bands_idx.is_empty() && !bands_names.is_empty() {
+        return Err(A5CogError::Invalid(
+            "specify bands by index OR by name, not both".into(),
+        ));
+    }
+    let stat = Stat::parse(stat)?;
+    let threads = threads.max(1) as usize;
+    let io_concurrency = io_concurrency.max(1) as usize;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()
+        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+
+    let prof = profile_enabled();
+    if prof {
+        reset_timers();
+    }
+    let t0 = Instant::now();
+
+    let out: Output = runtime.block_on(read_raster_async(
+        src,
+        resolution,
+        stat,
+        bands_idx,
+        bands_names,
+        io_concurrency,
+    ))?;
+
+    if prof {
+        print_timers(t0.elapsed().as_secs_f64());
+    }
+
+    let cell_list = u64s_to_raw8_list(&out.cells);
+    let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
+    let n_bands = out.n_bands as i32;
+
+    Ok(list!(
+        cell = cell_list,
+        value_flat = Robj::from(out.flat_values),
+        band_names = band_names,
+        n_bands = n_bands
     )
     .into())
 }
@@ -764,4 +855,5 @@ impl From<A5CogError> for extendr_api::Error {
 extendr_module! {
     mod read;
     fn a5_read_raster_rs;
+    fn a5_read_raster_flat_rs;
 }
