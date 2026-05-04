@@ -75,6 +75,34 @@ test_that("a5_write_parquet accepts a tibble from a5_read_raster (per-band)", {
   expect_setequal(names(back), c("cell", "B02", "B03"))
 })
 
+test_that("a5_raster_to_parquet matches the R-Arrow path bit-for-bit", {
+  testthat::skip_if_not_installed("arrow")
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  dest <- withr::local_tempfile(fileext = ".parquet")
+  a5_raster_to_parquet(path, dest, resolution = 14L, bands = 1:3,
+                       value_type = "float32")
+
+  back <- arrow::read_parquet(dest, as_data_frame = FALSE)
+  expect_match(back$value$type$ToString(),
+               "fixed_size_list<[A-Za-z]+: float>\\[3\\]")
+  expect_equal(back$schema$metadata$a5px_band_names, "B02\nB03\nB04")
+  expect_equal(back$schema$metadata$a5px_resolution, "14")
+  expect_equal(back$schema$metadata$a5px_stat, "mean")
+
+  ref <- a5_read_raster_arrow(path, resolution = 14L, bands = 1:3,
+                              value_type = "float32")
+  back_keys <- a5R::a5_u64_to_hex(a5R::a5_cell_from_arrow(back$cell))
+  ref_keys  <- a5R::a5_u64_to_hex(a5R::a5_cell_from_arrow(ref$cell))
+  ord <- match(ref_keys, back_keys)
+  expect_false(anyNA(ord))
+  back_flat <- unlist(back$value$as_vector()[ord])
+  ref_flat  <- unlist(ref$value$as_vector())
+  expect_equal(back_flat, ref_flat)
+})
+
 test_that("a5_write_parquet accepts a tibble from a5_read_raster (as_vector list col)", {
   testthat::skip_if_not_installed("arrow")
   skip_no_tifs()

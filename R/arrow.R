@@ -81,6 +81,73 @@ a5_read_raster_arrow <- function(src,
   ))
 }
 
+#' Read a raster and write it straight to Parquet (Rust-direct)
+#'
+#' Same engine and on-disk schema as [a5_read_raster_arrow()] +
+#' [a5_write_parquet()], but skips the R/Arrow round-trip entirely:
+#' the Rust side aggregates pixels into A5 cells, builds the
+#' `cell:uint64` + `value:FixedSizeList<float, n_bands>` RecordBatch
+#' from its existing flat buffer, and writes Parquet via the
+#' `parquet` Rust crate. No intermediate R numeric materialisation.
+#'
+#' Pick this when you want a Parquet file at the end and don't need
+#' the Arrow Table in R. For million-cell embedding rasters it avoids
+#' the per-cell list-of-vectors construction that the R-Arrow path
+#' does, which is the main remaining cost in that pipeline.
+#'
+#' @param src,resolution,stat,bands,threads,io_concurrency See
+#'   [a5_read_raster()].
+#' @param dest Output Parquet path.
+#' @param value_type Storage type for the value column. `"float64"`
+#'   (default) or `"float32"` (halves the disk size for embeddings).
+#' @param compression Parquet compression codec.
+#'   One of `"zstd"` (default), `"snappy"`, `"none"`.
+#' @returns `dest` invisibly.
+#'
+#' @export
+#' @examples
+#' \dontrun{
+#'   a5_raster_to_parquet(
+#'     "https://data.source.coop/.../tile.tiff",
+#'     "embeddings.parquet",
+#'     resolution = 14L, bands = 1:8, value_type = "float32"
+#'   )
+#' }
+a5_raster_to_parquet <- function(src,
+                                 dest,
+                                 resolution,
+                                 stat = c("mean", "sum", "count", "min", "max"),
+                                 bands = NULL,
+                                 value_type = c("float64", "float32"),
+                                 compression = c("zstd", "snappy", "none"),
+                                 threads = 1L,
+                                 io_concurrency = 8L) {
+  check_scalar_string(src, "src")
+  check_scalar_string(dest, "dest")
+  resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
+  vctrs::vec_assert(resolution, size = 1L)
+  check_resolution(resolution)
+  stat <- rlang::arg_match(stat)
+  value_type <- rlang::arg_match(value_type)
+  compression <- rlang::arg_match(compression)
+  threads <- check_scalar_count(threads, "threads")
+  io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
+  band_sel <- parse_bands_arg(bands)
+
+  invisible(a5_raster_to_parquet_rs(
+    src = src,
+    dest = dest,
+    resolution = resolution,
+    stat = stat,
+    bands_idx = band_sel$idx,
+    bands_names = band_sel$names,
+    value_type = value_type,
+    compression = compression,
+    threads = threads,
+    io_concurrency = io_concurrency
+  ))
+}
+
 #' Write A5-keyed values to a Parquet file
 #'
 #' Convenience writer. Accepts either an [arrow::Table] from

@@ -4,6 +4,7 @@ mod band_fetch;
 mod cell_raw;
 mod error;
 mod geo;
+mod parquet_write;
 mod read;
 mod threading;
 

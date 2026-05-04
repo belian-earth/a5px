@@ -852,8 +852,97 @@ impl From<A5CogError> for extendr_api::Error {
     }
 }
 
+/// Forward-aggregate a (Cloud-Optimised) GeoTIFF straight into a Parquet
+/// file. RecordBatch construction and Parquet write happen in Rust without
+/// the R Arrow round-trip — appropriate for large embedding rasters where
+/// the per-cell list-of-vectors materialisation in R becomes a bottleneck.
+///
+/// @param src Path or URL string.
+/// @param dest Output Parquet path.
+/// @param resolution A5 resolution (0--30).
+/// @param stat One of "mean", "sum", "count", "min", "max".
+/// @param bands_idx,bands_names Band selection (see `a5_read_raster_rs`).
+/// @param value_type Storage type for the value column ("float64" | "float32").
+/// @param compression Parquet compression codec ("zstd" | "snappy" | "none").
+/// @param threads Worker threads.
+/// @param io_concurrency Number of tiles fetched concurrently.
+/// @returns The destination path (character scalar) on success.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_raster_to_parquet_rs(
+    src: &str,
+    dest: &str,
+    resolution: i32,
+    stat: &str,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
+    value_type: &str,
+    compression: &str,
+    threads: i32,
+    io_concurrency: i32,
+) -> Result<String> {
+    if !(0..=30).contains(&resolution) {
+        return Err(A5CogError::Invalid(format!(
+            "resolution must be 0..=30, got {resolution}"
+        )));
+    }
+    if !bands_idx.is_empty() && !bands_names.is_empty() {
+        return Err(A5CogError::Invalid(
+            "specify bands by index OR by name, not both".into(),
+        ));
+    }
+    let stat_e = Stat::parse(stat)?;
+    let value_type_e = crate::parquet_write::ValueType::parse(value_type)?;
+    let compression_e = crate::parquet_write::CompressionChoice::parse(compression)?;
+    let threads = threads.max(1) as usize;
+    let io_concurrency = io_concurrency.max(1) as usize;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()
+        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+
+    let prof = profile_enabled();
+    if prof {
+        reset_timers();
+    }
+    let t0 = Instant::now();
+
+    let out: Output = runtime.block_on(read_raster_async(
+        src,
+        resolution,
+        stat_e,
+        bands_idx,
+        bands_names,
+        io_concurrency,
+    ))?;
+
+    if prof {
+        print_timers(t0.elapsed().as_secs_f64());
+    }
+
+    let n_bands = out.n_bands;
+    let band_names = out.band_names;
+    crate::parquet_write::write_arrow_parquet(
+        dest,
+        out.cells,
+        out.flat_values,
+        n_bands,
+        &band_names,
+        resolution,
+        stat,
+        value_type_e,
+        compression_e,
+    )?;
+
+    Ok(dest.to_string())
+}
+
 extendr_module! {
     mod read;
     fn a5_read_raster_rs;
     fn a5_read_raster_flat_rs;
+    fn a5_raster_to_parquet_rs;
 }

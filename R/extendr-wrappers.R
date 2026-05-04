@@ -46,4 +46,23 @@ a5_read_raster_rs <- function(src, resolution, stat, bands_idx, bands_names, thr
 #' @keywords internal
 a5_read_raster_flat_rs <- function(src, resolution, stat, bands_idx, bands_names, threads, io_concurrency) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stat, bands_idx, bands_names, threads, io_concurrency)
 
+#' Forward-aggregate a (Cloud-Optimised) GeoTIFF straight into a Parquet
+#' file. RecordBatch construction and Parquet write happen in Rust without
+#' the R Arrow round-trip — appropriate for large embedding rasters where
+#' the per-cell list-of-vectors materialisation in R becomes a bottleneck.
+#'
+#' @param src Path or URL string.
+#' @param dest Output Parquet path.
+#' @param resolution A5 resolution (0--30).
+#' @param stat One of "mean", "sum", "count", "min", "max".
+#' @param bands_idx,bands_names Band selection (see `a5_read_raster_rs`).
+#' @param value_type Storage type for the value column ("float64" | "float32").
+#' @param compression Parquet compression codec ("zstd" | "snappy" | "none").
+#' @param threads Worker threads.
+#' @param io_concurrency Number of tiles fetched concurrently.
+#' @returns The destination path (character scalar) on success.
+#' @noRd
+#' @keywords internal
+a5_raster_to_parquet_rs <- function(src, dest, resolution, stat, bands_idx, bands_names, value_type, compression, threads, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stat, bands_idx, bands_names, value_type, compression, threads, io_concurrency)
+
 # nolint end

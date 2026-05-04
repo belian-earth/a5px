@@ -3,7 +3,7 @@ name = 'a5px'
 publish = false
 version = '0.1.0'
 edition = '2021'
-rust-version = '1.80'
+rust-version = '1.85'
 
 [lib]
 crate-type = [ 'rlib', 'staticlib' ]
@@ -26,6 +26,10 @@ bytes = '1'
 ahash = '0.8'
 thiserror = '2'
 url = '2'
+arrow-array = '58'
+arrow-buffer = '58'
+arrow-schema = '58'
+parquet = { version = '58', default-features = false, features = ['arrow', 'zstd', 'snap'] }
 
 [profile.release]
 lto = true
