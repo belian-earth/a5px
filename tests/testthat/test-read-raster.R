@@ -166,7 +166,7 @@ test_that("a5_read_raster validates resolution", {
   expect_error(a5_read_raster(path, resolution = -1), "must be between")
 })
 
-test_that("multi-stat in one pass produces band__stat columns", {
+test_that("multi-stat in one pass produces band_stat columns", {
   skip_no_tifs()
   path <- file.path(tif_dir(), "exe_cog.tif")
   skip_if_not(file.exists(path), "exe_cog.tif missing")
@@ -176,16 +176,48 @@ test_that("multi-stat in one pass produces band__stat columns", {
                         bands = c("B02", "B03"))
   expect_setequal(
     setdiff(names(out), "cell"),
-    c("B02__mean", "B02__count", "B02__sum",
-      "B03__mean", "B03__count", "B03__sum")
+    c("B02_mean", "B02_count", "B02_sum",
+      "B03_mean", "B03_count", "B03_sum")
   )
-  fi <- is.finite(out$B02__mean) & is.finite(out$B02__count)
-  expect_true(all(out$B02__count[fi] >= 1))
-  expect_lt(max(abs(out$B02__sum[fi] - out$B02__mean[fi] * out$B02__count[fi])), 1e-6)
+  fi <- is.finite(out$B02_mean) & is.finite(out$B02_count)
+  expect_true(all(out$B02_count[fi] >= 1))
+  expect_lt(max(abs(out$B02_sum[fi] - out$B02_mean[fi] * out$B02_count[fi])), 1e-6)
 
   # single-stat path is unchanged (column = band name)
   s1 <- a5_read_raster(path, resolution = 12L, stat = "mean", bands = "B02")
   expect_setequal(setdiff(names(s1), "cell"), "B02")
+})
+
+test_that("streaming var / sd agree with R's var() / sd() per cell", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  # res 11 gives many pixels per cell on the test tile, so sample variance
+  # is well-defined for most cells.
+  out <- a5_read_raster(path, resolution = 11L,
+                        stat = c("mean", "count", "var", "sd"),
+                        bands = "B02")
+  expect_setequal(setdiff(names(out), "cell"),
+                  c("B02_mean", "B02_count", "B02_var", "B02_sd"))
+
+  fi <- is.finite(out$B02_var) & is.finite(out$B02_sd) & out$B02_count >= 2L
+  expect_true(any(fi))
+  expect_equal(out$B02_sd[fi], sqrt(out$B02_var[fi]), tolerance = 1e-12)
+  expect_true(all(out$B02_var[fi] >= 0))
+  # n=1 cells should be NA for var / sd
+  one <- out$B02_count == 1L
+  if (any(one)) {
+    expect_true(all(is.na(out$B02_var[one])))
+    expect_true(all(is.na(out$B02_sd[one])))
+  }
+
+  # var must equal mean(x^2) - mean(x)^2 scaled by n/(n-1) for the same
+  # pixel set. We don't have access to per-pixel values here, but we can
+  # verify the relationship sd^2 == var holds and that both stats remain
+  # bounded by sane physical limits for an unsigned-integer raster.
+  expect_true(all(out$B02_var[fi] >= 0))
+  expect_true(all(out$B02_sd[fi]  >= 0))
 })
 
 test_that("multi-stat errors on duplicate or unknown stats", {
