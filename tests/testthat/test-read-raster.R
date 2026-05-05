@@ -119,6 +119,27 @@ test_that("a5_read_raster errors on bad band selection", {
                "positive")
 })
 
+test_that("multi-stat + as_vector emits one list column per stat", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  out <- a5_read_raster(path, resolution = 14L,
+                        stat = c("mean", "max"), bands = c(1L, 2L),
+                        as_vector = TRUE)
+  expect_setequal(names(out), c("cell", "value_mean", "value_max"))
+  expect_type(out$value_mean, "list")
+  expect_type(out$value_max,  "list")
+  expect_equal(unique(lengths(out$value_mean)), 2L)
+  expect_equal(unique(lengths(out$value_max)),  2L)
+
+  # max >= mean per cell, per band
+  for (i in seq_len(nrow(out))) {
+    fi <- is.finite(out$value_mean[[i]]) & is.finite(out$value_max[[i]])
+    expect_true(all(out$value_max[[i]][fi] >= out$value_mean[[i]][fi]))
+  }
+})
+
 test_that("a5_read_raster as_vector = TRUE collapses bands to a list column", {
   skip_no_tifs()
   path <- file.path(tif_dir(), "exe_cog.tif")

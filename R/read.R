@@ -52,8 +52,10 @@
 #'   `min(32, max(cpu_workers, 8))`. Bump this for cloud reads of multi-band
 #'   embedding rasters where the network can absorb more parallelism than
 #'   the CPU pool. See [a5px_set_concurrency()].
-#' @param as_vector Logical. If `TRUE`, collapse all (selected) bands into a
-#'   single list column `value` of fixed-length numeric vectors. Useful for
+#' @param as_vector Logical. If `TRUE`, collapse the (selected) bands into
+#'   list columns of fixed-length numeric vectors -- one per stat. Single
+#'   stat returns a single column `value`; multi-stat returns
+#'   `value_<stat>` columns (e.g. `value_mean`, `value_max`). Useful for
 #'   embedding rasters. Default `FALSE` (one numeric column per band).
 #'
 #' @returns A [tibble::tibble()] with columns:
@@ -147,17 +149,19 @@ a5_read_raster <- function(src,
   }
 
   if (as_vector) {
-    if (length(stats) > 1L) {
-      cli::cli_abort("{.arg as_vector} = TRUE is only supported for a single stat.")
-    }
     n <- length(cells)
-    n_bands <- length(bands)
-    mat <- vapply(bands, identity, numeric(n))
-    if (n_bands == 1L) {
-      dim(mat) <- c(n, 1L)
+    band_names <- as.character(out$band_names)
+    n_bands <- length(band_names)
+    cols <- list(cell = cells)
+    for (s in stats) {
+      keys <- if (length(stats) == 1L) band_names else paste(band_names, s, sep = "__")
+      mat <- vapply(bands[keys], identity, numeric(n))
+      if (n_bands == 1L) dim(mat) <- c(n, 1L)
+      val <- lapply(seq_len(n), function(i) as.numeric(mat[i, ]))
+      col_name <- if (length(stats) == 1L) "value" else paste0("value_", s)
+      cols[[col_name]] <- val
     }
-    value <- lapply(seq_len(n), function(i) as.numeric(mat[i, ]))
-    tibble::tibble(cell = cells, value = value)
+    tibble::tibble(!!!cols)
   } else {
     tibble::tibble(cell = cells, !!!bands)
   }

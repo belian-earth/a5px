@@ -59,8 +59,10 @@ to the I/O stage. \code{NULL} (default) resolves from
 embedding rasters where the network can absorb more parallelism than
 the CPU pool. See \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.}
 
-\item{as_vector}{Logical. If \code{TRUE}, collapse all (selected) bands into a
-single list column \code{value} of fixed-length numeric vectors. Useful for
+\item{as_vector}{Logical. If \code{TRUE}, collapse the (selected) bands into
+list columns of fixed-length numeric vectors -- one per stat. Single
+stat returns a single column \code{value}; multi-stat returns
+\verb{value_<stat>} columns (e.g. \code{value_mean}, \code{value_max}). Useful for
 embedding rasters. Default \code{FALSE} (one numeric column per band).}
 }
 \value{
