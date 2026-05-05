@@ -1,7 +1,8 @@
-^a5cog\.Rproj$
+^a5px\.Rproj$
 ^\.Rproj\.user$
 ^\.vscode$
 ^\.claude$
+^aef-dev\.R$
 ^src/\.cargo$
 ^src/rust/vendor$
 ^src/rust/target$
@@ -9,6 +10,11 @@
 ^src/Makevars\.win$
 ^benchmarks$
 ^test-tifs$
-^NOTES\.md$
+^dev$
 ^dev\.R$
 ^README\.Rmd$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$
+^\.github$
+^codecov\.yml$

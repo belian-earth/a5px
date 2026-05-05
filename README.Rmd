@@ -18,6 +18,9 @@ knitr::opts_chunk$set(
 <!-- badges: start -->
 [![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![R-CMD-check](https://github.com/belian-earth/a5px/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/belian-earth/a5px/actions/workflows/R-CMD-check.yaml)
+[![Codecov test coverage](https://codecov.io/gh/belian-earth/a5px/graph/badge.svg)](https://app.codecov.io/gh/belian-earth/a5px)
+[![extendr](https://img.shields.io/badge/extendr-^0.9.0-276DC2)](https://extendr.github.io/extendr/extendr_api/)
 <!-- badges: end -->
 
 a5px is a Rust-backed R package that streams GeoTIFF / Cloud-Optimised
@@ -58,26 +61,19 @@ library(a5px)
 
 url <- "https://s2downloads.eox.at/demo/EOxCloudless/2020/rgb_corrected_geodetic/3/0/0.tif"
 
-a5px_set_threads(8)
+
 EOx <- a5_read_raster(
   url,
   resolution     = 5L,
-  stat           = "mean",
-  threads        = 8L,
-  io_concurrency = 16L
+  stat           = "mean"
 )
+
 EOx 
 
 # Render the three bands as RGB and view on the globe
-EOx$rgb <- grDevices::rgb(
-  red   = scales::rescale(EOx$band_01, to = c(0, 255)),
-  green = scales::rescale(EOx$band_02, to = c(0, 255)),
-  blue  = scales::rescale(EOx$band_03, to = c(0, 255)),
-  maxColorValue = 255
-)
 
 a5view::a5_view(EOx, 
-                fill = rgb, 
+                fill = a5view::cells_rgb(EOx$band_01, EOx$band_02, EOx$band_03), 
                 fill_identity = TRUE,
                 border = "#ffffff", 
                 border_width = 0.25,

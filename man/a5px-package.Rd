@@ -27,6 +27,23 @@ Parquet writes
 bypassing the R-side Arrow round-trip (preferred for large embedding
 rasters)
 }
+
+All three readers share the same \code{as_vector} switch: \code{FALSE} (default)
+returns one column per band, \code{TRUE} returns a single fixed-length list /
+\code{FixedSizeList} value column.
+}
+
+\section{Aggregating to coarser cells}{
+
+\itemize{
+\item \code{\link[=a5_aggregate]{a5_aggregate()}} --- pure-R aggregator that lifts an existing
+\code{a5_cell}-keyed tibble to a coarser resolution via the A5-native
+centroid hierarchy (\code{\link[a5R:a5_cell_to_parent]{a5R::a5_cell_to_parent()}}). Avoids re-reading the
+source raster when you already have a high-resolution result and want
+it summarised. Handles both wide (one column per band) and list-column
+layouts; list columns are reduced element-wise. Same \code{stat} vocabulary
+as the readers.
+}
 }
 
 \section{Writing}{
@@ -40,8 +57,9 @@ a schema tailored to A5 cell + value lists
 \section{Configuration}{
 
 \itemize{
-\item \code{\link[=a5px_set_threads]{a5px_set_threads()}} / \code{\link[=a5px_get_threads]{a5px_get_threads()}} --- multi-threading control
-(independent of \code{\link[a5R:a5_threads]{a5R::a5_set_threads()}})
+\item \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}} / \code{\link[=a5px_get_concurrency]{a5px_get_concurrency()}} --- two-knob control
+over the CPU consumer pool (\code{cpu_workers}) and the maximum in-flight
+tile fetches (\code{io_concurrency}). Independent of \code{\link[a5R:a5_threads]{a5R::a5_set_threads()}}.
 }
 }
 
@@ -53,12 +71,15 @@ All readers accept the same core arguments:
 \verb{s3://}, \verb{gs://}, \verb{az://}. Cloud reads stream byte ranges; the full file
 is never materialised.
 \item \code{resolution} --- A5 cell resolution (0--30); see \code{\link[a5R:a5_cell_area]{a5R::a5_cell_area()}}.
-\item \code{stat} --- one or more of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"}, \code{"max"}.
-A character vector emits one column per (band, stat) pair.
+\item \code{stat} --- one or more of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"}, \code{"max"},
+\code{"var"}, \code{"sd"}. A character vector emits one column per (band, stat)
+pair. \code{var} / \code{sd} use Welford's online algorithm and the sample formula
+(divisor n - 1); cells with a single pixel return \code{NA}.
 \item \code{bands} --- \code{NULL} (all), integer vector (1-based), or character vector
 matched against the GDAL \code{DESCRIPTION} tag. For planar-layout TIFFs the
 reader fetches only the byte ranges of the selected bands.
-\item \code{threads}, \code{io_concurrency} --- tile-level concurrency knobs.
+\item \code{cpu_workers}, \code{io_concurrency} --- tile-level concurrency knobs; see
+\code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.
 }
 }
 
@@ -97,6 +118,7 @@ accumulator push, merge) summed across tile workers.
 Useful links:
 \itemize{
   \item \url{https://github.com/belian-earth/a5px}
+  \item \url{https://belian-earth.github.io/a5px/}
   \item Report bugs at \url{https://github.com/belian-earth/a5px/issues}
 }
 

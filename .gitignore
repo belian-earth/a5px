@@ -16,3 +16,5 @@ test-tifs/
 .claude/settings.local.json
 dev.R
 *.parquet
+docs
+dev/

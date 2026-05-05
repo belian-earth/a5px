@@ -24,7 +24,11 @@ a5_read_raster(
 \item{resolution}{Integer scalar A5 resolution (0--30).}
 
 \item{stat}{Aggregation. One of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"},
-\code{"max"}. Default \code{"mean"}.}
+\code{"max"}, \code{"var"}, \code{"sd"}, or any non-duplicated subset of those for a
+one-pass multi-stat read. Default \code{"mean"}. \code{"var"} / \code{"sd"} use the
+sample formula (divisor n - 1) computed via Welford's online algorithm
+in the streaming aggregator, matching \code{\link[stats:cor]{stats::var()}} / \code{\link[stats:sd]{stats::sd()}};
+cells covered by a single pixel return \code{NA}.}
 
 \item{bands}{Bands to read. One of:
 \itemize{
@@ -87,6 +91,12 @@ loading the full raster into memory. CRS reprojection uses pure-Rust
 its value to exactly one A5 cell, determined by the lon/lat of its centre.
 
 Two sampling modes are available:
+
+Multi-stat output naming: with \code{stat = c("mean", "max")} the wide
+(per-band) tibble columns are \verb{<band>_mean}, \verb{<band>_max}. Single
+underscore separator. Same convention applies in
+\code{\link[=a5_read_raster_arrow]{a5_read_raster_arrow()}} and \code{\link[=a5_raster_to_parquet]{a5_raster_to_parquet()}} when
+\code{as_vector = FALSE}.
 \itemize{
 \item \code{"forward"} (default): for each pixel, push its value into the cell
 containing its centroid. Good when cells are larger than (or

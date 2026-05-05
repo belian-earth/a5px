@@ -1,0 +1,57 @@
+url: https://belian-earth.github.io/a5px/
+development:
+  mode: auto
+template:
+  bootstrap: 5
+  bootswatch: cosmo
+  bslib:
+    primary: '#74ac90ff'
+  math-rendering: mathjax
+navbar:
+  structure:
+    left:
+    - reference
+    - intro
+    - articles
+    - news
+    right:
+    - search
+    - github
+  components:
+    github:
+      icon: fa-github
+      href: https://github.com/belian-earth/a5px
+      aria-label: GitHub
+reference:
+- title: Reading rasters
+  desc: >
+    Stream a (Cloud-Optimised) GeoTIFF and aggregate pixels into A5 cells in
+    one pass. All three readers share the same `stat`, `bands`, `bbox`,
+    `src_nodata`, `cpu_workers`, `io_concurrency`, and `as_vector`
+    arguments; they differ only in output type (tibble, Arrow Table, or a
+    Parquet file written direct from Rust).
+  contents:
+  - a5_read_raster
+  - a5_read_raster_arrow
+  - a5_raster_to_parquet
+- title: Aggregating to coarser cells
+  desc: >
+    Lift an existing `a5_cell`-keyed tibble to a coarser resolution via the
+    A5-native centroid hierarchy. Avoids re-reading the source raster.
+  contents:
+  - a5_aggregate
+- title: Writing
+  desc: >
+    Write A5-keyed values to Parquet. Accepts the tibble from
+    `a5_read_raster()` or the Arrow Table from `a5_read_raster_arrow()`.
+  contents:
+  - a5_write_parquet
+- title: Configuration
+  desc: >
+    Two-knob concurrency control: a CPU consumer pool for tile decoding and
+    aggregation, and an in-flight cap on tile fetches.
+  contents:
+  - a5px_set_concurrency
+- title: Package overview
+  contents:
+  - a5px-package

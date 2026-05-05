@@ -9,6 +9,10 @@
 experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
 [![License: Apache
 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
+[![R-CMD-check](https://github.com/belian-earth/a5px/actions/workflows/R-CMD-check.yaml/badge.svg)](https://github.com/belian-earth/a5px/actions/workflows/R-CMD-check.yaml)
+[![Codecov test
+coverage](https://codecov.io/gh/belian-earth/a5px/graph/badge.svg)](https://app.codecov.io/gh/belian-earth/a5px)
+[![extendr](https://img.shields.io/badge/extendr-%5E0.9.0-276DC2)](https://extendr.github.io/extendr/extendr_api/)
 <!-- badges: end -->
 
 a5px is a Rust-backed R package that streams GeoTIFF / Cloud-Optimised
@@ -48,40 +52,33 @@ library(a5px)
 
 url <- "https://s2downloads.eox.at/demo/EOxCloudless/2020/rgb_corrected_geodetic/3/0/0.tif"
 
-a5px_set_threads(8)
+
 EOx <- a5_read_raster(
   url,
   resolution     = 5L,
-  stat           = "mean",
-  threads        = 8L,
-  io_concurrency = 16L
+  stat           = "mean"
 )
+
 EOx 
 #> # A tibble: 7,928 × 4
 #>    cell             band_01 band_02 band_03
 #>    <a5_cell>          <dbl>   <dbl>   <dbl>
-#>  1 22aa000000000000    7.67    15      17.7
-#>  2 654a000000000000   55.6     62.4    38.7
-#>  3 8382000000000000   11.3     27.3    22.1
-#>  4 952a000000000000    5.98    16.8    26.2
-#>  5 c47e000000000000  221.     230.    235. 
-#>  6 975a000000000000    3.38    11.3    24.9
-#>  7 781e000000000000   28.4     43.5    49.7
-#>  8 33ce000000000000   24.2     30.6    36.9
-#>  9 0502000000000000    7.51    19.0    16.1
-#> 10 4d62000000000000   13.5     23.9    24.4
+#>  1 3066000000000000    5.08   12.8    15.5 
+#>  2 04d6000000000000   55.7    50.0    23.6 
+#>  3 5276000000000000  251.    174.     94.5 
+#>  4 bd3e000000000000  253.    255.    254.  
+#>  5 00ca000000000000   23.2    32.3    28.5 
+#>  6 2dce000000000000   30.9    28.8    20.6 
+#>  7 1e1e000000000000   14.8    25.4    30.0 
+#>  8 8316000000000000    1.90    9.64    9.96
+#>  9 8d02000000000000   66.6    52.8    25.5 
+#> 10 3a56000000000000   27.1    54.5    27.0 
 #> # ℹ 7,918 more rows
 
 # Render the three bands as RGB and view on the globe
-EOx$rgb <- grDevices::rgb(
-  red   = scales::rescale(EOx$band_01, to = c(0, 255)),
-  green = scales::rescale(EOx$band_02, to = c(0, 255)),
-  blue  = scales::rescale(EOx$band_03, to = c(0, 255)),
-  maxColorValue = 255
-)
 
 a5view::a5_view(EOx, 
-                fill = rgb, 
+                fill = a5view::cells_rgb(EOx$band_01, EOx$band_02, EOx$band_03), 
                 fill_identity = TRUE,
                 border = "#ffffff", 
                 border_width = 0.25,
