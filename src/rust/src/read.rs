@@ -253,11 +253,14 @@ fn parse_src(src: &str) -> Result<(Arc<dyn ObjectStore>, ObjPath)> {
     // url::Url::parse only succeeds when src has a scheme; treat anything
     // that parses as a URL as remote and let object_store::parse_url decide
     // whether the scheme is supported. Anything that doesn't parse falls
-    // through to the local-path branch.
+    // through to the local-path branch. Skip single-letter "schemes" so
+    // Windows drive-letter paths (e.g. `d:/foo/bar.tif`) take the local path.
     if let Ok(url) = url::Url::parse(src) {
-        let (store, path) = object_store::parse_url(&url)
-            .map_err(|e| A5CogError::Invalid(format!("parse_url: {e}")))?;
-        return Ok((Arc::from(store), path));
+        if url.scheme().len() > 1 {
+            let (store, path) = object_store::parse_url(&url)
+                .map_err(|e| A5CogError::Invalid(format!("parse_url: {e}")))?;
+            return Ok((Arc::from(store), path));
+        }
     }
     let p = std::path::Path::new(src);
     if !p.exists() {

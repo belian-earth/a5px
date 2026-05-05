@@ -28,6 +28,10 @@ jobs:
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
+      # Match R's macOS deployment target so cc-rs (used by zstd-sys) does
+      # not emit "object built for newer macOS than being linked" warnings,
+      # which rcmdcheck escalates to errors via error_on = "warning".
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
 
     steps:
       - uses: actions/checkout@v6
