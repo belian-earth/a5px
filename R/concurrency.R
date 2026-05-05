@@ -76,12 +76,12 @@ resolve_io_concurrency <- function(cpu_workers = NULL) {
   }
   if (is.null(v) || is.na(v) || v < 1L) {
     if (is.null(cpu_workers)) cpu_workers <- resolve_cpu_workers()
-    # Conservative cloud default: at least 16, but no higher than cpu_workers
-    # on big machines. Many cloud backends (CloudFlare, S3) start to queue
-    # or throttle past ~16-32 simultaneous range requests, so going higher
-    # by default tends to slow things down rather than help. Tunable via
+    # Conservative cloud default: between 8 (so small machines still get
+    # some I/O parallelism) and 16 (CloudFlare / S3 / Source Cooperative
+    # tend to queue or throttle past ~16 simultaneous range requests, so
+    # going higher tends to hurt rather than help). Tune up via
     # a5px_set_concurrency() / A5PX_IO_CONCURRENCY for fast on-prem stores.
-    v <- max(cpu_workers, 16L)
+    v <- min(16L, max(cpu_workers, 8L))
   }
   as.integer(v)
 }
