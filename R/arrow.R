@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,as_vector See [a5_read_raster()].
 #' @param value_type Storage type for the value column. `"float64"` (default)
 #'   or `"float32"` (halves disk size for embeddings).
 #'
@@ -35,6 +35,7 @@ a5_read_raster_arrow <- function(src,
                                  src_nodata = NULL,
                                  cpu_workers = NULL,
                                  io_concurrency = NULL,
+                                 as_vector = FALSE,
                                  value_type = c("float64", "float32")) {
   rlang::check_installed("arrow", reason = "to construct Arrow tables")
   check_scalar_string(src, "src")
@@ -47,6 +48,9 @@ a5_read_raster_arrow <- function(src,
   io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
                     else check_scalar_count(io_concurrency, "io_concurrency")
   value_type <- rlang::arg_match(value_type)
+  if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
+    cli::cli_abort("{.arg as_vector} must be a length-1 non-NA logical.")
+  }
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
@@ -67,24 +71,34 @@ a5_read_raster_arrow <- function(src,
   band_names <- as.character(out$band_names)
   n_bands <- as.integer(out$n_bands)
   stats_out <- as.character(out$stats)
-
-  cell_arr <- a5R::a5_cell_to_arrow(cells)
   inner_type <- switch(value_type, float64 = arrow::float64(), float32 = arrow::float32())
-  fsl_type   <- arrow::fixed_size_list_of(inner_type, n_bands)
-  n_cells    <- length(cells)
-
-  flat_to_fsl <- function(flat) {
-    mat  <- matrix(flat, nrow = n_cells, ncol = n_bands, byrow = TRUE)
-    rows <- asplit(mat, 1L)
-    arrow::Array$create(rows, type = fsl_type)
-  }
+  cell_arr <- a5R::a5_cell_to_arrow(cells)
+  n_cells  <- length(cells)
 
   cols <- list(cell = cell_arr)
-  if (length(stats_out) == 1L) {
-    cols$value <- flat_to_fsl(out$value_flat[[1]])
+  if (as_vector) {
+    fsl_type <- arrow::fixed_size_list_of(inner_type, n_bands)
+    flat_to_fsl <- function(flat) {
+      mat  <- matrix(flat, nrow = n_cells, ncol = n_bands, byrow = TRUE)
+      rows <- asplit(mat, 1L)
+      arrow::Array$create(rows, type = fsl_type)
+    }
+    if (length(stats_out) == 1L) {
+      cols$value <- flat_to_fsl(out$value_flat[[1]])
+    } else {
+      for (s in stats_out) cols[[paste0("value_", s)]] <- flat_to_fsl(out$value_flat[[s]])
+    }
   } else {
-    for (s in stats_out) {
-      cols[[s]] <- flat_to_fsl(out$value_flat[[s]])
+    # one Arrow column per (band, stat). Single stat -> column = band name;
+    # multi-stat -> "<band>_<stat>". Matches the tibble path's wide layout.
+    for (s_i in seq_along(stats_out)) {
+      flat <- out$value_flat[[s_i]]
+      mat  <- matrix(flat, nrow = n_cells, ncol = n_bands, byrow = TRUE)
+      for (b_idx in seq_along(band_names)) {
+        col_name <- if (length(stats_out) == 1L) band_names[b_idx]
+                    else paste(band_names[b_idx], stats_out[s_i], sep = "_")
+        cols[[col_name]] <- arrow::Array$create(mat[, b_idx], type = inner_type)
+      }
     }
   }
 
@@ -92,7 +106,8 @@ a5_read_raster_arrow <- function(src,
   meta <- list(
     a5px_band_names = paste(band_names, collapse = "\n"),
     a5px_resolution = as.character(resolution),
-    a5px_stats      = paste(stats_out, collapse = "\n")
+    a5px_stats      = paste(stats_out, collapse = "\n"),
+    a5px_layout     = if (as_vector) "fsl" else "wide"
   )
   if (length(stats_out) == 1L) {
     meta$a5px_stat <- stats_out[[1]]  # legacy single-stat key
@@ -114,7 +129,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,as_vector See
 #'   [a5_read_raster()].
 #' @param dest Output Parquet path.
 #' @param value_type Storage type for the value column. `"float64"`
@@ -139,6 +154,7 @@ a5_raster_to_parquet <- function(src,
                                  bands = NULL,
                                  bbox = NULL,
                                  src_nodata = NULL,
+                                 as_vector = FALSE,
                                  value_type = c("float64", "float32"),
                                  compression = c("zstd", "snappy", "none"),
                                  cpu_workers = NULL,
@@ -155,6 +171,9 @@ a5_raster_to_parquet <- function(src,
                  else check_scalar_count(cpu_workers, "cpu_workers")
   io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
                     else check_scalar_count(io_concurrency, "io_concurrency")
+  if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
+    cli::cli_abort("{.arg as_vector} must be a length-1 non-NA logical.")
+  }
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
@@ -168,6 +187,7 @@ a5_raster_to_parquet <- function(src,
     bands_names = band_sel$names,
     bbox = bbox_v,
     src_nodata = src_nodata_v,
+    as_vector = as_vector,
     value_type = value_type,
     compression = compression,
     cpu_workers = cpu_workers,

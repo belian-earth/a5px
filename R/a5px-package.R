@@ -21,13 +21,27 @@
 #'   bypassing the R-side Arrow round-trip (preferred for large embedding
 #'   rasters)
 #'
+#' All three readers share the same `as_vector` switch: `FALSE` (default)
+#' returns one column per band, `TRUE` returns a single fixed-length list /
+#' `FixedSizeList` value column.
+#'
+#' @section Aggregating to coarser cells:
+#' - [a5_aggregate()] --- pure-R aggregator that lifts an existing
+#'   `a5_cell`-keyed tibble to a coarser resolution via the A5-native
+#'   centroid hierarchy ([a5R::a5_cell_to_parent()]). Avoids re-reading the
+#'   source raster when you already have a high-resolution result and want
+#'   it summarised. Handles both wide (one column per band) and list-column
+#'   layouts; list columns are reduced element-wise. Same `stat` vocabulary
+#'   as the readers.
+#'
 #' @section Writing:
 #' - [a5_write_parquet()] --- write a tibble or Arrow table to Parquet, with
 #'   a schema tailored to A5 cell + value lists
 #'
 #' @section Configuration:
-#' - [a5px_set_threads()] / [a5px_get_threads()] --- multi-threading control
-#'   (independent of [a5R::a5_set_threads()])
+#' - [a5px_set_concurrency()] / [a5px_get_concurrency()] --- two-knob control
+#'   over the CPU consumer pool (`cpu_workers`) and the maximum in-flight
+#'   tile fetches (`io_concurrency`). Independent of [a5R::a5_set_threads()].
 #'
 #' @section Common arguments:
 #' All readers accept the same core arguments:
@@ -35,12 +49,15 @@
 #'   `s3://`, `gs://`, `az://`. Cloud reads stream byte ranges; the full file
 #'   is never materialised.
 #' - `resolution` --- A5 cell resolution (0--30); see [a5R::a5_cell_area()].
-#' - `stat` --- one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`.
-#'   A character vector emits one column per (band, stat) pair.
+#' - `stat` --- one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`,
+#'   `"var"`, `"sd"`. A character vector emits one column per (band, stat)
+#'   pair. `var` / `sd` use Welford's online algorithm and the sample formula
+#'   (divisor n - 1); cells with a single pixel return `NA`.
 #' - `bands` --- `NULL` (all), integer vector (1-based), or character vector
 #'   matched against the GDAL `DESCRIPTION` tag. For planar-layout TIFFs the
 #'   reader fetches only the byte ranges of the selected bands.
-#' - `threads`, `io_concurrency` --- tile-level concurrency knobs.
+#' - `cpu_workers`, `io_concurrency` --- tile-level concurrency knobs; see
+#'   [a5px_set_concurrency()].
 #'
 #' @section Supported formats and CRSes:
 #' - Tiled GeoTIFF / Cloud-Optimised GeoTIFF (`async-tiff` 0.3, supports
@@ -66,5 +83,6 @@
 #' decode, build points, proj transform, a5 indexing, hashmap lookup,
 #' accumulator push, merge) summed across tile workers.
 #'
+#' @import a5R
 #' @keywords internal
 "_PACKAGE"

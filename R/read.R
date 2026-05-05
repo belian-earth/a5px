@@ -11,6 +11,12 @@
 #'
 #' Two sampling modes are available:
 #'
+#' Multi-stat output naming: with `stat = c("mean", "max")` the wide
+#' (per-band) tibble columns are `<band>_mean`, `<band>_max`. Single
+#' underscore separator. Same convention applies in
+#' [a5_read_raster_arrow()] and [a5_raster_to_parquet()] when
+#' `as_vector = FALSE`.
+#'
 #' - `"forward"` (default): for each pixel, push its value into the cell
 #'   containing its centroid. Good when cells are larger than (or
 #'   comparable to) the pixels and you want a real aggregation. Equivalent
@@ -25,7 +31,11 @@
 #'   (no scheme), `file://`, `http(s)://`, `s3://`, `gs://`, `az://`.
 #' @param resolution Integer scalar A5 resolution (0--30).
 #' @param stat Aggregation. One of `"mean"`, `"sum"`, `"count"`, `"min"`,
-#'   `"max"`. Default `"mean"`.
+#'   `"max"`, `"var"`, `"sd"`, or any non-duplicated subset of those for a
+#'   one-pass multi-stat read. Default `"mean"`. `"var"` / `"sd"` use the
+#'   sample formula (divisor n - 1) computed via Welford's online algorithm
+#'   in the streaming aggregator, matching [stats::var()] / [stats::sd()];
+#'   cells covered by a single pixel return `NA`.
 #' @param bands Bands to read. One of:
 #'   - `NULL` (default): read every band.
 #'   - integer / numeric vector: 1-based band indices to read.
@@ -143,9 +153,9 @@ a5_read_raster <- function(src,
   } else {
     band_names <- as.character(out$band_names)
     # Rust iterates stat-major (outer = stat, inner = band), producing
-    # [B0__s0, B1__s0, ..., B0__s1, B1__s1, ...]. outer(bands, stats) flattens
+    # [B0_s0, B1_s0, ..., B0_s1, B1_s1, ...]. outer(bands, stats) flattens
     # column-major to that exact order.
-    names(bands) <- as.vector(outer(band_names, stats, paste, sep = "__"))
+    names(bands) <- as.vector(outer(band_names, stats, paste, sep = "_"))
   }
 
   if (as_vector) {
@@ -154,7 +164,7 @@ a5_read_raster <- function(src,
     n_bands <- length(band_names)
     cols <- list(cell = cells)
     for (s in stats) {
-      keys <- if (length(stats) == 1L) band_names else paste(band_names, s, sep = "__")
+      keys <- if (length(stats) == 1L) band_names else paste(band_names, s, sep = "_")
       mat <- vapply(bands[keys], identity, numeric(n))
       if (n_bands == 1L) dim(mat) <- c(n, 1L)
       val <- lapply(seq_len(n), function(i) as.numeric(mat[i, ]))

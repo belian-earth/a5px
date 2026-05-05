@@ -90,7 +90,7 @@ check_src_nodata <- function(src_nodata, call = rlang::caller_env()) {
 #' valid stat names.
 #' @noRd
 check_stats <- function(stat, call = rlang::caller_env()) {
-  valid <- c("mean", "sum", "count", "min", "max")
+  valid <- c("mean", "sum", "count", "min", "max", "var", "sd")
   if (!is.character(stat) || length(stat) == 0L || anyNA(stat)) {
     cli::cli_abort(
       "{.arg stat} must be a non-empty character vector with no NAs.",

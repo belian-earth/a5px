@@ -61,7 +61,7 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @returns The destination path (character scalar) on success.
 #' @noRd
 #' @keywords internal
-a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, cpu_workers, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, cpu_workers, io_concurrency)
+a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency)
 
 #' Sample one pixel value per A5 cell. Inverse / cell-driven path.
 #'
