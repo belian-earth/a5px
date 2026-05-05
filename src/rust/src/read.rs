@@ -85,6 +85,8 @@ enum Stat {
     Count,
     Min,
     Max,
+    Var,
+    Sd,
 }
 
 impl Stat {
@@ -95,6 +97,8 @@ impl Stat {
             "count" => Ok(Self::Count),
             "min" => Ok(Self::Min),
             "max" => Ok(Self::Max),
+            "var" => Ok(Self::Var),
+            "sd" => Ok(Self::Sd),
             other => Err(A5CogError::Invalid(format!("unknown stat: {other}"))),
         }
     }
@@ -106,6 +110,8 @@ impl Stat {
             Self::Count => "count",
             Self::Min => "min",
             Self::Max => "max",
+            Self::Var => "var",
+            Self::Sd => "sd",
         }
     }
 }
@@ -126,6 +132,11 @@ struct Accum {
     count: u64,
     min: f64,
     max: f64,
+    // Welford running mean and sum-of-squared-deviations, used for var / sd.
+    // Mean is also derivable as sum/count; we keep mean_w purely so the
+    // M2 update stays numerically stable when combining workers.
+    mean_w: f64,
+    m2: f64,
 }
 
 impl Accum {
@@ -136,6 +147,8 @@ impl Accum {
             count: 0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
+            mean_w: 0.0,
+            m2: 0.0,
         }
     }
     #[inline]
@@ -148,9 +161,28 @@ impl Accum {
         if v > self.max {
             self.max = v;
         }
+        // Welford
+        let delta = v - self.mean_w;
+        self.mean_w += delta / self.count as f64;
+        let delta2 = v - self.mean_w;
+        self.m2 += delta * delta2;
     }
     #[inline]
     fn merge(&mut self, other: &Self) {
+        if other.count == 0 {
+            return;
+        }
+        if self.count == 0 {
+            *self = *other;
+            return;
+        }
+        let n_a = self.count as f64;
+        let n_b = other.count as f64;
+        let n = n_a + n_b;
+        let delta = other.mean_w - self.mean_w;
+        let new_mean = self.mean_w + delta * n_b / n;
+        self.m2 += other.m2 + delta * delta * n_a * n_b / n;
+        self.mean_w = new_mean;
         self.sum += other.sum;
         self.count += other.count;
         if other.min < self.min {
@@ -184,6 +216,22 @@ impl Accum {
                     f64::NAN
                 } else {
                     self.max
+                }
+            }
+            // Sample variance / stdev: matches R's var() / sd() (divisor n-1).
+            // Single-observation cells yield NaN.
+            Stat::Var => {
+                if self.count < 2 {
+                    f64::NAN
+                } else {
+                    self.m2 / (self.count as f64 - 1.0)
+                }
+            }
+            Stat::Sd => {
+                if self.count < 2 {
+                    f64::NAN
+                } else {
+                    (self.m2 / (self.count as f64 - 1.0)).sqrt()
                 }
             }
         }
@@ -1082,7 +1130,7 @@ fn a5_read_raster_rs(
             let key = if n_stats == 1 {
                 b_name.clone()
             } else {
-                format!("{}__{}", b_name, s_name)
+                format!("{}_{}", b_name, s_name)
             };
             band_pairs.push((key, Robj::from(col)));
         }
@@ -1228,6 +1276,7 @@ fn a5_raster_to_parquet_rs(
     bands_names: Vec<String>,
     bbox: Vec<f64>,
     src_nodata: Vec<f64>,
+    as_vector: bool,
     value_type: &str,
     compression: &str,
     cpu_workers: i32,
@@ -1286,6 +1335,7 @@ fn a5_raster_to_parquet_rs(
         resolution,
         value_type_e,
         compression_e,
+        as_vector,
     )?;
 
     Ok(dest.to_string())

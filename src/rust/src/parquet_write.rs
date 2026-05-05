@@ -71,10 +71,15 @@ impl CompressionChoice {
 /// Build the RecordBatch and write it to `dest` as a Parquet file.
 ///
 /// Each entry of `flat_values` is one stat's cell-major buffer: index
-/// `i * n_bands + b` is band `b` of cell `i`. With a single stat the schema is
-/// `cell:uint64 + value:FixedSizeList<float, n_bands>` (matching the
-/// pre-multi-stat layout). With multiple stats the value column is replaced
-/// by one FixedSizeList per stat, named `value` (single) or `<stat>` (multi).
+/// `i * n_bands + b` is band `b` of cell `i`.
+///
+/// Two layouts:
+/// - `as_vector = true`: one `FixedSizeList<float, n_bands>` per stat.
+///   Single stat -> column named `value`; multi -> `value_<stat>`.
+/// - `as_vector = false` (default): one primitive column per (band, stat).
+///   Single stat -> column named after the band (e.g. `B02`); multi ->
+///   `<band>_<stat>` (e.g. `B02_mean`). Matches the tibble path.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_arrow_parquet(
     dest: &str,
     cells: Vec<u64>,
@@ -85,6 +90,7 @@ pub(crate) fn write_arrow_parquet(
     resolution: i32,
     value_type: ValueType,
     compression: CompressionChoice,
+    as_vector: bool,
 ) -> Result<()> {
     let n_cells = cells.len();
     if flat_values.len() != stats.len() {
@@ -106,43 +112,71 @@ pub(crate) fn write_arrow_parquet(
     }
 
     let cell_arr = UInt64Array::from(cells);
-
     let value_dtype = match value_type {
         ValueType::Float64 => DataType::Float64,
         ValueType::Float32 => DataType::Float32,
     };
-    let item_field = Arc::new(Field::new("item", value_dtype.clone(), true));
-    let fsl_dtype = DataType::FixedSizeList(item_field.clone(), n_bands as i32);
 
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(1 + stats.len());
-    let mut fields: Vec<Field> = Vec::with_capacity(1 + stats.len());
+    let mut columns: Vec<ArrayRef> = Vec::new();
+    let mut fields: Vec<Field> = Vec::new();
     columns.push(Arc::new(cell_arr));
     fields.push(Field::new("cell", DataType::UInt64, false));
 
-    for (s_i, s_name) in stats.iter().enumerate() {
-        let inner: ArrayRef = match value_type {
-            ValueType::Float64 => {
-                let buf = Buffer::from_vec(flat_values[s_i].clone());
-                Arc::new(Float64Array::new(buf.into(), None)) as ArrayRef
+    if as_vector {
+        let item_field = Arc::new(Field::new("item", value_dtype.clone(), true));
+        let fsl_dtype = DataType::FixedSizeList(item_field.clone(), n_bands as i32);
+        for (s_i, s_name) in stats.iter().enumerate() {
+            let inner: ArrayRef = match value_type {
+                ValueType::Float64 => {
+                    let buf = Buffer::from_vec(flat_values[s_i].clone());
+                    Arc::new(Float64Array::new(buf.into(), None)) as ArrayRef
+                }
+                ValueType::Float32 => {
+                    let casted: Vec<f32> = flat_values[s_i].iter().map(|v| *v as f32).collect();
+                    let buf = Buffer::from_vec(casted);
+                    Arc::new(Float32Array::new(buf.into(), None)) as ArrayRef
+                }
+            };
+            let fsl = FixedSizeListArray::new(item_field.clone(), n_bands as i32, inner, None);
+            let col_name = if stats.len() == 1 {
+                "value".to_string()
+            } else {
+                format!("value_{s_name}")
+            };
+            columns.push(Arc::new(fsl));
+            fields.push(Field::new(col_name, fsl_dtype.clone(), false));
+        }
+    } else {
+        // wide: one primitive column per (band, stat). Stat-major outer to
+        // mirror Rust iteration in the tibble path.
+        for (s_i, s_name) in stats.iter().enumerate() {
+            for (b_idx, b_name) in band_names.iter().enumerate() {
+                let col_vals_f64: Vec<f64> = (0..n_cells)
+                    .map(|i| flat_values[s_i][i * n_bands + b_idx])
+                    .collect();
+                let arr: ArrayRef = match value_type {
+                    ValueType::Float64 => {
+                        Arc::new(Float64Array::new(Buffer::from_vec(col_vals_f64).into(), None))
+                            as ArrayRef
+                    }
+                    ValueType::Float32 => {
+                        let casted: Vec<f32> = col_vals_f64.into_iter().map(|v| v as f32).collect();
+                        Arc::new(Float32Array::new(Buffer::from_vec(casted).into(), None))
+                            as ArrayRef
+                    }
+                };
+                let col_name = if stats.len() == 1 {
+                    b_name.clone()
+                } else {
+                    format!("{b_name}_{s_name}")
+                };
+                columns.push(arr);
+                fields.push(Field::new(col_name, value_dtype.clone(), false));
             }
-            ValueType::Float32 => {
-                let casted: Vec<f32> = flat_values[s_i].iter().map(|v| *v as f32).collect();
-                let buf = Buffer::from_vec(casted);
-                Arc::new(Float32Array::new(buf.into(), None)) as ArrayRef
-            }
-        };
-        let fsl = FixedSizeListArray::new(
-            item_field.clone(),
-            n_bands as i32,
-            inner,
-            None,
-        );
-        let col_name = if stats.len() == 1 { "value".to_string() } else { s_name.clone() };
-        columns.push(Arc::new(fsl));
-        fields.push(Field::new(col_name, fsl_dtype.clone(), false));
+        }
     }
 
-    let metadata = file_metadata(band_names, resolution, stats);
+    let metadata = file_metadata(band_names, resolution, stats, as_vector);
     let schema = Schema::new(fields).with_metadata(metadata.clone());
 
     let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)
@@ -172,11 +206,16 @@ fn file_metadata(
     band_names: &[String],
     resolution: i32,
     stats: &[String],
+    as_vector: bool,
 ) -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("a5px_band_names".to_string(), band_names.join("\n"));
     m.insert("a5px_resolution".to_string(), resolution.to_string());
     m.insert("a5px_stats".to_string(), stats.join("\n"));
+    m.insert(
+        "a5px_layout".to_string(),
+        if as_vector { "fsl".into() } else { "wide".into() },
+    );
     // backwards-compat: when single stat, also write the legacy a5px_stat key
     if stats.len() == 1 {
         m.insert("a5px_stat".to_string(), stats[0].clone());
