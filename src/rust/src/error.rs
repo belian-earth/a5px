@@ -34,6 +34,6 @@ pub type Result<T> = std::result::Result<T, A5CogError>;
 
 impl From<proj4rs::errors::Error> for A5CogError {
     fn from(e: proj4rs::errors::Error) -> Self {
-        Self::Proj(format!("{:?}", e))
+        Self::Proj(e.to_string())
     }
 }

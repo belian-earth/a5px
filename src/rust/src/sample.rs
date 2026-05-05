@@ -342,18 +342,34 @@ pub(crate) async fn sample_at_cells_async(
             })
             .buffer_unordered(io_concurrency.max(1))
             .try_collect::<Vec<()>>();
-        producer.await?;
+        let producer_result = producer.await;
         drop(tx_chan);
+        if let Err(e) = producer_result {
+            for h in &consumer_handles {
+                h.abort();
+            }
+            return Err(e);
+        }
     }
 
     // Tree-reduce per-worker outputs (we just OR them together: each cell is
     // touched by exactly one tile/worker, so cells don't collide).
+    // Collect all worker results before short-circuiting so a single
+    // failure doesn't detach the remaining workers.
+    let mut consumer_results: Vec<Result<(Vec<f64>, Vec<bool>)>> =
+        Vec::with_capacity(cpu_workers);
+    for h in consumer_handles {
+        match h.await {
+            Ok(inner) => consumer_results.push(inner),
+            Err(join_err) => consumer_results.push(Err(A5CogError::Invalid(format!(
+                "centroid consumer task panicked or was cancelled: {join_err}"
+            )))),
+        }
+    }
     let mut flat = vec![f64::NAN; n_in * n_out];
     let mut valid = vec![false; n_in];
-    for h in consumer_handles {
-        let (f, v) = h
-            .await
-            .map_err(|e| A5CogError::Invalid(format!("consumer join: {e}")))??;
+    for r in consumer_results {
+        let (f, v) = r?;
         for i in 0..n_in {
             if v[i] {
                 valid[i] = true;

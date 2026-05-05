@@ -103,10 +103,15 @@ pub(crate) fn build_proj_string_from_geokeys(geo: &GeoKeyDirectory) -> Option<St
             let k = geo.proj_scale_at_nat_origin.unwrap_or(1.0);
             ("tmerc", vec![format!("+k_0={k}")])
         }
-        // CT_Mercator
+        // CT_Mercator. 1SP uses ProjScaleAtNatOriginGeoKey, 2SP uses
+        // ProjStdParallel1GeoKey (-> +lat_ts).
         7 => {
-            let k = geo.proj_scale_at_nat_origin.unwrap_or(1.0);
-            ("merc", vec![format!("+k_0={k}")])
+            if let Some(p1) = geo.proj_std_parallel1 {
+                ("merc", vec![format!("+lat_ts={p1}")])
+            } else {
+                let k = geo.proj_scale_at_nat_origin.unwrap_or(1.0);
+                ("merc", vec![format!("+k_0={k}")])
+            }
         }
         // CT_LambertConfConic_2SP
         8 => {
@@ -119,15 +124,15 @@ pub(crate) fn build_proj_string_from_geokeys(geo: &GeoKeyDirectory) -> Option<St
             let k = geo.proj_scale_at_nat_origin.unwrap_or(1.0);
             ("lcc", vec![format!("+k_0={k}")])
         }
-        // CT_LambertAzimEqualArea
+        // CT_LambertAzimEqualArea (no scale parameter; +lon_0/+lat_0 set below)
         10 => ("laea", vec![]),
-        // CT_AlbersEqualArea
+        // CT_AlbersEqualArea (no scale parameter)
         11 => {
             let p1 = geo.proj_std_parallel1?;
             let p2 = geo.proj_std_parallel2?;
             ("aea", vec![format!("+lat_1={p1}"), format!("+lat_2={p2}")])
         }
-        // CT_AzimuthalEquidistant
+        // CT_AzimuthalEquidistant (no scale parameter)
         12 => ("aeqd", vec![]),
         // CT_EquidistantConic
         13 => {
@@ -135,21 +140,53 @@ pub(crate) fn build_proj_string_from_geokeys(geo: &GeoKeyDirectory) -> Option<St
             let p2 = geo.proj_std_parallel2?;
             ("eqdc", vec![format!("+lat_1={p1}"), format!("+lat_2={p2}")])
         }
-        // CT_Stereographic / CT_PolarStereographic / CT_ObliqueStereographic
-        14 | 15 | 16 => {
+        // CT_Stereographic
+        14 => {
             let k = geo.proj_scale_at_nat_origin.unwrap_or(1.0);
             ("stere", vec![format!("+k_0={k}")])
         }
-        // CT_Equirectangular
-        17 => ("eqc", vec![]),
-        // CT_Gnomonic
+        // CT_PolarStereographic. Variant A uses scale_at_nat_origin;
+        // variant B uses std_parallel1 (-> +lat_ts) for the latitude of true
+        // scale (NSIDC sea-ice tiles, etc.).
+        15 => {
+            if let Some(p1) = geo.proj_std_parallel1 {
+                ("stere", vec![format!("+lat_ts={p1}")])
+            } else {
+                let k = geo.proj_scale_at_nat_origin.unwrap_or(1.0);
+                ("stere", vec![format!("+k_0={k}")])
+            }
+        }
+        // CT_ObliqueStereographic ("double stereographic", e.g. RD New /
+        // Amersfoort). proj distinguishes this from CT_Stereographic via the
+        // +proj=sterea projection name (the conformal-sphere step matters).
+        16 => {
+            let k = geo.proj_scale_at_nat_origin.unwrap_or(1.0);
+            ("sterea", vec![format!("+k_0={k}")])
+        }
+        // CT_Equirectangular. Optional ProjStdParallel1GeoKey gives the
+        // parallel of true scale (+lat_ts).
+        17 => (
+            "eqc",
+            geo.proj_std_parallel1
+                .map(|p| format!("+lat_ts={p}"))
+                .into_iter()
+                .collect(),
+        ),
+        // CT_Gnomonic / CT_Orthographic / CT_Sinusoidal (no scale parameter)
         19 => ("gnom", vec![]),
-        // CT_Orthographic
         21 => ("ortho", vec![]),
-        // CT_Sinusoidal
         24 => ("sinu", vec![]),
-        // CT_CylindricalEqualArea
-        28 => ("cea", vec![]),
+        // CT_CylindricalEqualArea. Requires a standard parallel (+lat_ts);
+        // covers Behrmann, Lambert cylindrical, Gall-Peters, etc. Falling
+        // back to lat_ts=0 is the equator-based default and gives wrong
+        // scaling for the named variants.
+        28 => (
+            "cea",
+            geo.proj_std_parallel1
+                .map(|p| format!("+lat_ts={p}"))
+                .into_iter()
+                .collect(),
+        ),
         _ => return None,
     };
 
@@ -159,9 +196,46 @@ pub(crate) fn build_proj_string_from_geokeys(geo: &GeoKeyDirectory) -> Option<St
     if let Some(v) = x_0 { parts.push(format!("+x_0={v}")); }
     if let Some(v) = y_0 { parts.push(format!("+y_0={v}")); }
     parts.extend(extras);
+    if let Some(pm) = prime_meridian_param(geo) {
+        parts.push(pm);
+    }
     parts.push(ellipsoid_param(geo));
     parts.push("+no_defs".to_string());
     Some(parts.join(" "))
+}
+
+/// Render a `+pm=...` proj parameter from the GeogPrimeMeridian* GeoKeys.
+/// Returns None when unset or Greenwich (the proj default).
+fn prime_meridian_param(geo: &GeoKeyDirectory) -> Option<String> {
+    // Named EPSG meridian codes that proj recognises by name. 8901 = Greenwich
+    // (the default; we skip it to keep the proj string tidy).
+    if let Some(code) = geo.geog_prime_meridian {
+        let name = match code {
+            8901 => return None, // Greenwich (default)
+            8902 => Some("lisbon"),
+            8903 => Some("paris"),
+            8904 => Some("bogota"),
+            8905 => Some("madrid"),
+            8906 => Some("rome"),
+            8907 => Some("bern"),
+            8908 => Some("jakarta"),
+            8909 => Some("ferro"),
+            8910 => Some("brussels"),
+            8911 => Some("stockholm"),
+            8912 => Some("athens"),
+            8913 => Some("oslo"),
+            _ => None,
+        };
+        if let Some(n) = name {
+            return Some(format!("+pm={n}"));
+        }
+    }
+    if let Some(deg) = geo.geog_prime_meridian_long {
+        if deg != 0.0 {
+            return Some(format!("+pm={deg}"));
+        }
+    }
+    None
 }
 
 /// Pick the best available ellipsoid spec from the GeoKey fields.
@@ -190,20 +264,24 @@ fn ellipsoid_param(geo: &GeoKeyDirectory) -> String {
 /// returning None for codes outside this list (caller will try explicit
 /// semi-major/minor instead).
 fn ellps_name_for_epsg(code: u16) -> Option<&'static str> {
+    // Codes outside this list fall through to the explicit semi-major /
+    // inv-flattening fields the GeoKey directory carries. Three mappings
+    // were dropped from earlier versions because they were wrong:
+    //   - 7034 (Clarke 1880, original) is NOT proj's clrk80 (Clarke 1880 RGS)
+    //   - 7048 (GRS 1980 Authalic Sphere) is a sphere, NOT the GRS80 ellipsoid
+    // Both now route through the explicit-parameter fallback.
     Some(match code {
         7001 => "airy",
         7002 => "mod_airy",
-        7003 => "andrae",      // Australian National
+        7003 => "aust_SA",     // Australian National Spheroid
         7004 => "bessel",
         7008 => "clrk66",      // Clarke 1866
-        7012 => "clrk80",      // Clarke 1880 RGS (proj uses clrk80)
+        7012 => "clrk80",      // Clarke 1880 (RGS) - proj's clrk80
         7019 => "GRS80",
         7022 => "intl",        // International 1924
         7030 => "WGS84",
-        7034 => "clrk80",      // Clarke 1880
         7035 => "sphere",      // sphere of radius 6371000
         7043 => "WGS72",
-        7048 => "GRS80",       // GRS 1980 alternative
         _ => return None,
     })
 }

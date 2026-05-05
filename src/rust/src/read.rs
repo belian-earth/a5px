@@ -770,17 +770,36 @@ async fn read_raster_async(
             .try_collect::<Vec<()>>();
         // Drop the outer handle once we're done so the channel closes
         // (the producer's per-task clones go away with the futures).
-        producer.await?;
+        let producer_result = producer.await;
         drop(tx_chan);
+        // If the producer errored mid-flight, abort the consumer pool so
+        // it doesn't keep burning CPU on already-queued tiles after R has
+        // seen the error. tokio's default behaviour for a dropped
+        // JoinHandle is to detach, not cancel.
+        if let Err(e) = producer_result {
+            for h in &consumer_handles {
+                h.abort();
+            }
+            return Err(e);
+        }
     }
 
-    // Drain consumers and tree-reduce.
-    let mut local_maps: Vec<AHashMap<u64, Vec<Accum>>> = Vec::with_capacity(cpu_workers);
+    // Drain consumers and tree-reduce. Collect all results first (rather
+    // than short-circuit on the first Err) so a panic / error in worker N
+    // doesn't detach workers N+1.. while they're still running.
+    let mut consumer_results: Vec<Result<AHashMap<u64, Vec<Accum>>>> =
+        Vec::with_capacity(cpu_workers);
     for h in consumer_handles {
-        let m = h
-            .await
-            .map_err(|e| A5CogError::Invalid(format!("consumer join: {e}")))??;
-        local_maps.push(m);
+        match h.await {
+            Ok(inner) => consumer_results.push(inner),
+            Err(join_err) => consumer_results.push(Err(A5CogError::Invalid(format!(
+                "consumer task panicked or was cancelled: {join_err}"
+            )))),
+        }
+    }
+    let mut local_maps: Vec<AHashMap<u64, Vec<Accum>>> = Vec::with_capacity(cpu_workers);
+    for r in consumer_results {
+        local_maps.push(r?);
     }
     let map = local_maps
         .into_iter()
