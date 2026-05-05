@@ -342,8 +342,8 @@ pub(crate) async fn sample_at_cells_async(
             })
             .buffer_unordered(io_concurrency.max(1))
             .try_collect::<Vec<()>>();
+        // tx_chan moved in; end-of-scope drops it and closes the channel.
         let producer_result = producer.await;
-        drop(tx_chan);
         if let Err(e) = producer_result {
             for h in &consumer_handles {
                 h.abort();
@@ -361,8 +361,8 @@ pub(crate) async fn sample_at_cells_async(
     for h in consumer_handles {
         match h.await {
             Ok(inner) => consumer_results.push(inner),
-            Err(join_err) => consumer_results.push(Err(A5CogError::Invalid(format!(
-                "centroid consumer task panicked or was cancelled: {join_err}"
+            Err(join_err) => consumer_results.push(Err(A5CogError::WorkerJoin(format!(
+                "centroid-consumer worker: {join_err}"
             )))),
         }
     }

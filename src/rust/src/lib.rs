@@ -6,6 +6,7 @@ mod error;
 mod geo;
 mod parquet_write;
 mod read;
+mod runtime;
 mod sample;
 
 extendr_module! {

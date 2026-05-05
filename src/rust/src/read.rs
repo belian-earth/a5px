@@ -202,11 +202,11 @@ pub(crate) fn read_pixel_chunky_pub(data: &TypedArray, idx: usize) -> f64 {
 }
 
 fn parse_src(src: &str) -> Result<(Arc<dyn ObjectStore>, ObjPath)> {
-    let has_scheme = ["http://", "https://", "s3://", "gs://", "az://", "abfs://", "file://"]
-        .iter()
-        .any(|p| src.starts_with(p));
-    if has_scheme {
-        let url = url::Url::parse(src)?;
+    // url::Url::parse only succeeds when src has a scheme; treat anything
+    // that parses as a URL as remote and let object_store::parse_url decide
+    // whether the scheme is supported. Anything that doesn't parse falls
+    // through to the local-path branch.
+    if let Ok(url) = url::Url::parse(src) {
         let (store, path) = object_store::parse_url(&url)
             .map_err(|e| A5CogError::Invalid(format!("parse_url: {e}")))?;
         return Ok((Arc::from(store), path));
@@ -706,8 +706,8 @@ async fn read_raster_async(
                 let t_merge = Instant::now();
                 for (cell, accs) in tile_local {
                     let entry = local.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
-                    for (i, a) in accs.iter().enumerate() {
-                        entry[i].merge(a);
+                    for (e, a) in entry.iter_mut().zip(accs.iter()) {
+                        e.merge(a);
                     }
                 }
                 if prof {
@@ -768,10 +768,10 @@ async fn read_raster_async(
             })
             .buffer_unordered(io_concurrency.max(1))
             .try_collect::<Vec<()>>();
-        // Drop the outer handle once we're done so the channel closes
-        // (the producer's per-task clones go away with the futures).
+        // tx_chan is moved into this block so end-of-scope drops it,
+        // closing the channel once the producer finishes (the per-task
+        // clones go away with their futures).
         let producer_result = producer.await;
-        drop(tx_chan);
         // If the producer errored mid-flight, abort the consumer pool so
         // it doesn't keep burning CPU on already-queued tiles after R has
         // seen the error. tokio's default behaviour for a dropped
@@ -792,8 +792,8 @@ async fn read_raster_async(
     for h in consumer_handles {
         match h.await {
             Ok(inner) => consumer_results.push(inner),
-            Err(join_err) => consumer_results.push(Err(A5CogError::Invalid(format!(
-                "consumer task panicked or was cancelled: {join_err}"
+            Err(join_err) => consumer_results.push(Err(A5CogError::WorkerJoin(format!(
+                "tile-consumer worker: {join_err}"
             )))),
         }
     }
@@ -806,8 +806,8 @@ async fn read_raster_async(
         .reduce(|mut a, b| {
             for (cell, accs) in b {
                 let entry = a.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
-                for (i, ac) in accs.iter().enumerate() {
-                    entry[i].merge(ac);
+                for (e, ac) in entry.iter_mut().zip(accs.iter()) {
+                    e.merge(ac);
                 }
             }
             a
@@ -849,35 +849,35 @@ struct Output {
     stats: Vec<String>,
 }
 
-fn parse_bbox_arg(v: Vec<f64>) -> Result<Option<[f64; 4]>> {
+/// Decode an extendr-passed `Vec<f64>` whose length is the cheap NULL
+/// sentinel: empty `Vec` means "user passed NULL"; other lengths are
+/// validated by the caller against the expected shape.
+fn opt_f64_arg<const N: usize>(v: Vec<f64>, label: &str) -> Result<Option<[f64; N]>> {
     if v.is_empty() {
         return Ok(None);
     }
-    if v.len() != 4 {
+    if v.len() != N {
         return Err(A5CogError::Invalid(format!(
-            "bbox must be length 4 (xmin, ymin, xmax, ymax) in WGS84; got len {}",
+            "{label} must be length {N} (or NULL); got len {}",
             v.len()
         )));
     }
     if v.iter().any(|x| !x.is_finite()) {
-        return Err(A5CogError::Invalid(
-            "bbox must contain finite numeric values".into(),
-        ));
+        return Err(A5CogError::Invalid(format!(
+            "{label} must contain finite numeric values"
+        )));
     }
-    Ok(Some([v[0], v[1], v[2], v[3]]))
+    let mut out = [0.0f64; N];
+    out.copy_from_slice(&v);
+    Ok(Some(out))
+}
+
+fn parse_bbox_arg(v: Vec<f64>) -> Result<Option<[f64; 4]>> {
+    opt_f64_arg::<4>(v, "bbox")
 }
 
 fn parse_src_nodata_arg(v: Vec<f64>) -> Result<Option<f64>> {
-    if v.is_empty() {
-        return Ok(None);
-    }
-    if v.len() != 1 {
-        return Err(A5CogError::Invalid(format!(
-            "src_nodata must be a length-1 numeric (or NULL); got len {}",
-            v.len()
-        )));
-    }
-    Ok(Some(v[0]))
+    opt_f64_arg::<1>(v, "src_nodata").map(|opt| opt.map(|a| a[0]))
 }
 
 fn empty_output(band_names: Vec<String>, n_out: usize, stats: &[Stat]) -> Output {
@@ -1039,11 +1039,7 @@ fn a5_read_raster_rs(
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(cpu_workers.max(2))
-        .enable_all()
-        .build()
-        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+    let runtime = crate::runtime::shared_runtime()?;
 
     let prof = profile_enabled();
     if prof {
@@ -1148,11 +1144,7 @@ fn a5_read_raster_flat_rs(
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(cpu_workers.max(2))
-        .enable_all()
-        .build()
-        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+    let runtime = crate::runtime::shared_runtime()?;
 
     let prof = profile_enabled();
     if prof {
@@ -1257,11 +1249,7 @@ fn a5_raster_to_parquet_rs(
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(cpu_workers.max(2))
-        .enable_all()
-        .build()
-        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+    let runtime = crate::runtime::shared_runtime()?;
 
     let prof = profile_enabled();
     if prof {
@@ -1334,11 +1322,7 @@ fn a5_sample_at_cells_rs(
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let cells_in = crate::cell_raw::raw8_list_to_u64s(&cells_raw);
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(cpu_workers.max(2))
-        .enable_all()
-        .build()
-        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+    let runtime = crate::runtime::shared_runtime()?;
 
     let out: crate::sample::CentroidOutput =
         runtime.block_on(crate::sample::sample_at_cells_async(
@@ -1375,10 +1359,7 @@ fn a5_sample_at_cells_rs(
 /// @keywords internal
 #[extendr]
 fn a5_raster_bbox_lonlat_rs(src: &str) -> Result<Vec<f64>> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+    let runtime = crate::runtime::shared_runtime()?;
     runtime.block_on(async move {
         let (store, path) = parse_src(src)?;
         let reader = ObjectReader::new(store, path);

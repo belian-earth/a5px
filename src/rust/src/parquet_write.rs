@@ -142,13 +142,14 @@ pub(crate) fn write_arrow_parquet(
         fields.push(Field::new(col_name, fsl_dtype.clone(), false));
     }
 
-    let schema = Schema::new(fields).with_metadata(file_metadata(band_names, resolution, stats));
+    let metadata = file_metadata(band_names, resolution, stats);
+    let schema = Schema::new(fields).with_metadata(metadata.clone());
 
     let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)
-        .map_err(|e| A5CogError::Invalid(format!("RecordBatch build: {e}")))?;
+        .map_err(|e| A5CogError::Parquet(format!("RecordBatch build: {e}")))?;
 
     let file = File::create(dest)?;
-    let kv: Vec<KeyValue> = file_metadata(band_names, resolution, stats)
+    let kv: Vec<KeyValue> = metadata
         .into_iter()
         .map(|(k, v)| KeyValue::new(k, v))
         .collect();
@@ -157,13 +158,13 @@ pub(crate) fn write_arrow_parquet(
         .set_key_value_metadata(Some(kv))
         .build();
     let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))
-        .map_err(|e| A5CogError::Invalid(format!("ArrowWriter: {e}")))?;
+        .map_err(|e| A5CogError::Parquet(format!("ArrowWriter: {e}")))?;
     writer
         .write(&batch)
-        .map_err(|e| A5CogError::Invalid(format!("write batch: {e}")))?;
+        .map_err(|e| A5CogError::Parquet(format!("write batch: {e}")))?;
     writer
         .close()
-        .map_err(|e| A5CogError::Invalid(format!("writer close: {e}")))?;
+        .map_err(|e| A5CogError::Parquet(format!("writer close: {e}")))?;
     Ok(())
 }
 

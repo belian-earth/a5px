@@ -26,6 +26,15 @@ pub enum A5CogError {
     #[error("invalid input: {0}")]
     Invalid(String),
 
+    #[error("internal error: {0}")]
+    Internal(String),
+
+    #[error("worker task failed: {0}")]
+    WorkerJoin(String),
+
+    #[error("parquet/arrow error: {0}")]
+    Parquet(String),
+
     #[error("url parse error: {0}")]
     Url(#[from] url::ParseError),
 }
