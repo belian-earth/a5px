@@ -173,21 +173,21 @@ tests/testthat/
 1. **VRT support** — opens up per-band nodata, on-the-fly CRS warp, multi-tile
    mosaics. Async-tiff doesn't read VRT directly so this needs a thin
    reader (probably `gdalraster` for setup + a custom URL list resolver).
-2. **WKT-only CRS fallback** — when a GeoTIFF has a CRS-by-WKT but no EPSG
-   code, fall back to `proj4wkt-rs` to extract a proj string. Currently
-   errors with "missing geokey: EPSG code".
-3. **Multi-thread plateau past 8 cores** — at 16 threads the local read
-   gains nothing over 8. Profile with `perf` to confirm whether it's
-   genuine CPU saturation, AHashMap-merge contention, or `spawn_blocking`
-   pool overhead. Possible fixes: rayon par_iter over tiles + tree-reduce
-   instead of tokio + Mutex; per-thread map pool.
-4. **Strip-based GeoTIFFs** — currently errors with a clear "MVP requires
+2. **`--pixels=all-touched` / `--pixels=fractional` aggregation modes** —
+   both require per-pixel fan-out from the forward path: for each pixel
+   compute the cell at its centre AND every cell whose centroid falls
+   inside (all-touched) or weight by pixel-cell area overlap
+   (fractional). Useful when cells and pixels are similar size and
+   boundary precision matters; more expensive than the current
+   centroid-of-pixel inclusion criterion.
+3. **Strip-based GeoTIFFs** — currently errors with a clear "MVP requires
    tiled TIFF" message. Most modern COGs are tiled, but plain TIFFs
    sometimes aren't.
-5. **Inverse / cell-driven mode** — for the case where `pixel_area >
-   cell_area` (rare for embeddings, common for ML probability rasters
-   sampled to a coarser DGGS).
-6. **Tighter perf around a5 indexing** — `a5::lonlat_to_cell_with_hint`
+4. **Multi-thread plateau past 8 cores** — at 16 threads the local read
+   gains nothing over 8. Profiling pointed at SMT contention + load
+   imbalance from partial edge tiles; further wins would need intra-tile
+   parallelism (rayon-chunk each tile) or a bigger raster.
+5. **Tighter perf around a5 indexing** — `a5::lonlat_to_cell_with_hint`
    upstream PR would replace our `a5cell_contains_point` fast-path with
    a proper API and clean up the unsafe pointer caching of the previous
    cell entry.

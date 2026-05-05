@@ -11,6 +11,7 @@ a5_read_raster(
   bands = NULL,
   bbox = NULL,
   src_nodata = NULL,
+  mode = c("forward", "centroid"),
   threads = 1L,
   io_concurrency = 8L,
   as_vector = FALSE
@@ -43,6 +44,10 @@ Use this when the file's \code{TIFFTAG_GDAL_NODATA} tag is missing or wrong;
 it takes precedence over the metadata value when set. \code{NULL} (default)
 uses whatever \code{async-tiff} exposes.}
 
+\item{mode}{Sampling mode. \code{"forward"} (default) aggregates pixels into
+cells; \code{"centroid"} samples one pixel per cell at the cell centroid.
+See Details.}
+
 \item{threads}{Tokio worker threads (also caps tile-level concurrency).
 Default 1.}
 
@@ -73,10 +78,18 @@ loading the full raster into memory. CRS reprojection uses pure-Rust
 \code{proj4rs}. Pixel sampling is forward (pixel-driven): each pixel contributes
 its value to exactly one A5 cell, determined by the lon/lat of its centre.
 
-Forward sampling assumes the pixel size is smaller than (or comparable to)
-the target cell size. When the raster pixel area is much larger than the
-cell area, expect sparse cells; a future cell-driven mode will handle that
-case.
+Two sampling modes are available:
+\itemize{
+\item \code{"forward"} (default): for each pixel, push its value into the cell
+containing its centroid. Good when cells are larger than (or
+comparable to) the pixels and you want a real aggregation. Equivalent
+to GDAL's \verb{gdal raster zonal-stats --pixels=default}.
+\item \code{"centroid"}: for each cell intersecting the raster, sample the pixel
+that contains the cell's centroid. Single value per cell, no
+aggregation. Use this when the cell size is comparable to or smaller
+than the pixel size — the forward path leaves gaps in that regime
+because each pixel only contributes to one cell.
+}
 
 \strong{Scaling:} GDAL \code{Scale} / \code{Offset} tags are \emph{not} applied. Returned
 values are in the raster's native domain. Apply scale/offset on the R side

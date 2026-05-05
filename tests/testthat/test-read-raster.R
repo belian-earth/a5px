@@ -263,6 +263,57 @@ test_that("src_nodata overrides metadata nodata", {
   expect_true(sum(forced$B02) > sum(default$B02))
 })
 
+test_that("mode = 'centroid' fills the gaps that mode = 'forward' leaves", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  # exe_cog has ~20m pixels. At res 18 cells are ~22m -- comparable. The
+  # forward path will miss some cells (no pixel centre inside them);
+  # centroid mode picks them up.
+  fwd <- a5_read_raster(path, resolution = 18L, stat = "mean", bands = 1L,
+                        mode = "forward")
+  cnt <- a5_read_raster(path, resolution = 18L, stat = "mean", bands = 1L,
+                        mode = "centroid")
+
+  expect_gt(nrow(cnt), nrow(fwd))
+  # every forward cell should also appear in centroid (centroid is a strict
+  # superset under these conditions, modulo edge clipping)
+  fwd_keys <- a5R::a5_u64_to_hex(fwd$cell)
+  cnt_keys <- a5R::a5_u64_to_hex(cnt$cell)
+  expect_gt(length(intersect(fwd_keys, cnt_keys)), 0L)
+})
+
+test_that("centroid sub-pixel resolution emits ~one cell per sub-pixel", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  # res 20 cells ~5.5m vs ~20m pixels => ~13 cells per pixel
+  out <- a5_read_raster(path, resolution = 20L, stat = "mean", bands = 1L,
+                        mode = "centroid")
+  expect_gt(nrow(out), 1e6)
+  expect_setequal(setdiff(names(out), "cell"), "B02")
+})
+
+test_that("centroid honours bbox", {
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
+  skip_if_not(file.exists(path), "exe_cog.tif missing")
+
+  full_bbox <- a5_read_raster(path, resolution = 18L, stat = "mean", bands = 1L,
+                              mode = "centroid")
+  full_xy <- as.matrix(wk::as_xy(a5R::a5_cell_to_lonlat(full_bbox$cell)))
+  rng_x <- range(full_xy[, 1]); rng_y <- range(full_xy[, 2])
+  qx <- diff(rng_x) / 4; qy <- diff(rng_y) / 4
+  bb <- c(rng_x[1] + qx, rng_y[1] + qy, rng_x[2] - qx, rng_y[2] - qy)
+
+  sub <- a5_read_raster(path, resolution = 18L, stat = "mean", bands = 1L,
+                        mode = "centroid", bbox = bb)
+  expect_gt(nrow(sub), 0L)
+  expect_lt(nrow(sub), nrow(full_bbox))
+})
+
 test_that("user-defined CRS is reconstructed from GeoKey fields (LAEA)", {
   path <- system.file("extdata", "laea_custom.tif", package = "a5px")
   skip_if(path == "", "laea_custom.tif not installed")

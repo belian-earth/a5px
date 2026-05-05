@@ -67,4 +67,25 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @keywords internal
 a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, threads, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, threads, io_concurrency)
 
+#' Sample one pixel value per A5 cell. Inverse / cell-driven path.
+#'
+#' @param src Path or URL string.
+#' @param cells_raw a5R-style cell list (b1..b8 raw fields).
+#' @param bands_idx,bands_names Band selection.
+#' @param src_nodata Length-1 vec or empty for no override.
+#' @param threads,io_concurrency See `a5_read_raster_rs`.
+#' @returns A list with `cell` (b1..b8 raw), `bands` (named numeric), and
+#'   `band_names`.
+#' @noRd
+#' @keywords internal
+a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, threads, io_concurrency) .Call(wrap__a5_sample_at_cells_rs, src, cells_raw, bands_idx, bands_names, src_nodata, threads, io_concurrency)
+
+#' Compute the WGS84 lon/lat bbox of the raster at `src`, by projecting the
+#' 4 corners + 4 edge midpoints of the raster's projected extent into
+#' WGS84 and taking the axis-aligned envelope.
+#' @returns `c(xmin, ymin, xmax, ymax)`.
+#' @noRd
+#' @keywords internal
+a5_raster_bbox_lonlat_rs <- function(src) .Call(wrap__a5_raster_bbox_lonlat_rs, src)
+
 # nolint end

@@ -9,10 +9,17 @@
 #' `proj4rs`. Pixel sampling is forward (pixel-driven): each pixel contributes
 #' its value to exactly one A5 cell, determined by the lon/lat of its centre.
 #'
-#' Forward sampling assumes the pixel size is smaller than (or comparable to)
-#' the target cell size. When the raster pixel area is much larger than the
-#' cell area, expect sparse cells; a future cell-driven mode will handle that
-#' case.
+#' Two sampling modes are available:
+#'
+#' - `"forward"` (default): for each pixel, push its value into the cell
+#'   containing its centroid. Good when cells are larger than (or
+#'   comparable to) the pixels and you want a real aggregation. Equivalent
+#'   to GDAL's `gdal raster zonal-stats --pixels=default`.
+#' - `"centroid"`: for each cell intersecting the raster, sample the pixel
+#'   that contains the cell's centroid. Single value per cell, no
+#'   aggregation. Use this when the cell size is comparable to or smaller
+#'   than the pixel size — the forward path leaves gaps in that regime
+#'   because each pixel only contributes to one cell.
 #'
 #' @param src Path or URL to a GeoTIFF / COG. Supported schemes: local path
 #'   (no scheme), `file://`, `http(s)://`, `s3://`, `gs://`, `az://`.
@@ -33,6 +40,9 @@
 #'   Use this when the file's `TIFFTAG_GDAL_NODATA` tag is missing or wrong;
 #'   it takes precedence over the metadata value when set. `NULL` (default)
 #'   uses whatever `async-tiff` exposes.
+#' @param mode Sampling mode. `"forward"` (default) aggregates pixels into
+#'   cells; `"centroid"` samples one pixel per cell at the cell centroid.
+#'   See Details.
 #' @param threads Tokio worker threads (also caps tile-level concurrency).
 #'   Default 1.
 #' @param io_concurrency Number of tiles fetched concurrently. Default 8.
@@ -69,6 +79,7 @@ a5_read_raster <- function(src,
                            bands = NULL,
                            bbox = NULL,
                            src_nodata = NULL,
+                           mode = c("forward", "centroid"),
                            threads = 1L,
                            io_concurrency = 8L,
                            as_vector = FALSE) {
@@ -77,6 +88,7 @@ a5_read_raster <- function(src,
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
+  mode <- rlang::arg_match(mode)
   threads <- check_scalar_count(threads, "threads")
   io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
   if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
@@ -85,6 +97,21 @@ a5_read_raster <- function(src,
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
+
+  if (mode == "centroid") {
+    return(read_raster_centroid(
+      src = src,
+      resolution = resolution,
+      bands_idx = band_sel$idx,
+      bands_names = band_sel$names,
+      bbox = if (length(bbox_v)) bbox_v else NULL,
+      src_nodata = src_nodata_v,
+      threads = threads,
+      io_concurrency = io_concurrency,
+      as_vector = as_vector,
+      stats = stats
+    ))
+  }
 
   out <- a5_read_raster_rs(
     src = src,
@@ -125,5 +152,49 @@ a5_read_raster <- function(src,
     tibble::tibble(cell = cells, value = value)
   } else {
     tibble::tibble(cell = cells, !!!bands)
+  }
+}
+
+#' Centroid-mode read: enumerate cells covering the bbox via [a5R::a5_grid()],
+#' then sample one pixel per cell.
+#' @noRd
+read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
+                                 bbox, src_nodata, threads, io_concurrency,
+                                 as_vector, stats) {
+  if (length(stats) > 1L || stats[1] != "mean") {
+    cli::cli_warn(
+      "{.code mode = \"centroid\"} returns one sample per cell; the {.arg stat} arg is ignored.",
+      .frequency = "regularly", .frequency_id = "a5px-centroid-stat"
+    )
+  }
+  if (is.null(bbox)) {
+    bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src))
+  }
+  cells <- a5R::a5_grid(bbox, resolution = resolution)
+  if (length(cells) == 0L) {
+    cli::cli_abort("a5_grid returned 0 cells for the requested bbox at resolution {resolution}.")
+  }
+  out <- a5_sample_at_cells_rs(
+    src = src,
+    cells_raw = vctrs::vec_data(cells),
+    bands_idx = bands_idx,
+    bands_names = bands_names,
+    src_nodata = src_nodata,
+    threads = threads,
+    io_concurrency = io_concurrency
+  )
+  cells_out <- new_a5_cell_from_rs(out$cell)
+  bands <- out$bands
+  names(bands) <- as.character(out$band_names)
+
+  if (as_vector) {
+    n <- length(cells_out)
+    n_bands <- length(bands)
+    mat <- vapply(bands, identity, numeric(n))
+    if (n_bands == 1L) dim(mat) <- c(n, 1L)
+    value <- lapply(seq_len(n), function(i) as.numeric(mat[i, ]))
+    tibble::tibble(cell = cells_out, value = value)
+  } else {
+    tibble::tibble(cell = cells_out, !!!bands)
   }
 }

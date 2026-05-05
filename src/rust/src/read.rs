@@ -194,6 +194,14 @@ impl Accum {
 // ---------------------------------------------------------------------------
 // src parsing
 
+pub(crate) fn parse_src_pub(src: &str) -> Result<(Arc<dyn ObjectStore>, ObjPath)> {
+    parse_src(src)
+}
+
+pub(crate) fn read_pixel_chunky_pub(data: &TypedArray, idx: usize) -> f64 {
+    read_pixel_chunky(data, idx)
+}
+
 fn parse_src(src: &str) -> Result<(Arc<dyn ObjectStore>, ObjPath)> {
     let has_scheme = ["http://", "https://", "s3://", "gs://", "az://", "abfs://", "file://"]
         .iter()
@@ -1185,9 +1193,156 @@ fn a5_raster_to_parquet_rs(
     Ok(dest.to_string())
 }
 
+/// Sample one pixel value per A5 cell. Inverse / cell-driven path.
+///
+/// @param src Path or URL string.
+/// @param cells_raw a5R-style cell list (b1..b8 raw fields).
+/// @param bands_idx,bands_names Band selection.
+/// @param src_nodata Length-1 vec or empty for no override.
+/// @param threads,io_concurrency See `a5_read_raster_rs`.
+/// @returns A list with `cell` (b1..b8 raw), `bands` (named numeric), and
+///   `band_names`.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_sample_at_cells_rs(
+    src: &str,
+    cells_raw: List,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
+    src_nodata: Vec<f64>,
+    threads: i32,
+    io_concurrency: i32,
+) -> Result<Robj> {
+    if !bands_idx.is_empty() && !bands_names.is_empty() {
+        return Err(A5CogError::Invalid(
+            "specify bands by index OR by name, not both".into(),
+        ));
+    }
+    let threads = threads.max(1) as usize;
+    let io_concurrency = io_concurrency.max(1) as usize;
+    let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
+    let cells_in = crate::cell_raw::raw8_list_to_u64s(&cells_raw);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()
+        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+
+    let out: crate::sample::CentroidOutput =
+        runtime.block_on(crate::sample::sample_at_cells_async(
+            src,
+            cells_in,
+            bands_idx,
+            bands_names,
+            src_nodata_opt,
+            io_concurrency,
+        ))?;
+
+    let cell_list = u64s_to_raw8_list(&out.cells);
+    let n_cells = out.cells.len();
+    let n_bands = out.n_bands;
+    let mut band_pairs: Vec<(String, Robj)> = Vec::with_capacity(n_bands);
+    for (b, name) in out.band_names.iter().enumerate() {
+        let mut col: Vec<f64> = Vec::with_capacity(n_cells);
+        for i in 0..n_cells {
+            col.push(out.flat[i * n_bands + b]);
+        }
+        band_pairs.push((name.clone(), Robj::from(col)));
+    }
+    let bands = List::from_pairs(band_pairs);
+    let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
+    Ok(list!(cell = cell_list, bands = bands, band_names = band_names).into())
+}
+
+/// Compute the WGS84 lon/lat bbox of the raster at `src`, by projecting the
+/// 4 corners + 4 edge midpoints of the raster's projected extent into
+/// WGS84 and taking the axis-aligned envelope.
+/// @returns `c(xmin, ymin, xmax, ymax)`.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_raster_bbox_lonlat_rs(src: &str) -> Result<Vec<f64>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
+    runtime.block_on(async move {
+        let (store, path) = parse_src(src)?;
+        let reader = ObjectReader::new(store, path);
+        let cache = ReadaheadMetadataCache::new(reader.clone());
+        let mut meta = TiffMetadataReader::try_open(&cache).await?;
+        let ifds = meta.read_all_ifds(&cache).await?;
+        let endianness = meta.endianness();
+        let tiff = TIFF::new(ifds, endianness);
+        let ifd = tiff
+            .ifds()
+            .first()
+            .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?
+            .clone();
+        let geo = ifd
+            .geo_key_directory()
+            .ok_or(A5CogError::MissingGeoKey("GeoKeyDirectory"))?;
+        let src_proj = crate::geo::build_src_proj(geo)?;
+        let dst_proj = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
+        let gt = crate::geo::extract_geotransform(&ifd)?;
+        let w = ifd.image_width() as f64;
+        let h = ifd.image_height() as f64;
+
+        // 8 sample points around the raster footprint
+        let pts_px = [
+            (0.0, 0.0), (w, 0.0), (0.0, h), (w, h),
+            (w * 0.5, 0.0), (w * 0.5, h), (0.0, h * 0.5), (w, h * 0.5),
+        ];
+        let mut points: Vec<(f64, f64, f64)> = pts_px
+            .iter()
+            .map(|&(c, r)| {
+                let x = gt.0[0] + c * gt.0[1] + r * gt.0[2];
+                let y = gt.0[3] + c * gt.0[4] + r * gt.0[5];
+                (x, y, 0.0)
+            })
+            .collect();
+        if src_proj.is_latlong() {
+            for p in &mut points {
+                p.0 = p.0.to_radians();
+                p.1 = p.1.to_radians();
+            }
+        }
+        proj_transform(&src_proj, &dst_proj, &mut points[..])?;
+        if dst_proj.is_latlong() {
+            for p in &mut points {
+                p.0 = p.0.to_degrees();
+                p.1 = p.1.to_degrees();
+            }
+        }
+        let mut xmin = f64::INFINITY;
+        let mut ymin = f64::INFINITY;
+        let mut xmax = f64::NEG_INFINITY;
+        let mut ymax = f64::NEG_INFINITY;
+        for &(x, y, _) in &points {
+            if !x.is_finite() || !y.is_finite() {
+                continue;
+            }
+            if x < xmin { xmin = x; }
+            if x > xmax { xmax = x; }
+            if y < ymin { ymin = y; }
+            if y > ymax { ymax = y; }
+        }
+        if !xmin.is_finite() {
+            return Err(A5CogError::Invalid(
+                "could not project raster footprint into WGS84".into(),
+            ));
+        }
+        Ok(vec![xmin, ymin, xmax, ymax])
+    })
+}
+
 extendr_module! {
     mod read;
     fn a5_read_raster_rs;
     fn a5_read_raster_flat_rs;
     fn a5_raster_to_parquet_rs;
+    fn a5_sample_at_cells_rs;
+    fn a5_raster_bbox_lonlat_rs;
 }
