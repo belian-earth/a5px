@@ -168,6 +168,32 @@ tests/testthat/
   test-arrow.R
 ```
 
+## I/O + CPU split
+
+The reader runs as a producer / consumer pipeline:
+
+- **Producer**: async tasks issue tile fetches concurrently (capped by
+  `io_concurrency`). Each pushes a `TileItem` (Tile or per-band byte
+  ranges) into a bounded `async_channel` of depth `2 * cpu_workers`.
+- **Consumers**: `cpu_workers` tokio blocking-pool tasks loop on
+  `recv_blocking()`, decode + run `process_tile`, accumulate into
+  per-worker `AHashMap`s. No global mutex.
+- **Reduce**: when the channel closes (producer drops its sender),
+  consumers exit and their per-worker maps are tree-reduced.
+
+Bench on AEF cloud tile (Source Cooperative, 2.8 GiB ZSTD planar COG):
+
+| Path | bands | io_concurrency | wall (s) |
+|---|---:|---:|---:|
+| Old (single async future per tile) | 1 | 16 | 22.2 |
+| **New split** | 1 | 16 | **12.1** |
+| New split | 1 | 64 | 17.0 (CF rate-limit) |
+| New split | 1:8 | 16 | **23.9** |
+
+Default `io_concurrency = max(cpu_workers, 16)`. Going higher hurts on
+CloudFlare-fronted sources due to per-client request queuing; bump it
+via `a5px_set_concurrency()` for fast on-prem object stores.
+
 ## Open work (in priority order)
 
 1. **VRT support** — opens up per-band nodata, on-the-fly CRS warp, multi-tile

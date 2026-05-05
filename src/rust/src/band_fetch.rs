@@ -1,19 +1,23 @@
 //! Band-aware tile fetching for planar (INTERLEAVE=BAND) TIFFs.
 //!
 //! Default `async_tiff::ImageFileDirectory::fetch_tile` always fetches every
-//! band's byte range for a given tile — fine for chunky layouts (one byte
+//! band's byte range for a given tile -- fine for chunky layouts (one byte
 //! range per tile anyway) but wasteful for planar layouts when the caller
 //! wants a band subset (e.g. 1 of 64 embedding bands). This module provides
 //! an alternative path that fetches only the selected bands and produces a
 //! `TypedArray` directly, bypassing the (crate-private) `Tile` constructor.
 //!
-//! Limitations of the current MVP path:
+//! The work is split: [`fetch_planar_subset_bytes`] does only the I/O and
+//! returns the per-band compressed `Bytes`. [`decode_planar_subset_bytes`]
+//! takes those bytes and decodes into a `TypedArray`. The split lets the
+//! producer-consumer pipeline in `read.rs` keep the network busy while CPU
+//! workers consume from a bounded channel.
+//!
+//! Limitations of this path:
 //!   * predictor must be `Predictor::None` (raw byte concatenation only).
 //!     Files with predictor=Horizontal or FloatingPoint fall back to the
 //!     full-band fetch path in `read::read_raster_async`.
-//!   * native machine endianness is assumed for multi-byte samples; a TIFF
-//!     written with the opposite byte order is detected and rejected.
-//!     (AEF embeddings are Int8 so this never triggers in practice.)
+//!   * native machine endianness is assumed for multi-byte samples.
 
 use async_tiff::ImageFileDirectory;
 use async_tiff::TypedArray;
@@ -24,37 +28,22 @@ use bytes::Bytes;
 
 use crate::error::{A5CogError, Result};
 
-/// Fetch and decode only the requested bands of a planar tile.
-///
-/// `selected_bands` is 0-based.
-///
-/// Returns the decoded bytes in band-major (planar) order: all rows of band 0,
-/// then all rows of band 1, ... wrapped in a `TypedArray`. Shape is
-/// `[n_selected, tile_h, tile_w]`.
-pub(crate) async fn fetch_planar_subset(
+/// Fetch (only) the compressed byte ranges for the requested bands of a
+/// planar tile. Returns one `Bytes` per selected band, in `selected_bands`
+/// order.
+pub(crate) async fn fetch_planar_subset_bytes(
     reader: &dyn AsyncFileReader,
     ifd: &ImageFileDirectory,
     tx: usize,
     ty: usize,
     selected_bands: &[usize],
-    decoder_registry: &DecoderRegistry,
-) -> Result<(TypedArray, [usize; 3])> {
+) -> Result<Vec<Bytes>> {
     if !matches!(ifd.predictor(), None | Some(Predictor::None)) {
         return Err(A5CogError::Unsupported(
             "band-aware fetch requires Predictor::None; falling back".into(),
         ));
     }
-
     let n_bands_total = ifd.samples_per_pixel() as usize;
-    let tile_w = ifd
-        .tile_width()
-        .ok_or_else(|| A5CogError::Unsupported("not a tiled TIFF".into()))?
-        as usize;
-    let tile_h = ifd
-        .tile_height()
-        .ok_or_else(|| A5CogError::Unsupported("not a tiled TIFF".into()))?
-        as usize;
-
     let tile_offsets = ifd
         .tile_offsets()
         .ok_or_else(|| A5CogError::Unsupported("missing TileOffsets".into()))?;
@@ -66,7 +55,6 @@ pub(crate) async fn fetch_planar_subset(
         .ok_or_else(|| A5CogError::Unsupported("not a tiled TIFF".into()))?;
     let tiles_per_band = tiles_per_row * tiles_per_col;
 
-    // for each selected band, the byte range of THIS tile
     let mut ranges: Vec<std::ops::Range<u64>> = Vec::with_capacity(selected_bands.len());
     for &b in selected_bands {
         if b >= n_bands_total {
@@ -79,10 +67,26 @@ pub(crate) async fn fetch_planar_subset(
         let byte_count = tile_byte_counts[band_idx];
         ranges.push(offset..(offset + byte_count));
     }
+    let buffers = reader.get_byte_ranges(ranges).await?;
+    Ok(buffers)
+}
 
-    let band_buffers: Vec<Bytes> = reader.get_byte_ranges(ranges).await?;
-
-    // pick the decoder for this tile's compression
+/// Decode the per-band compressed bytes returned by
+/// [`fetch_planar_subset_bytes`] into a `TypedArray` with planar shape
+/// `[n_selected, tile_h, tile_w]`.
+pub(crate) fn decode_planar_subset_bytes(
+    band_buffers: Vec<Bytes>,
+    ifd: &ImageFileDirectory,
+    decoder_registry: &DecoderRegistry,
+) -> Result<(TypedArray, [usize; 3])> {
+    let tile_w = ifd
+        .tile_width()
+        .ok_or_else(|| A5CogError::Unsupported("not a tiled TIFF".into()))?
+        as usize;
+    let tile_h = ifd
+        .tile_height()
+        .ok_or_else(|| A5CogError::Unsupported("not a tiled TIFF".into()))?
+        as usize;
     let compression = ifd.compression();
     let decoder = decoder_registry
         .as_ref()
@@ -90,23 +94,23 @@ pub(crate) async fn fetch_planar_subset(
         .ok_or_else(|| {
             A5CogError::Unsupported(format!("no decoder registered for {compression:?}"))
         })?;
-
     let bits_per_sample = ifd.bits_per_sample().first().copied().unwrap_or(0);
     let bytes_per_sample = (bits_per_sample as usize).div_ceil(8);
     let band_bytes_uncompressed = tile_w * tile_h * bytes_per_sample;
-    let total = band_bytes_uncompressed * selected_bands.len();
+    let total = band_bytes_uncompressed * band_buffers.len();
     let mut out: Vec<u8> = Vec::with_capacity(total);
 
     let photometric = ifd.photometric_interpretation();
     let jpeg_tables = ifd.jpeg_tables();
     let lerc_params = ifd.lerc_parameters();
 
+    let n_selected = band_buffers.len();
     for buf in band_buffers {
         let decoded = decoder.decode_tile(
             buf,
             photometric,
             jpeg_tables,
-            1, // 1 sample per band in planar layout
+            1,
             bits_per_sample,
             lerc_params,
         )?;
@@ -121,24 +125,9 @@ pub(crate) async fn fetch_planar_subset(
     }
     debug_assert_eq!(out.len(), total);
 
-    // endianness: refuse non-native-byte-order multi-byte samples for now.
-    // AEF is Int8 so bytes_per_sample == 1 and this is a no-op.
-    if bytes_per_sample > 1 {
-        use async_tiff::reader::Endianness;
-        let native = if cfg!(target_endian = "little") {
-            Endianness::LittleEndian
-        } else {
-            Endianness::BigEndian
-        };
-        // ImageFileDirectory does not expose endianness publicly; the metadata
-        // reader does. For now assume native; non-native multi-byte planar
-        // subset can be added when a non-native-byte test file appears.
-        let _ = native;
-    }
-
     let dtype = derive_data_type(ifd);
     let typed = TypedArray::try_new(out, dtype)?;
-    let shape = [selected_bands.len(), tile_h, tile_w];
+    let shape = [n_selected, tile_h, tile_w];
     Ok((typed, shape))
 }
 

@@ -11,13 +11,13 @@ a5_read_raster_arrow(
   bands = NULL,
   bbox = NULL,
   src_nodata = NULL,
-  threads = 1L,
-  io_concurrency = 8L,
+  cpu_workers = NULL,
+  io_concurrency = NULL,
   value_type = c("float64", "float32")
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, threads, io_concurrency}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{value_type}{Storage type for the value column. \code{"float64"} (default)
 or \code{"float32"} (halves disk size for embeddings).}

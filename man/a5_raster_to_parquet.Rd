@@ -14,12 +14,12 @@ a5_raster_to_parquet(
   src_nodata = NULL,
   value_type = c("float64", "float32"),
   compression = c("zstd", "snappy", "none"),
-  threads = 1L,
-  io_concurrency = 8L
+  cpu_workers = NULL,
+  io_concurrency = NULL
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, threads, io_concurrency}{See
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency}{See
 \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{dest}{Output Parquet path.}

@@ -43,9 +43,15 @@
 #' @param mode Sampling mode. `"forward"` (default) aggregates pixels into
 #'   cells; `"centroid"` samples one pixel per cell at the cell centroid.
 #'   See Details.
-#' @param threads Tokio worker threads (also caps tile-level concurrency).
-#'   Default 1.
-#' @param io_concurrency Number of tiles fetched concurrently. Default 8.
+#' @param cpu_workers Number of CPU consumers in the tile-processing pool.
+#'   `NULL` (default) resolves from `getOption("a5px.cpu_workers")`, env
+#'   `A5PX_CPU_WORKERS`, then [parallel::detectCores()].
+#' @param io_concurrency Maximum in-flight tile fetches the producer issues
+#'   to the I/O stage. `NULL` (default) resolves from
+#'   `getOption("a5px.io_concurrency")`, env `A5PX_IO_CONCURRENCY`, then
+#'   `min(32, max(cpu_workers, 8))`. Bump this for cloud reads of multi-band
+#'   embedding rasters where the network can absorb more parallelism than
+#'   the CPU pool. See [a5px_set_concurrency()].
 #' @param as_vector Logical. If `TRUE`, collapse all (selected) bands into a
 #'   single list column `value` of fixed-length numeric vectors. Useful for
 #'   embedding rasters. Default `FALSE` (one numeric column per band).
@@ -80,8 +86,8 @@ a5_read_raster <- function(src,
                            bbox = NULL,
                            src_nodata = NULL,
                            mode = c("forward", "centroid"),
-                           threads = 1L,
-                           io_concurrency = 8L,
+                           cpu_workers = NULL,
+                           io_concurrency = NULL,
                            as_vector = FALSE) {
   check_scalar_string(src, "src")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
@@ -89,8 +95,10 @@ a5_read_raster <- function(src,
   check_resolution(resolution)
   stats <- check_stats(stat)
   mode <- rlang::arg_match(mode)
-  threads <- check_scalar_count(threads, "threads")
-  io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
+  cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
+                 else check_scalar_count(cpu_workers, "cpu_workers")
+  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
+                    else check_scalar_count(io_concurrency, "io_concurrency")
   if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
     cli::cli_abort("{.arg as_vector} must be a length-1 non-NA logical.")
   }
@@ -106,7 +114,7 @@ a5_read_raster <- function(src,
       bands_names = band_sel$names,
       bbox = if (length(bbox_v)) bbox_v else NULL,
       src_nodata = src_nodata_v,
-      threads = threads,
+      cpu_workers = cpu_workers,
       io_concurrency = io_concurrency,
       as_vector = as_vector,
       stats = stats
@@ -121,7 +129,7 @@ a5_read_raster <- function(src,
     bands_names = band_sel$names,
     bbox = bbox_v,
     src_nodata = src_nodata_v,
-    threads = threads,
+    cpu_workers = cpu_workers,
     io_concurrency = io_concurrency
   )
 
@@ -159,8 +167,8 @@ a5_read_raster <- function(src,
 #' then sample one pixel per cell.
 #' @noRd
 read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
-                                 bbox, src_nodata, threads, io_concurrency,
-                                 as_vector, stats) {
+                                 bbox, src_nodata, cpu_workers,
+                                 io_concurrency, as_vector, stats) {
   if (length(stats) > 1L || stats[1] != "mean") {
     cli::cli_warn(
       "{.code mode = \"centroid\"} returns one sample per cell; the {.arg stat} arg is ignored.",
@@ -180,7 +188,7 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
     bands_idx = bands_idx,
     bands_names = bands_names,
     src_nodata = src_nodata,
-    threads = threads,
+    cpu_workers = cpu_workers,
     io_concurrency = io_concurrency
   )
   cells_out <- new_a5_cell_from_rs(out$cell)

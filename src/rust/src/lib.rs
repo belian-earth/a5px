@@ -7,10 +7,8 @@ mod geo;
 mod parquet_write;
 mod read;
 mod sample;
-mod threading;
 
 extendr_module! {
     mod a5px;
-    use threading;
     use read;
 }

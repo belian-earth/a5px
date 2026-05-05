@@ -1,7 +1,6 @@
 //! Forward pixel-driven raster → A5 cell aggregation.
 
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 
 use ahash::AHashMap;
 use async_tiff::decoder::DecoderRegistry;
@@ -467,6 +466,23 @@ fn process_tile(
 // ---------------------------------------------------------------------------
 // async pipeline
 
+/// Item moved from the I/O producer to the CPU consumer pool. The producer
+/// only does the network/disk read; the consumer decodes + processes.
+pub(crate) struct TileItem {
+    pub tx: usize,
+    pub ty: usize,
+    pub payload: TilePayload,
+}
+
+pub(crate) enum TilePayload {
+    /// Output of `ImageFileDirectory::fetch_tile`. Decode happens on the consumer.
+    Full(async_tiff::Tile),
+    /// Per-selected-band compressed bytes for planar layouts. Used when the
+    /// caller asked for a band subset of an INTERLEAVE=BAND TIFF with
+    /// predictor=None: only those bands' byte ranges were fetched.
+    PlanarSubset(Vec<bytes::Bytes>),
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn read_raster_async(
     src: &str,
@@ -476,6 +492,7 @@ async fn read_raster_async(
     bands_names: Vec<String>,
     bbox_lonlat: Option<[f64; 4]>,
     src_nodata_override: Option<f64>,
+    cpu_workers: usize,
     io_concurrency: usize,
 ) -> Result<Output> {
     let (store, path) = parse_src(src)?;
@@ -568,8 +585,6 @@ async fn read_raster_async(
     // override nodata if user specified it; otherwise use what async-tiff exposed
     let nodata = src_nodata_override.or(nodata);
 
-    let global = Arc::new(StdMutex::new(AHashMap::<u64, Vec<Accum>>::new()));
-
     // Bbox-driven tile filter. For most projections the bbox of 4 corners +
     // 4 edge midpoints (re-projected to the raster CRS) is a sufficient
     // axis-aligned envelope to pick the candidate tiles. The per-pixel
@@ -610,84 +625,87 @@ async fn read_raster_async(
     let identity_offsets_arc: Arc<Vec<usize>> = Arc::new(identity_offsets);
     let registry_arc: Arc<DecoderRegistry> = Arc::new(DecoderRegistry::default());
 
-    let bbox_for_tile = bbox_lonlat;
-    stream::iter(tiles)
-        .map(|(tx, ty)| {
-            let reader = reader.clone();
-            let ifd = Arc::clone(&ifd_arc);
-            let src_proj = Arc::clone(&src_proj_arc);
-            let dst_proj = Arc::clone(&dst_proj_arc);
-            let selected_bands = Arc::clone(&selected_bands_arc);
-            let identity_offsets = Arc::clone(&identity_offsets_arc);
-            let registry = Arc::clone(&registry_arc);
-            let global = Arc::clone(&global);
-            let bbox_lonlat = bbox_for_tile;
-            async move {
-                let prof = profile_enabled();
+    // Producer / consumer pipeline. The producer issues all tile fetches
+    // concurrently (`io_concurrency`), pushes a TileItem into a bounded
+    // channel. `cpu_workers` blocking-pool tasks consume from the channel,
+    // each with its own AHashMap accumulator. Once all senders are dropped
+    // the channel closes, consumers drain remaining items, exit, and we
+    // tree-reduce the per-worker maps into one. No global mutex.
+    let channel_depth = (cpu_workers * 2).max(4);
+    let (tx_chan_outer, rx_chan) = async_channel::bounded::<TileItem>(channel_depth);
+    // We hand a clone to the producer; we keep tx_chan_outer in scope only
+    // long enough to finish setting up the producer, then drop it. With no
+    // remaining senders, recv_blocking() in consumers will return Err and
+    // they'll exit cleanly.
+
+    // Spawn consumer workers up-front so they're ready as soon as the
+    // producer starts pushing. Each runs on the tokio blocking pool.
+    let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<AHashMap<u64, Vec<Accum>>>>> =
+        Vec::with_capacity(cpu_workers);
+    for _ in 0..cpu_workers {
+        let rx = rx_chan.clone();
+        let ifd = Arc::clone(&ifd_arc);
+        let src_proj = Arc::clone(&src_proj_arc);
+        let dst_proj = Arc::clone(&dst_proj_arc);
+        let selected_bands = Arc::clone(&selected_bands_arc);
+        let identity_offsets = Arc::clone(&identity_offsets_arc);
+        let registry = Arc::clone(&registry_arc);
+        let gt_c = gt;
+        let bbox_lonlat_c = bbox_lonlat;
+        consumer_handles.push(tokio::task::spawn_blocking(move || {
+            let mut local: AHashMap<u64, Vec<Accum>> = AHashMap::new();
+            let prof = profile_enabled();
+            while let Ok(item) = rx.recv_blocking() {
                 let (data, shape, data_n_bands_eff, offsets_arc): (
                     TypedArray,
                     [usize; 3],
                     usize,
                     Arc<Vec<usize>>,
-                ) = if use_band_fetch {
-                    let t = Instant::now();
-                    let (typed, sh) = crate::band_fetch::fetch_planar_subset(
-                        &reader as &dyn AsyncFileReader,
-                        &ifd,
-                        tx,
-                        ty,
-                        &selected_bands,
-                        &registry,
-                    )
-                    .await?;
-                    if prof {
-                        T_FETCH_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                ) = match item.payload {
+                    TilePayload::Full(tile) => {
+                        let t_dec = Instant::now();
+                        let arr = tile.decode(&registry)?;
+                        if prof {
+                            T_DECODE_NS
+                                .fetch_add(t_dec.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
+                        let (data, sh, _) = arr.into_inner();
+                        (data, sh, n_bands, Arc::clone(&selected_bands))
                     }
-                    (typed, sh, n_out, Arc::clone(&identity_offsets))
-                } else {
-                    let t_fetch = Instant::now();
-                    let tile = ifd.fetch_tile(tx, ty, &reader as &dyn AsyncFileReader).await?;
-                    if prof {
-                        T_FETCH_NS
-                            .fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    TilePayload::PlanarSubset(bytes) => {
+                        let t_dec = Instant::now();
+                        let (typed, sh) = crate::band_fetch::decode_planar_subset_bytes(
+                            bytes, &ifd, &registry,
+                        )?;
+                        if prof {
+                            T_DECODE_NS
+                                .fetch_add(t_dec.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
+                        (typed, sh, n_out, Arc::clone(&identity_offsets))
                     }
-                    let t_dec = Instant::now();
-                    let arr = tile.decode(&registry)?;
-                    if prof {
-                        T_DECODE_NS
-                            .fetch_add(t_dec.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    }
-                    let (data, sh, _dt) = arr.into_inner();
-                    (data, sh, n_bands, Arc::clone(&selected_bands))
                 };
-                let local = tokio::task::spawn_blocking(move || {
-                    process_tile(
-                        tx,
-                        ty,
-                        data,
-                        shape,
-                        planar,
-                        width,
-                        height,
-                        tile_w,
-                        tile_h,
-                        data_n_bands_eff,
-                        &offsets_arc,
-                        &src_proj,
-                        &dst_proj,
-                        &gt,
-                        resolution,
-                        nodata,
-                        bbox_lonlat,
-                    )
-                })
-                .await
-                .map_err(|e| A5CogError::Invalid(format!("tile join error: {e}")))??;
-
+                let tile_local = process_tile(
+                    item.tx,
+                    item.ty,
+                    data,
+                    shape,
+                    planar,
+                    width,
+                    height,
+                    tile_w,
+                    tile_h,
+                    data_n_bands_eff,
+                    &offsets_arc,
+                    &src_proj,
+                    &dst_proj,
+                    &gt_c,
+                    resolution,
+                    nodata,
+                    bbox_lonlat_c,
+                )?;
                 let t_merge = Instant::now();
-                let mut g = global.lock().unwrap();
-                for (cell, accs) in local {
-                    let entry = g.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
+                for (cell, accs) in tile_local {
+                    let entry = local.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
                     for (i, a) in accs.iter().enumerate() {
                         entry[i].merge(a);
                     }
@@ -695,17 +713,87 @@ async fn read_raster_async(
                 if prof {
                     T_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
-                Ok::<(), A5CogError>(())
             }
-        })
-        .buffer_unordered(io_concurrency.max(1))
-        .try_collect::<Vec<()>>()
-        .await?;
+            Ok::<AHashMap<u64, Vec<Accum>>, A5CogError>(local)
+        }));
+    }
+    // Consumers each hold their own rx clone; drop the outer one so the
+    // channel closes the moment the producer finishes.
+    drop(rx_chan);
 
-    let map = Arc::try_unwrap(global)
-        .map_err(|_| A5CogError::Invalid("residual references to result map".into()))?
-        .into_inner()
-        .unwrap();
+    // Producer. Move the outer sender clone into the block so that when the
+    // block exits, it's dropped and the channel closes.
+    {
+        let reader = reader.clone();
+        let ifd = Arc::clone(&ifd_arc);
+        let selected_bands = Arc::clone(&selected_bands_arc);
+        let tx_chan = tx_chan_outer;
+        let producer = stream::iter(tiles)
+            .map(|(tx, ty)| {
+                let reader = reader.clone();
+                let ifd = Arc::clone(&ifd);
+                let selected_bands = Arc::clone(&selected_bands);
+                let tx_chan = tx_chan.clone();
+                async move {
+                    let prof = profile_enabled();
+                    let t_fetch = Instant::now();
+                    let payload = if use_band_fetch {
+                        let bytes = crate::band_fetch::fetch_planar_subset_bytes(
+                            &reader as &dyn AsyncFileReader,
+                            &ifd,
+                            tx,
+                            ty,
+                            &selected_bands,
+                        )
+                        .await?;
+                        TilePayload::PlanarSubset(bytes)
+                    } else {
+                        let tile = ifd
+                            .fetch_tile(tx, ty, &reader as &dyn AsyncFileReader)
+                            .await?;
+                        TilePayload::Full(tile)
+                    };
+                    if prof {
+                        T_FETCH_NS
+                            .fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+                    tx_chan
+                        .send(TileItem { tx, ty, payload })
+                        .await
+                        .map_err(|_| {
+                            A5CogError::Invalid("consumer pool dropped channel".into())
+                        })?;
+                    Ok::<(), A5CogError>(())
+                }
+            })
+            .buffer_unordered(io_concurrency.max(1))
+            .try_collect::<Vec<()>>();
+        // Drop the outer handle once we're done so the channel closes
+        // (the producer's per-task clones go away with the futures).
+        producer.await?;
+        drop(tx_chan);
+    }
+
+    // Drain consumers and tree-reduce.
+    let mut local_maps: Vec<AHashMap<u64, Vec<Accum>>> = Vec::with_capacity(cpu_workers);
+    for h in consumer_handles {
+        let m = h
+            .await
+            .map_err(|e| A5CogError::Invalid(format!("consumer join: {e}")))??;
+        local_maps.push(m);
+    }
+    let map = local_maps
+        .into_iter()
+        .reduce(|mut a, b| {
+            for (cell, accs) in b {
+                let entry = a.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
+                for (i, ac) in accs.iter().enumerate() {
+                    entry[i].merge(ac);
+                }
+            }
+            a
+        })
+        .unwrap_or_default();
 
     let n_stats = stats.len();
     let n = map.len();
@@ -915,7 +1003,7 @@ fn a5_read_raster_rs(
     bands_names: Vec<String>,
     bbox: Vec<f64>,
     src_nodata: Vec<f64>,
-    threads: i32,
+    cpu_workers: i32,
     io_concurrency: i32,
 ) -> Result<Robj> {
     if !(0..=30).contains(&resolution) {
@@ -929,11 +1017,11 @@ fn a5_read_raster_rs(
         ));
     }
     let stats_e = parse_stats(&stats)?;
-    let threads = threads.max(1) as usize;
+    let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
+        .worker_threads(cpu_workers.max(2))
         .enable_all()
         .build()
         .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
@@ -955,6 +1043,7 @@ fn a5_read_raster_rs(
         bands_names,
         bbox_opt,
         src_nodata_opt,
+        cpu_workers,
         io_concurrency,
     ))?;
 
@@ -1023,7 +1112,7 @@ fn a5_read_raster_flat_rs(
     bands_names: Vec<String>,
     bbox: Vec<f64>,
     src_nodata: Vec<f64>,
-    threads: i32,
+    cpu_workers: i32,
     io_concurrency: i32,
 ) -> Result<Robj> {
     if !(0..=30).contains(&resolution) {
@@ -1037,11 +1126,11 @@ fn a5_read_raster_flat_rs(
         ));
     }
     let stats_e = parse_stats(&stats)?;
-    let threads = threads.max(1) as usize;
+    let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
+        .worker_threads(cpu_workers.max(2))
         .enable_all()
         .build()
         .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
@@ -1063,6 +1152,7 @@ fn a5_read_raster_flat_rs(
         bands_names,
         bbox_opt,
         src_nodata_opt,
+        cpu_workers,
         io_concurrency,
     ))?;
 
@@ -1129,7 +1219,7 @@ fn a5_raster_to_parquet_rs(
     src_nodata: Vec<f64>,
     value_type: &str,
     compression: &str,
-    threads: i32,
+    cpu_workers: i32,
     io_concurrency: i32,
 ) -> Result<String> {
     if !(0..=30).contains(&resolution) {
@@ -1145,11 +1235,11 @@ fn a5_raster_to_parquet_rs(
     let stats_e = parse_stats(&stats)?;
     let value_type_e = crate::parquet_write::ValueType::parse(value_type)?;
     let compression_e = crate::parquet_write::CompressionChoice::parse(compression)?;
-    let threads = threads.max(1) as usize;
+    let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
+        .worker_threads(cpu_workers.max(2))
         .enable_all()
         .build()
         .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
@@ -1171,6 +1261,7 @@ fn a5_raster_to_parquet_rs(
         bands_names,
         bbox_opt,
         src_nodata_opt,
+        cpu_workers,
         io_concurrency,
     ))?;
 
@@ -1211,7 +1302,7 @@ fn a5_sample_at_cells_rs(
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     src_nodata: Vec<f64>,
-    threads: i32,
+    cpu_workers: i32,
     io_concurrency: i32,
 ) -> Result<Robj> {
     if !bands_idx.is_empty() && !bands_names.is_empty() {
@@ -1219,13 +1310,13 @@ fn a5_sample_at_cells_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let threads = threads.max(1) as usize;
+    let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let cells_in = crate::cell_raw::raw8_list_to_u64s(&cells_raw);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
+        .worker_threads(cpu_workers.max(2))
         .enable_all()
         .build()
         .map_err(|e| A5CogError::Invalid(format!("tokio runtime: {e}")))?;
@@ -1237,6 +1328,7 @@ fn a5_sample_at_cells_rs(
             bands_idx,
             bands_names,
             src_nodata_opt,
+            cpu_workers,
             io_concurrency,
         ))?;
 

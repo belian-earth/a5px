@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,threads,io_concurrency See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency See [a5_read_raster()].
 #' @param value_type Storage type for the value column. `"float64"` (default)
 #'   or `"float32"` (halves disk size for embeddings).
 #'
@@ -33,8 +33,8 @@ a5_read_raster_arrow <- function(src,
                                  bands = NULL,
                                  bbox = NULL,
                                  src_nodata = NULL,
-                                 threads = 1L,
-                                 io_concurrency = 8L,
+                                 cpu_workers = NULL,
+                                 io_concurrency = NULL,
                                  value_type = c("float64", "float32")) {
   rlang::check_installed("arrow", reason = "to construct Arrow tables")
   check_scalar_string(src, "src")
@@ -42,8 +42,10 @@ a5_read_raster_arrow <- function(src,
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
-  threads <- check_scalar_count(threads, "threads")
-  io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
+  cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
+                 else check_scalar_count(cpu_workers, "cpu_workers")
+  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
+                    else check_scalar_count(io_concurrency, "io_concurrency")
   value_type <- rlang::arg_match(value_type)
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
@@ -57,7 +59,7 @@ a5_read_raster_arrow <- function(src,
     bands_names = band_sel$names,
     bbox = bbox_v,
     src_nodata = src_nodata_v,
-    threads = threads,
+    cpu_workers = cpu_workers,
     io_concurrency = io_concurrency
   )
 
@@ -112,7 +114,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,threads,io_concurrency See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency See
 #'   [a5_read_raster()].
 #' @param dest Output Parquet path.
 #' @param value_type Storage type for the value column. `"float64"`
@@ -139,8 +141,8 @@ a5_raster_to_parquet <- function(src,
                                  src_nodata = NULL,
                                  value_type = c("float64", "float32"),
                                  compression = c("zstd", "snappy", "none"),
-                                 threads = 1L,
-                                 io_concurrency = 8L) {
+                                 cpu_workers = NULL,
+                                 io_concurrency = NULL) {
   check_scalar_string(src, "src")
   check_scalar_string(dest, "dest")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
@@ -149,8 +151,10 @@ a5_raster_to_parquet <- function(src,
   stats <- check_stats(stat)
   value_type <- rlang::arg_match(value_type)
   compression <- rlang::arg_match(compression)
-  threads <- check_scalar_count(threads, "threads")
-  io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
+  cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
+                 else check_scalar_count(cpu_workers, "cpu_workers")
+  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
+                    else check_scalar_count(io_concurrency, "io_concurrency")
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
@@ -166,7 +170,7 @@ a5_raster_to_parquet <- function(src,
     src_nodata = src_nodata_v,
     value_type = value_type,
     compression = compression,
-    threads = threads,
+    cpu_workers = cpu_workers,
     io_concurrency = io_concurrency
   ))
 }

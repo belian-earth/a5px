@@ -21,7 +21,6 @@
 //!   value): mean = sum = min = max = the sampled value, count = 1.
 
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 
 use ahash::AHashMap;
 use async_tiff::decoder::DecoderRegistry;
@@ -50,6 +49,15 @@ pub(crate) struct CentroidOutput {
     pub band_names: Vec<String>,
 }
 
+/// Item handed from the I/O producer to the CPU consumer pool. Carries the
+/// fetched-but-not-yet-decoded payload plus the list of cells that fall in
+/// this tile (cell index in the original input + (col, row) within the
+/// tile, both already computed by the producer-side bucketing pass).
+struct TileWork {
+    payload: crate::read::TilePayload,
+    entries: Vec<(usize, usize, usize)>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sample_at_cells_async(
     src: &str,
@@ -57,6 +65,7 @@ pub(crate) async fn sample_at_cells_async(
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     src_nodata_override: Option<f64>,
+    cpu_workers: usize,
     io_concurrency: usize,
 ) -> Result<CentroidOutput> {
     let (store, path) = crate::read::parse_src_pub(src)?;
@@ -202,11 +211,7 @@ pub(crate) async fn sample_at_cells_async(
         });
     }
 
-    // Pre-allocate output. We track validity so we can drop cells that fell
-    // outside the raster or hit nodata in every band.
     let n_in = cells_in.len();
-    let flat = Arc::new(StdMutex::new(vec![f64::NAN; n_in * n_out]));
-    let valid = Arc::new(StdMutex::new(vec![false; n_in]));
 
     let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
         && n_out < n_bands
@@ -223,41 +228,44 @@ pub(crate) async fn sample_at_cells_async(
 
     let tasks: Vec<((usize, usize), Vec<(usize, usize, usize)>)> = buckets.into_iter().collect();
 
-    stream::iter(tasks)
-        .map(|((tx, ty), entries)| {
-            let reader = reader.clone();
-            let ifd = Arc::clone(&ifd_arc);
-            let registry = Arc::clone(&registry_arc);
-            let selected_bands = Arc::clone(&selected_bands_arc);
-            let identity_offsets = Arc::clone(&identity_offsets_arc);
-            let flat = Arc::clone(&flat);
-            let valid = Arc::clone(&valid);
-            async move {
+    // Producer-consumer pipeline (mirrors read.rs):
+    // - Producer fetches each tile's bytes (with `io_concurrency` in flight).
+    // - `cpu_workers` blocking-pool consumers decode + sample into per-worker
+    //   buffers, then we merge their outputs once everyone exits.
+    let channel_depth = (cpu_workers * 2).max(4);
+    let (tx_chan_outer, rx_chan) = async_channel::bounded::<TileWork>(channel_depth);
+
+    let mut consumer_handles: Vec<
+        tokio::task::JoinHandle<Result<(Vec<f64>, Vec<bool>)>>,
+    > = Vec::with_capacity(cpu_workers);
+    for _ in 0..cpu_workers {
+        let rx = rx_chan.clone();
+        let ifd = Arc::clone(&ifd_arc);
+        let registry = Arc::clone(&registry_arc);
+        let identity_offsets = Arc::clone(&identity_offsets_arc);
+        let selected_bands = Arc::clone(&selected_bands_arc);
+        consumer_handles.push(tokio::task::spawn_blocking(move || {
+            let mut flat_local = vec![f64::NAN; n_in * n_out];
+            let mut valid_local = vec![false; n_in];
+            while let Ok(work) = rx.recv_blocking() {
                 let (data, _shape, data_n_bands_eff, offsets_arc): (
                     TypedArray,
                     [usize; 3],
                     usize,
                     Arc<Vec<usize>>,
-                ) = if use_band_fetch {
-                    let (typed, sh) = crate::band_fetch::fetch_planar_subset(
-                        &reader as &dyn AsyncFileReader,
-                        &ifd,
-                        tx,
-                        ty,
-                        &selected_bands,
-                        &registry,
-                    )
-                    .await?;
-                    (typed, sh, n_out, Arc::clone(&identity_offsets))
-                } else {
-                    let tile = ifd
-                        .fetch_tile(tx, ty, &reader as &dyn AsyncFileReader)
-                        .await?;
-                    let arr = tile.decode(&registry)?;
-                    let (data, sh, _dt) = arr.into_inner();
-                    (data, sh, n_bands, Arc::clone(&selected_bands))
+                ) = match work.payload {
+                    crate::read::TilePayload::PlanarSubset(bytes) => {
+                        let (typed, sh) = crate::band_fetch::decode_planar_subset_bytes(
+                            bytes, &ifd, &registry,
+                        )?;
+                        (typed, sh, n_out, Arc::clone(&identity_offsets))
+                    }
+                    crate::read::TilePayload::Full(tile) => {
+                        let arr = tile.decode(&registry)?;
+                        let (data, sh, _) = arr.into_inner();
+                        (data, sh, n_bands, Arc::clone(&selected_bands))
+                    }
                 };
-
                 let (h_stride, w_stride, b_stride): (usize, usize, usize) = match planar {
                     PlanarConfiguration::Chunky => {
                         (tile_w * data_n_bands_eff, data_n_bands_eff, 1)
@@ -269,14 +277,9 @@ pub(crate) async fn sample_at_cells_async(
                         )));
                     }
                 };
-
-                let mut local_flat = vec![(0usize, [0.0f64; 0])]; // placeholder, we write straight to global
-                let _ = &mut local_flat;
-                let mut updates: Vec<(usize, Vec<f64>)> = Vec::with_capacity(entries.len());
-                let mut valid_updates: Vec<usize> = Vec::with_capacity(entries.len());
-                for (i, c, r) in entries {
+                for (i, c, r) in work.entries {
                     let pixel_base = r * h_stride + c * w_stride;
-                    let mut row = vec![f64::NAN; n_out];
+                    let base = i * n_out;
                     let mut any_valid = false;
                     for (out_b, &src_b) in offsets_arc.iter().enumerate() {
                         let off = pixel_base + src_b * b_stride;
@@ -286,57 +289,91 @@ pub(crate) async fn sample_at_cells_async(
                             None => true,
                         };
                         if valid_v {
-                            row[out_b] = v;
+                            flat_local[base + out_b] = v;
                             any_valid = true;
                         }
                     }
                     if any_valid {
-                        updates.push((i, row));
-                        valid_updates.push(i);
+                        valid_local[i] = true;
                     }
                 }
-                {
-                    let mut g = flat.lock().unwrap();
-                    for (i, row) in updates {
-                        let base = i * n_out;
-                        for (b, v) in row.into_iter().enumerate() {
-                            g[base + b] = v;
-                        }
-                    }
-                }
-                {
-                    let mut v = valid.lock().unwrap();
-                    for i in valid_updates {
-                        v[i] = true;
-                    }
-                }
-                Ok::<(), A5CogError>(())
             }
-        })
-        .buffer_unordered(io_concurrency.max(1))
-        .try_collect::<Vec<()>>()
-        .await?;
+            Ok::<(Vec<f64>, Vec<bool>), A5CogError>((flat_local, valid_local))
+        }));
+    }
+    drop(rx_chan);
 
-    // Filter to cells with at least one valid band reading.
-    let flat_full = Arc::try_unwrap(flat)
-        .map_err(|_| A5CogError::Invalid("residual reference to flat".into()))?
-        .into_inner()
-        .unwrap();
-    let valid_v = Arc::try_unwrap(valid)
-        .map_err(|_| A5CogError::Invalid("residual reference to valid".into()))?
-        .into_inner()
-        .unwrap();
+    {
+        let reader = reader.clone();
+        let ifd = Arc::clone(&ifd_arc);
+        let selected_bands = Arc::clone(&selected_bands_arc);
+        let tx_chan = tx_chan_outer;
+        let producer = stream::iter(tasks)
+            .map(|((tx, ty), entries)| {
+                let reader = reader.clone();
+                let ifd = Arc::clone(&ifd);
+                let selected_bands = Arc::clone(&selected_bands);
+                let tx_chan = tx_chan.clone();
+                async move {
+                    let payload = if use_band_fetch {
+                        let bytes = crate::band_fetch::fetch_planar_subset_bytes(
+                            &reader as &dyn AsyncFileReader,
+                            &ifd,
+                            tx,
+                            ty,
+                            &selected_bands,
+                        )
+                        .await?;
+                        crate::read::TilePayload::PlanarSubset(bytes)
+                    } else {
+                        let tile = ifd
+                            .fetch_tile(tx, ty, &reader as &dyn AsyncFileReader)
+                            .await?;
+                        crate::read::TilePayload::Full(tile)
+                    };
+                    tx_chan
+                        .send(TileWork { payload, entries })
+                        .await
+                        .map_err(|_| {
+                            A5CogError::Invalid("centroid consumer pool dropped channel".into())
+                        })?;
+                    Ok::<(), A5CogError>(())
+                }
+            })
+            .buffer_unordered(io_concurrency.max(1))
+            .try_collect::<Vec<()>>();
+        producer.await?;
+        drop(tx_chan);
+    }
 
-    let kept: usize = valid_v.iter().filter(|&&b| b).count();
+    // Tree-reduce per-worker outputs (we just OR them together: each cell is
+    // touched by exactly one tile/worker, so cells don't collide).
+    let mut flat = vec![f64::NAN; n_in * n_out];
+    let mut valid = vec![false; n_in];
+    for h in consumer_handles {
+        let (f, v) = h
+            .await
+            .map_err(|e| A5CogError::Invalid(format!("consumer join: {e}")))??;
+        for i in 0..n_in {
+            if v[i] {
+                valid[i] = true;
+                let base = i * n_out;
+                for b in 0..n_out {
+                    flat[base + b] = f[base + b];
+                }
+            }
+        }
+    }
+    let kept: usize = valid.iter().filter(|&&b| b).count();
     let mut cells_out = Vec::with_capacity(kept);
     let mut flat_out: Vec<f64> = Vec::with_capacity(kept * n_out);
-    for (i, &is_valid) in valid_v.iter().enumerate() {
+    for (i, &is_valid) in valid.iter().enumerate() {
         if !is_valid {
             continue;
         }
         cells_out.push(cells_in[i]);
         let base = i * n_out;
-        flat_out.extend_from_slice(&flat_full[base..base + n_out]);
+        flat_out.extend_from_slice(&flat[base..base + n_out]);
     }
 
     Ok(CentroidOutput {

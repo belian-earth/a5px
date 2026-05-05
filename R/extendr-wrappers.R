@@ -5,10 +5,6 @@
 #' @useDynLib a5px, .registration = TRUE
 NULL
 
-a5px_set_threads_rs <- function(n) .Call(wrap__a5px_set_threads_rs, n)
-
-a5px_get_threads_rs <- function() .Call(wrap__a5px_get_threads_rs)
-
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells.
 #'
 #' @param src Path or URL string (file://, http(s)://, s3://, gs://, az://).
@@ -26,7 +22,7 @@ a5px_get_threads_rs <- function() .Call(wrap__a5px_get_threads_rs)
 #'   for length>1), `band_names`, and `stats` (character).
 #' @noRd
 #' @keywords internal
-a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, threads, io_concurrency) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, threads, io_concurrency)
+a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells, returning a
 #' flat cell-major numeric buffer suitable for direct construction of an
@@ -46,7 +42,7 @@ a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bb
 #'   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
 #' @noRd
 #' @keywords internal
-a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, threads, io_concurrency) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, threads, io_concurrency)
+a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF straight into a Parquet
 #' file. RecordBatch construction and Parquet write happen in Rust without
@@ -65,7 +61,7 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @returns The destination path (character scalar) on success.
 #' @noRd
 #' @keywords internal
-a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, threads, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, threads, io_concurrency)
+a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, cpu_workers, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, value_type, compression, cpu_workers, io_concurrency)
 
 #' Sample one pixel value per A5 cell. Inverse / cell-driven path.
 #'
@@ -78,7 +74,7 @@ a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, ban
 #'   `band_names`.
 #' @noRd
 #' @keywords internal
-a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, threads, io_concurrency) .Call(wrap__a5_sample_at_cells_rs, src, cells_raw, bands_idx, bands_names, src_nodata, threads, io_concurrency)
+a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency) .Call(wrap__a5_sample_at_cells_rs, src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency)
 
 #' Compute the WGS84 lon/lat bbox of the raster at `src`, by projecting the
 #' 4 corners + 4 edge midpoints of the raster's projected extent into

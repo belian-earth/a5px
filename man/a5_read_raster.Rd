@@ -12,8 +12,8 @@ a5_read_raster(
   bbox = NULL,
   src_nodata = NULL,
   mode = c("forward", "centroid"),
-  threads = 1L,
-  io_concurrency = 8L,
+  cpu_workers = NULL,
+  io_concurrency = NULL,
   as_vector = FALSE
 )
 }
@@ -48,10 +48,16 @@ uses whatever \code{async-tiff} exposes.}
 cells; \code{"centroid"} samples one pixel per cell at the cell centroid.
 See Details.}
 
-\item{threads}{Tokio worker threads (also caps tile-level concurrency).
-Default 1.}
+\item{cpu_workers}{Number of CPU consumers in the tile-processing pool.
+\code{NULL} (default) resolves from \code{getOption("a5px.cpu_workers")}, env
+\code{A5PX_CPU_WORKERS}, then \code{\link[parallel:detectCores]{parallel::detectCores()}}.}
 
-\item{io_concurrency}{Number of tiles fetched concurrently. Default 8.}
+\item{io_concurrency}{Maximum in-flight tile fetches the producer issues
+to the I/O stage. \code{NULL} (default) resolves from
+\code{getOption("a5px.io_concurrency")}, env \code{A5PX_IO_CONCURRENCY}, then
+\code{min(32, max(cpu_workers, 8))}. Bump this for cloud reads of multi-band
+embedding rasters where the network can absorb more parallelism than
+the CPU pool. See \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.}
 
 \item{as_vector}{Logical. If \code{TRUE}, collapse all (selected) bands into a
 single list column \code{value} of fixed-length numeric vectors. Useful for
