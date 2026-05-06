@@ -31,7 +31,6 @@ Suggests:
     withr,
     wk
 Remotes:
-    belian-earth/a5R,
     belian-earth/a5view,
     r-spatial/geoarrowWidget
 Config/testthat/edition: 3
