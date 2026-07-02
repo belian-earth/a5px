@@ -42,7 +42,7 @@
 #'   - character vector: band names matched against the GDAL `DESCRIPTION`
 #'     tag (falling back to `band_NN` when descriptions are absent).
 #' @param bbox Optional spatial subset, as a numeric `c(xmin, ymin, xmax,
-#'   ymax)` in WGS 84 lon/lat. Same convention as [a5R::a5_grid()]. When
+#'   ymax)` in WGS 84 lon/lat. When
 #'   supplied, only tiles overlapping the bbox (in raster CRS) are fetched
 #'   from the COG, and pixels outside the bbox are skipped. `NULL` (default)
 #'   reads the whole raster.
@@ -67,6 +67,15 @@
 #'   stat returns a single column `value`; multi-stat returns
 #'   `value_<stat>` columns (e.g. `value_mean`, `value_max`). Useful for
 #'   embedding rasters. Default `FALSE` (one numeric column per band).
+#' @param use_overviews Logical. When `TRUE` (default) and `stat = "mean"`,
+#'   read the coarsest COG overview that still oversamples the target A5 cell
+#'   instead of the full-resolution image. For aggregations to cells much
+#'   coarser than the source pixels this moves far fewer bytes and does far
+#'   less per-pixel work for a near-identical mean. Ignored unless the stat is
+#'   exactly `"mean"` (`sum`/`count`/`var`/`sd`/`min`/`max` are not preserved
+#'   under decimation) and in `mode = "centroid"`. Set `FALSE` to always read
+#'   full resolution. Requires the source to carry overviews; otherwise the
+#'   full-resolution image is read regardless.
 #'
 #' @returns A [tibble::tibble()] with columns:
 #'   - `cell`: an [a5R::a5_cell] vector at `resolution`
@@ -100,7 +109,8 @@ a5_read_raster <- function(src,
                            mode = c("forward", "centroid"),
                            cpu_workers = NULL,
                            io_concurrency = NULL,
-                           as_vector = FALSE) {
+                           as_vector = FALSE,
+                           use_overviews = TRUE) {
   check_scalar_string(src, "src")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
@@ -117,6 +127,7 @@ a5_read_raster <- function(src,
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
+  overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
   if (mode == "centroid") {
     return(read_raster_centroid(
@@ -142,7 +153,8 @@ a5_read_raster <- function(src,
     bbox = bbox_v,
     src_nodata = src_nodata_v,
     cpu_workers = cpu_workers,
-    io_concurrency = io_concurrency
+    io_concurrency = io_concurrency,
+    overview_target_m = overview_target_m
   )
 
   cells <- new_a5_cell_from_rs(out$cell)
@@ -177,8 +189,8 @@ a5_read_raster <- function(src,
   }
 }
 
-#' Centroid-mode read: enumerate cells covering the bbox via [a5R::a5_grid()],
-#' then sample one pixel per cell.
+#' Centroid-mode read: enumerate cells covering the bbox via
+#' [a5R::a5_polygon_to_cells()], then sample one pixel per cell.
 #' @noRd
 read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
                                  bbox, src_nodata, cpu_workers,
@@ -192,9 +204,20 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
   if (is.null(bbox)) {
     bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src))
   }
-  cells <- a5R::a5_grid(bbox, resolution = resolution)
+  # a5R >= 0.4.0 replaced a5_grid() with a5_polygon_to_cells() (centre-in-polygon
+  # semantics, returns compacted cells). Uncompact to a uniform grid at the
+  # requested resolution so each cell gets one centroid sample.
+  cells <- a5R::a5_uncompact(
+    a5R::a5_polygon_to_cells(
+      wk::rct(bbox[1], bbox[2], bbox[3], bbox[4]),
+      resolution = resolution
+    ),
+    resolution = resolution
+  )
   if (length(cells) == 0L) {
-    cli::cli_abort("a5_grid returned 0 cells for the requested bbox at resolution {resolution}.")
+    cli::cli_abort(
+      "No A5 cells have centroids within the requested bbox at resolution {resolution}. Use a finer resolution or a larger bbox."
+    )
   }
   out <- a5_sample_at_cells_rs(
     src = src,

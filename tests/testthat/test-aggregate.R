@@ -1,6 +1,18 @@
+# Uniform-resolution cells covering a bbox. Replaces the removed a5R::a5_grid();
+# a5_polygon_to_cells() returns compacted cells, so uncompact to a flat grid.
+grid_cells <- function(bbox = c(10, 50, 11, 51), resolution = 8L) {
+  a5R::a5_uncompact(
+    a5R::a5_polygon_to_cells(
+      wk::rct(bbox[1], bbox[2], bbox[3], bbox[4]),
+      resolution = resolution
+    ),
+    resolution = resolution
+  )
+}
+
 make_wide <- function(seed = 1L) {
   set.seed(seed)
-  cells <- a5R::a5_grid(c(10, 50, 11, 51), resolution = 8L)
+  cells <- grid_cells()
   n <- length(cells)
   tibble::tibble(
     cell = cells,
@@ -12,7 +24,7 @@ make_wide <- function(seed = 1L) {
 
 make_listcol <- function(seed = 1L) {
   set.seed(seed)
-  cells <- a5R::a5_grid(c(10, 50, 11, 51), resolution = 8L)
+  cells <- grid_cells()
   n <- length(cells)
   tibble::tibble(
     cell = cells,
@@ -78,7 +90,7 @@ test_that("wide aggregate var / sd match per-group stats::var / stats::sd", {
 })
 
 test_that("var / sd are NA for single-observation groups", {
-  cells <- a5R::a5_grid(c(10, 50, 11, 51), resolution = 8L)
+  cells <- grid_cells()
   testthat::skip_if(length(cells) == 0L)
   one <- vctrs::vec_slice(cells, 1L)
   fine <- tibble::tibble(cell = one, B02 = 42)

@@ -24,7 +24,7 @@ Defaults to every non-cell numeric or list-of-numeric column.}
 \item{stat}{Reducer. One of \code{"mean"} (default), \code{"sum"}, \code{"count"},
 \code{"min"}, \code{"max"}, \code{"var"}, \code{"sd"}. \code{"count"} returns the number of
 non-\code{NA} source values per group. \code{"var"} / \code{"sd"} use the sample
-formula (divisor n - 1) to match R's \code{\link[stats:cor]{stats::var()}} / \code{\link[stats:sd]{stats::sd()}};
+formula (divisor n - 1) to match R's \code{\link[stats:var]{stats::var()}} / \code{\link[stats:sd]{stats::sd()}};
 single-row groups are returned as \code{NA}.}
 }
 \value{

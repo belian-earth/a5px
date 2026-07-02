@@ -14,7 +14,8 @@ a5_read_raster(
   mode = c("forward", "centroid"),
   cpu_workers = NULL,
   io_concurrency = NULL,
-  as_vector = FALSE
+  as_vector = FALSE,
+  use_overviews = TRUE
 )
 }
 \arguments{
@@ -27,7 +28,7 @@ a5_read_raster(
 \code{"max"}, \code{"var"}, \code{"sd"}, or any non-duplicated subset of those for a
 one-pass multi-stat read. Default \code{"mean"}. \code{"var"} / \code{"sd"} use the
 sample formula (divisor n - 1) computed via Welford's online algorithm
-in the streaming aggregator, matching \code{\link[stats:cor]{stats::var()}} / \code{\link[stats:sd]{stats::sd()}};
+in the streaming aggregator, matching \code{\link[stats:var]{stats::var()}} / \code{\link[stats:sd]{stats::sd()}};
 cells covered by a single pixel return \code{NA}.}
 
 \item{bands}{Bands to read. One of:
@@ -38,7 +39,7 @@ cells covered by a single pixel return \code{NA}.}
 tag (falling back to \code{band_NN} when descriptions are absent).
 }}
 
-\item{bbox}{Optional spatial subset, as a numeric \code{c(xmin, ymin, xmax, ymax)} in WGS 84 lon/lat. Same convention as \code{\link[a5R:a5_grid]{a5R::a5_grid()}}. When
+\item{bbox}{Optional spatial subset, as a numeric \code{c(xmin, ymin, xmax, ymax)} in WGS 84 lon/lat. When
 supplied, only tiles overlapping the bbox (in raster CRS) are fetched
 from the COG, and pixels outside the bbox are skipped. \code{NULL} (default)
 reads the whole raster.}
@@ -68,6 +69,16 @@ list columns of fixed-length numeric vectors -- one per stat. Single
 stat returns a single column \code{value}; multi-stat returns
 \verb{value_<stat>} columns (e.g. \code{value_mean}, \code{value_max}). Useful for
 embedding rasters. Default \code{FALSE} (one numeric column per band).}
+
+\item{use_overviews}{Logical. When \code{TRUE} (default) and \code{stat = "mean"},
+read the coarsest COG overview that still oversamples the target A5 cell
+instead of the full-resolution image. For aggregations to cells much
+coarser than the source pixels this moves far fewer bytes and does far
+less per-pixel work for a near-identical mean. Ignored unless the stat is
+exactly \code{"mean"} (\code{sum}/\code{count}/\code{var}/\code{sd}/\code{min}/\code{max} are not preserved
+under decimation) and in \code{mode = "centroid"}. Set \code{FALSE} to always read
+full resolution. Requires the source to carry overviews; otherwise the
+full-resolution image is read regardless.}
 }
 \value{
 A \code{\link[tibble:tibble]{tibble::tibble()}} with columns:

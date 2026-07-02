@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,as_vector See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,as_vector,use_overviews See [a5_read_raster()].
 #' @param value_type Storage type for the value column. `"float64"` (default)
 #'   or `"float32"` (halves disk size for embeddings).
 #'
@@ -36,7 +36,8 @@ a5_read_raster_arrow <- function(src,
                                  cpu_workers = NULL,
                                  io_concurrency = NULL,
                                  as_vector = FALSE,
-                                 value_type = c("float64", "float32")) {
+                                 value_type = c("float64", "float32"),
+                                 use_overviews = TRUE) {
   rlang::check_installed("arrow", reason = "to construct Arrow tables")
   check_scalar_string(src, "src")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
@@ -54,6 +55,7 @@ a5_read_raster_arrow <- function(src,
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
+  overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
   out <- a5_read_raster_flat_rs(
     src = src,
@@ -64,7 +66,8 @@ a5_read_raster_arrow <- function(src,
     bbox = bbox_v,
     src_nodata = src_nodata_v,
     cpu_workers = cpu_workers,
-    io_concurrency = io_concurrency
+    io_concurrency = io_concurrency,
+    overview_target_m = overview_target_m
   )
 
   cells <- new_a5_cell_from_rs(out$cell)
@@ -129,7 +132,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,as_vector See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,as_vector,use_overviews See
 #'   [a5_read_raster()].
 #' @param dest Output Parquet path.
 #' @param value_type Storage type for the value column. `"float64"`
@@ -158,7 +161,8 @@ a5_raster_to_parquet <- function(src,
                                  value_type = c("float64", "float32"),
                                  compression = c("zstd", "snappy", "none"),
                                  cpu_workers = NULL,
-                                 io_concurrency = NULL) {
+                                 io_concurrency = NULL,
+                                 use_overviews = TRUE) {
   check_scalar_string(src, "src")
   check_scalar_string(dest, "dest")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
@@ -177,6 +181,7 @@ a5_raster_to_parquet <- function(src,
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
+  overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
   invisible(a5_raster_to_parquet_rs(
     src = src,
@@ -191,7 +196,8 @@ a5_raster_to_parquet <- function(src,
     value_type = value_type,
     compression = compression,
     cpu_workers = cpu_workers,
-    io_concurrency = io_concurrency
+    io_concurrency = io_concurrency,
+    overview_target_m = overview_target_m
   ))
 }
 

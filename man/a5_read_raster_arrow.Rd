@@ -14,17 +14,18 @@ a5_read_raster_arrow(
   cpu_workers = NULL,
   io_concurrency = NULL,
   as_vector = FALSE,
-  value_type = c("float64", "float32")
+  value_type = c("float64", "float32"),
+  use_overviews = TRUE
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, as_vector}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, as_vector, use_overviews}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{value_type}{Storage type for the value column. \code{"float64"} (default)
 or \code{"float32"} (halves disk size for embeddings).}
 }
 \value{
-An \link[arrow:Table-class]{arrow::Table} with two columns:
+An \link[arrow:Table]{arrow::Table} with two columns:
 \itemize{
 \item \code{cell}: \code{uint64} (interoperable with \code{\link[a5R:a5_cell_from_arrow]{a5R::a5_cell_from_arrow()}}).
 \item \code{value}: \verb{FixedSizeList<float, n_bands>}. Field-level metadata records

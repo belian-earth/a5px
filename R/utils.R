@@ -111,6 +111,28 @@ check_stats <- function(stat, call = rlang::caller_env()) {
   invisible(stat)
 }
 
+#' Resolve the overview target passed to Rust.
+#'
+#' Returns the A5 cell edge length in metres at `resolution` when overview use
+#' is enabled and the requested stat is exactly `"mean"` (the only stat that
+#' survives reading a decimated, averaging-built overview). Otherwise returns
+#' `0`, which tells Rust to read full resolution. `sum`/`count`/`var`/`sd`/
+#' `min`/`max` are not decimation-invariant, so overviews are never used for
+#' them even when `use_overviews = TRUE`.
+#' @noRd
+overview_target_metres <- function(use_overviews, stats, resolution,
+                                   call = rlang::caller_env()) {
+  if (!is.logical(use_overviews) || length(use_overviews) != 1L ||
+        is.na(use_overviews)) {
+    cli::cli_abort("{.arg use_overviews} must be a length-1 non-NA logical.",
+                   call = call)
+  }
+  if (!isTRUE(use_overviews) || !identical(stats, "mean")) {
+    return(0)
+  }
+  sqrt(as.numeric(a5R::a5_cell_area(resolution, units = "m^2")))
+}
+
 #' Normalise the user-facing `bands` arg into integer indices or character names.
 #' Returns a list(idx = integer(), names = character()); at most one is non-empty.
 #' @noRd

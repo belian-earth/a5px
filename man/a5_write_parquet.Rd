@@ -20,7 +20,7 @@ a5_write_parquet(x, dest, compression = "zstd", ...)
 \code{dest} invisibly.
 }
 \description{
-Convenience writer. Accepts either an \link[arrow:Table-class]{arrow::Table} from
+Convenience writer. Accepts either an \link[arrow:Table]{arrow::Table} from
 \code{\link[=a5_read_raster_arrow]{a5_read_raster_arrow()}} or a \code{\link[tibble:tibble]{tibble::tibble()}} from \code{\link[=a5_read_raster]{a5_read_raster()}};
 picks the right path under the hood. The on-disk schema is the same in
 both cases when the tibble has a single fixed-length \code{value} list column

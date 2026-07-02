@@ -49,39 +49,43 @@ and `rustc` >= 1.85) and a recent version of
 
 ## Quick example
 
-A complete read of a public Cloud-Optimised GeoTIFF (the EOx 2020
-Sentinel-2 cloudless mosaic, RGB) into A5 cells, then a quick
-visualisation:
-
+A complete read of a public Cloud-Optimised GeoTIFF into A5 cells, then
+a quick visualisation. Here the source is an [Alpha Earth
+Foundations](https://source.coop/tge-labs/aef) embedding tile (64 Int8
+bands, 10 m, UTM 36S over Malawi); we take the first three embedding
+dimensions and render them as false-colour RGB. Because `stat = "mean"`,
+`a5_read_raster()` reads the coarsest COG overview that still oversamples
+each A5 cell, so the whole 2.7 GB tile resolves to ~900 cells in a couple
+of seconds.
 
 
 ``` {r}
 library(a5px)
 
 
-url <- "https://s2downloads.eox.at/demo/EOxCloudless/2020/rgb_corrected_geodetic/3/0/0.tif"
+url <- paste0(
+  "https://data.source.coop/tge-labs/aef/v1/annual/2021/36S/",
+  "xekh5rjs4wg6wb9b4-0000000000-0000000000.tiff"
+)
 
 
-EOx <- a5_read_raster(
+aef <- a5_read_raster(
   url,
-  resolution     = 5L,
+  resolution     = 15L,
+  bands          = 11:13,
   stat           = "mean"
 )
 
-EOx 
+aef
 
-# Render the three bands as RGB and view on the globe
+# Render the three embedding bands as false-colour RGB on the globe
 
-a5view::a5_view(EOx, 
-                fill = a5view::cells_rgb(EOx$band_01, EOx$band_02, EOx$band_03), 
-                fill_identity = TRUE,
-                border = "#ffffff", 
-                border_width = 0.25,
-                globe = TRUE, 
+a5view::a5_view(aef,
+                fill = a5view::cells_rgb(A10, A11, A12),
                 opacity = 1,
-                zoom=2,
-                lng = 0,
-                lat = 44)
+                zoom = 9,
+                fill_identity = TRUE,
+                border = NULL)
 ```
 
 ## API surface

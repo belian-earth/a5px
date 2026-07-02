@@ -20,7 +20,7 @@ use a vector / cell-driven workflow (not yet implemented in a5px).
 
 \itemize{
 \item \code{\link[=a5_read_raster]{a5_read_raster()}} --- aggregate to a tibble keyed by \code{a5R::a5_cell}
-\item \code{\link[=a5_read_raster_arrow]{a5_read_raster_arrow()}} --- same engine, returns an \link[arrow:Table-class]{arrow::Table} with
+\item \code{\link[=a5_read_raster_arrow]{a5_read_raster_arrow()}} --- same engine, returns an \link[arrow:Table]{arrow::Table} with
 a \verb{FixedSizeList<float, n_bands>} value column suitable for direct
 Parquet writes
 \item \code{\link[=a5_raster_to_parquet]{a5_raster_to_parquet()}} --- read and write Parquet entirely in Rust,
@@ -59,7 +59,7 @@ a schema tailored to A5 cell + value lists
 \itemize{
 \item \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}} / \code{\link[=a5px_get_concurrency]{a5px_get_concurrency()}} --- two-knob control
 over the CPU consumer pool (\code{cpu_workers}) and the maximum in-flight
-tile fetches (\code{io_concurrency}). Independent of \code{\link[a5R:a5_threads]{a5R::a5_set_threads()}}.
+tile fetches (\code{io_concurrency}). Independent of \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}.
 }
 }
 
@@ -125,6 +125,11 @@ Useful links:
 }
 \author{
 \strong{Maintainer}: Hugh Graham \email{hugh@belian.earth}
+
+Authors:
+\itemize{
+  \item Hugh Graham \email{hugh@belian.earth}
+}
 
 Other contributors:
 \itemize{

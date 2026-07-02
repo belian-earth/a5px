@@ -17,12 +17,15 @@ NULL
 #'   tag, falling back to band_NN). Empty = all (unless bands_idx is non-empty).
 #' @param threads Worker threads (currently used for tile-level concurrency).
 #' @param io_concurrency Number of tiles fetched concurrently.
+#' @param overview_target_m A5 cell edge length in metres; when > 0 a COG
+#'   overview that still oversamples the cell is read instead of full
+#'   resolution. 0 disables overview use (always read IFD 0).
 #' @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
 #'   vectors; key form is `<band>` for length-1 stats and `<band>__<stat>`
 #'   for length>1), `band_names`, and `stats` (character).
 #' @noRd
 #' @keywords internal
-a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency)
+a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells, returning a
 #' flat cell-major numeric buffer suitable for direct construction of an
@@ -37,12 +40,15 @@ a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bb
 #'   DESCRIPTION tag).
 #' @param threads Worker threads.
 #' @param io_concurrency Number of tiles fetched concurrently.
+#' @param overview_target_m A5 cell edge length in metres; when > 0 a COG
+#'   overview that still oversamples the cell is read instead of full
+#'   resolution. 0 disables overview use (always read IFD 0).
 #' @returns A list with `cell` (b1..b8 raw), `value_flat` (named list of
 #'   numeric vectors, one per stat in `stats` order, each of length
 #'   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
 #' @noRd
 #' @keywords internal
-a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency)
+a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF straight into a Parquet
 #' file. RecordBatch construction and Parquet write happen in Rust without
@@ -58,10 +64,13 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @param compression Parquet compression codec ("zstd" | "snappy" | "none").
 #' @param threads Worker threads.
 #' @param io_concurrency Number of tiles fetched concurrently.
+#' @param overview_target_m A5 cell edge length in metres; when > 0 a COG
+#'   overview that still oversamples the cell is read instead of full
+#'   resolution. 0 disables overview use (always read IFD 0).
 #' @returns The destination path (character scalar) on success.
 #' @noRd
 #' @keywords internal
-a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency)
+a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m)
 
 #' Sample one pixel value per A5 cell. Inverse / cell-driven path.
 #'
@@ -83,5 +92,12 @@ a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_no
 #' @noRd
 #' @keywords internal
 a5_raster_bbox_lonlat_rs <- function(src) .Call(wrap__a5_raster_bbox_lonlat_rs, src)
+
+#' Diagnostic: the IFD index `a5_read_raster_rs` would read for the given
+#' `overview_target_m` (the A5 cell edge in metres; 0 = overviews disabled).
+#' 0 means full resolution. Exposed for testing / introspection.
+#' @noRd
+#' @keywords internal
+a5_select_overview_level_rs <- function(src, overview_target_m) .Call(wrap__a5_select_overview_level_rs, src, overview_target_m)
 
 # nolint end

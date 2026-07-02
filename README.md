@@ -41,52 +41,57 @@ and `rustc` \>= 1.85) and a recent version of
 
 ## Quick example
 
-A complete read of a public Cloud-Optimised GeoTIFF (the EOx 2020
-Sentinel-2 cloudless mosaic, RGB) into A5 cells, then a quick
-visualisation:
+A complete read of a public Cloud-Optimised GeoTIFF into A5 cells, then
+a quick visualisation. Here the source is an [Alpha Earth
+Foundations](https://source.coop/tge-labs/aef) embedding tile (64 Int8
+bands, 10 m, UTM 36S over Malawi); we take the first three embedding
+dimensions and render them as false-colour RGB. Because `stat = "mean"`,
+`a5_read_raster()` reads the coarsest COG overview that still
+oversamples each A5 cell, so the whole 2.7 GB tile resolves to ~900
+cells in a couple of seconds.
 
 ``` r
 library(a5px)
 #> Loading required package: a5R
 
 
-url <- "https://s2downloads.eox.at/demo/EOxCloudless/2020/rgb_corrected_geodetic/3/0/0.tif"
+url <- paste0(
+  "https://data.source.coop/tge-labs/aef/v1/annual/2021/36S/",
+  "xekh5rjs4wg6wb9b4-0000000000-0000000000.tiff"
+)
 
 
-EOx <- a5_read_raster(
+aef <- a5_read_raster(
   url,
-  resolution     = 5L,
+  resolution     = 15L,
+  bands          = 11:13,
   stat           = "mean"
 )
 
-EOx 
-#> # A tibble: 7,928 × 4
-#>    cell             band_01 band_02 band_03
-#>    <a5_cell>          <dbl>   <dbl>   <dbl>
-#>  1 3066000000000000    5.08   12.8    15.5 
-#>  2 04d6000000000000   55.7    50.0    23.6 
-#>  3 5276000000000000  251.    174.     94.5 
-#>  4 bd3e000000000000  253.    255.    254.  
-#>  5 00ca000000000000   23.2    32.3    28.5 
-#>  6 2dce000000000000   30.9    28.8    20.6 
-#>  7 1e1e000000000000   14.8    25.4    30.0 
-#>  8 8316000000000000    1.90    9.64    9.96
-#>  9 8d02000000000000   66.6    52.8    25.5 
-#> 10 3a56000000000000   27.1    54.5    27.0 
-#> # ℹ 7,918 more rows
+aef
+#> # A tibble: 213,007 × 4
+#>    cell                A10   A11   A12
+#>    <a5_cell>         <dbl> <dbl> <dbl>
+#>  1 4a99a162e0000000 -22.7  -31.3  23.2
+#>  2 4a99930ba0000000  23.2  -34.2 -48.0
+#>  3 4a992e1b60000000  22.0  -31.8 -35.8
+#>  4 4a9991b3a0000000  24.2  -26.7 -43.8
+#>  5 4a9971b4a0000000   2.78 -13.6  30.2
+#>  6 4a998deb20000000 -33.3  -18.8  25.9
+#>  7 4a99a92220000000   9.19 -36.8 -18.0
+#>  8 4a99bb4720000000  10.5  -42.2 -32.3
+#>  9 4a992abae0000000  11.1  -35.8 -29.9
+#> 10 4a99a935e0000000  11.7  -43.6 -23.9
+#> # ℹ 212,997 more rows
 
-# Render the three bands as RGB and view on the globe
+# Render the three embedding bands as false-colour RGB on the globe
 
-a5view::a5_view(EOx, 
-                fill = a5view::cells_rgb(EOx$band_01, EOx$band_02, EOx$band_03), 
-                fill_identity = TRUE,
-                border = "#ffffff", 
-                border_width = 0.25,
-                globe = TRUE, 
+a5view::a5_view(aef,
+                fill = a5view::cells_rgb(A10, A11, A12),
                 opacity = 1,
-                zoom=2,
-                lng = 0,
-                lat = 44)
+                zoom = 9,
+                fill_identity = TRUE,
+                border = NULL)
 ```
 
 <img src="man/figures/README-unnamed-chunk-2-1.png" alt="" width="100%" />

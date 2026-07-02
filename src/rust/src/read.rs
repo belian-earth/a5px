@@ -545,6 +545,7 @@ async fn read_raster_async(
     src_nodata_override: Option<f64>,
     cpu_workers: usize,
     io_concurrency: usize,
+    overview_target_m: f64,
 ) -> Result<Output> {
     let (store, path) = parse_src(src)?;
     let reader = ObjectReader::new(store, path);
@@ -554,25 +555,65 @@ async fn read_raster_async(
     let endianness = meta.endianness();
     let tiff = TIFF::new(ifds, endianness);
 
-    // grab the first IFD = full-resolution image (overviews follow)
-    let ifd_owned = tiff
+    // IFD 0 = full-resolution image. CRS, geotransform, nodata and band
+    // descriptions are read from it (overview IFDs in a GDAL COG generally do
+    // not carry their own geo tags).
+    let ifd0 = tiff
         .ifds()
         .first()
         .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?
         .clone();
 
-    let geo = ifd_owned
+    let geo = ifd0
         .geo_key_directory()
         .ok_or(A5CogError::MissingGeoKey("GeoKeyDirectory"))?;
 
     let src_proj = build_src_proj(geo)?;
     let dst_proj = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
 
-    let gt = extract_geotransform(&ifd_owned)?;
+    let gt0 = extract_geotransform(&ifd0)?;
+    let full_w = ifd0.image_width() as usize;
+    let full_h = ifd0.image_height() as usize;
+    let n_bands = ifd0.samples_per_pixel() as usize;
+
+    // Pick the overview level to read. `overview_target_m` is the A5 cell edge
+    // length in metres at the requested resolution (0 = overviews disabled);
+    // the caller only enables it for stat = "mean", where reading a decimated
+    // overview that still oversamples each cell yields a near-identical mean
+    // for a fraction of the I/O and CPU. Returns 0 (full res) when disabled,
+    // when there are no usable overviews, or when none is coarse enough.
+    let level = select_overview_level(
+        &tiff,
+        full_w,
+        full_h,
+        n_bands,
+        &gt0,
+        src_proj.is_latlong(),
+        overview_target_m,
+    );
+    let ifd_owned = tiff
+        .ifds()
+        .get(level)
+        .ok_or_else(|| A5CogError::Invalid("overview level out of range".into()))?
+        .clone();
+
+    // Derive the geotransform of the chosen level from IFD 0 by the dimension
+    // ratio: the overview covers the same ground extent with fewer pixels, so
+    // its pixel size scales by full_dim / level_dim while the origin is fixed.
+    let gt = if level == 0 {
+        gt0
+    } else {
+        derive_level_geotransform(
+            &gt0,
+            full_w,
+            full_h,
+            ifd_owned.image_width() as usize,
+            ifd_owned.image_height() as usize,
+        )
+    };
 
     let width = ifd_owned.image_width() as usize;
     let height = ifd_owned.image_height() as usize;
-    let n_bands = ifd_owned.samples_per_pixel() as usize;
 
     let planar = ifd_owned.planar_configuration();
 
@@ -588,8 +629,9 @@ async fn read_raster_async(
         .tile_count()
         .ok_or_else(|| A5CogError::Unsupported("non-tiled".into()))?;
 
-    let nodata = parse_nodata(&ifd_owned);
-    let band_names_v = parse_band_descriptions(&ifd_owned, n_bands);
+    // nodata + band descriptions live on IFD 0; overview IFDs omit them.
+    let nodata = parse_nodata(&ifd0);
+    let band_names_v = parse_band_descriptions(&ifd0, n_bands);
     let all_band_names: Vec<String> = if band_names_v.is_empty() {
         (0..n_bands).map(|i| format!("band_{:02}", i + 1)).collect()
     } else {
@@ -941,6 +983,106 @@ fn empty_output(band_names: Vec<String>, n_out: usize, stats: &[Stat]) -> Output
     }
 }
 
+/// Minimum linear oversampling kept when choosing an overview: the selected
+/// level's pixel must be at least this many times finer than the target cell
+/// edge, so each cell still receives ~`OVERVIEW_MIN_OVERSAMPLE^2` samples and
+/// the forward (pixel-driven) path does not leave gaps.
+const OVERVIEW_MIN_OVERSAMPLE: f64 = 4.0;
+
+/// Approximate ground pixel size (metres) along each axis. For projected CRSs
+/// (metres) this is the geotransform scale directly; for geographic CRSs the
+/// degree scale is converted at the given centre latitude. Skew terms are
+/// folded in so rotated transforms still yield a sane magnitude.
+fn pixel_size_m(gt: &GeoTransform, is_latlong: bool, centre_lat_deg: f64) -> (f64, f64) {
+    let dx = gt.0[1].abs().max(gt.0[2].abs());
+    let dy = gt.0[4].abs().max(gt.0[5].abs());
+    if is_latlong {
+        const M_PER_DEG: f64 = 111_320.0;
+        let coslat = centre_lat_deg.to_radians().cos().abs().max(1e-6);
+        (dx * M_PER_DEG * coslat, dy * M_PER_DEG)
+    } else {
+        (dx, dy)
+    }
+}
+
+/// Choose the IFD index to read for a forward mean aggregation. `target_m` is
+/// the A5 cell edge length in metres; `<= 0` disables overview use. Picks the
+/// coarsest overview whose pixel is still at least `OVERVIEW_MIN_OVERSAMPLE`x
+/// finer than the cell, else full resolution (level 0). Only reduced-resolution
+/// (non-mask), tiled IFDs with the full band count are considered.
+fn select_overview_level(
+    tiff: &TIFF,
+    full_w: usize,
+    full_h: usize,
+    n_bands: usize,
+    gt0: &GeoTransform,
+    src_is_latlong: bool,
+    target_m: f64,
+) -> usize {
+    if !(target_m > 0.0) || full_w == 0 || full_h == 0 {
+        return 0;
+    }
+    let centre_lat = gt0.0[3] + (full_h as f64 * 0.5) * gt0.0[5];
+    let (px0, py0) = pixel_size_m(gt0, src_is_latlong, centre_lat);
+    let budget = target_m / OVERVIEW_MIN_OVERSAMPLE;
+    let mut best = 0usize;
+    // coarsest pixel found so far that still fits the budget (full res never
+    // exceeds itself, so seed below it to force a real overview to win).
+    let mut best_px = f64::NEG_INFINITY;
+    for (i, ifd) in tiff.ifds().iter().enumerate() {
+        if i == 0 {
+            continue;
+        }
+        // must be a reduced-resolution overview, not a mask/auxiliary IFD
+        if let Some(st) = ifd.new_subfile_type() {
+            if st & 0x1 == 0 || st & 0x4 != 0 {
+                continue;
+            }
+        }
+        let w = ifd.image_width() as usize;
+        let h = ifd.image_height() as usize;
+        if w == 0 || h == 0 || w >= full_w || h >= full_h {
+            continue;
+        }
+        if ifd.samples_per_pixel() as usize != n_bands {
+            continue;
+        }
+        if ifd.tile_width().is_none() || ifd.tile_height().is_none() {
+            continue;
+        }
+        let px = px0 * (full_w as f64 / w as f64);
+        let py = py0 * (full_h as f64 / h as f64);
+        let pmax = px.max(py);
+        if pmax <= budget && pmax > best_px {
+            best_px = pmax;
+            best = i;
+        }
+    }
+    best
+}
+
+/// Geotransform of an overview level, derived from IFD 0 by the dimension
+/// ratio. The overview spans the same ground extent with `lw x lh` pixels, so
+/// pixel scale and skew terms scale by `full / level` while the origin is fixed.
+fn derive_level_geotransform(
+    gt0: &GeoTransform,
+    full_w: usize,
+    full_h: usize,
+    lw: usize,
+    lh: usize,
+) -> GeoTransform {
+    let sx = full_w as f64 / lw as f64;
+    let sy = full_h as f64 / lh as f64;
+    GeoTransform([
+        gt0.0[0],
+        gt0.0[1] * sx,
+        gt0.0[2] * sy,
+        gt0.0[3],
+        gt0.0[4] * sx,
+        gt0.0[5] * sy,
+    ])
+}
+
 /// Reproject a WGS84 lon/lat bbox into the raster CRS, take the axis-aligned
 /// bounding box of the resulting points, clamp to the raster, and return the
 /// inclusive tile-index range that covers it. Returns `Ok(None)` if the bbox
@@ -1059,6 +1201,9 @@ fn projected_tile_range(
 ///   tag, falling back to band_NN). Empty = all (unless bands_idx is non-empty).
 /// @param threads Worker threads (currently used for tile-level concurrency).
 /// @param io_concurrency Number of tiles fetched concurrently.
+/// @param overview_target_m A5 cell edge length in metres; when > 0 a COG
+///   overview that still oversamples the cell is read instead of full
+///   resolution. 0 disables overview use (always read IFD 0).
 /// @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
 ///   vectors; key form is `<band>` for length-1 stats and `<band>__<stat>`
 ///   for length>1), `band_names`, and `stats` (character).
@@ -1075,6 +1220,7 @@ fn a5_read_raster_rs(
     src_nodata: Vec<f64>,
     cpu_workers: i32,
     io_concurrency: i32,
+    overview_target_m: f64,
 ) -> Result<Robj> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1111,6 +1257,7 @@ fn a5_read_raster_rs(
         src_nodata_opt,
         cpu_workers,
         io_concurrency,
+        overview_target_m,
     ))?;
 
     if prof {
@@ -1164,6 +1311,9 @@ fn a5_read_raster_rs(
 ///   DESCRIPTION tag).
 /// @param threads Worker threads.
 /// @param io_concurrency Number of tiles fetched concurrently.
+/// @param overview_target_m A5 cell edge length in metres; when > 0 a COG
+///   overview that still oversamples the cell is read instead of full
+///   resolution. 0 disables overview use (always read IFD 0).
 /// @returns A list with `cell` (b1..b8 raw), `value_flat` (named list of
 ///   numeric vectors, one per stat in `stats` order, each of length
 ///   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
@@ -1180,6 +1330,7 @@ fn a5_read_raster_flat_rs(
     src_nodata: Vec<f64>,
     cpu_workers: i32,
     io_concurrency: i32,
+    overview_target_m: f64,
 ) -> Result<Robj> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1216,6 +1367,7 @@ fn a5_read_raster_flat_rs(
         src_nodata_opt,
         cpu_workers,
         io_concurrency,
+        overview_target_m,
     ))?;
 
     if prof {
@@ -1266,6 +1418,9 @@ impl From<A5CogError> for extendr_api::Error {
 /// @param compression Parquet compression codec ("zstd" | "snappy" | "none").
 /// @param threads Worker threads.
 /// @param io_concurrency Number of tiles fetched concurrently.
+/// @param overview_target_m A5 cell edge length in metres; when > 0 a COG
+///   overview that still oversamples the cell is read instead of full
+///   resolution. 0 disables overview use (always read IFD 0).
 /// @returns The destination path (character scalar) on success.
 /// @noRd
 /// @keywords internal
@@ -1284,6 +1439,7 @@ fn a5_raster_to_parquet_rs(
     compression: &str,
     cpu_workers: i32,
     io_concurrency: i32,
+    overview_target_m: f64,
 ) -> Result<String> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1322,6 +1478,7 @@ fn a5_raster_to_parquet_rs(
         src_nodata_opt,
         cpu_workers,
         io_concurrency,
+        overview_target_m,
     ))?;
 
     if prof {
@@ -1483,6 +1640,48 @@ fn a5_raster_bbox_lonlat_rs(src: &str) -> Result<Vec<f64>> {
     })
 }
 
+/// Diagnostic: the IFD index `a5_read_raster_rs` would read for the given
+/// `overview_target_m` (the A5 cell edge in metres; 0 = overviews disabled).
+/// 0 means full resolution. Exposed for testing / introspection.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_select_overview_level_rs(src: &str, overview_target_m: f64) -> Result<i32> {
+    let runtime = crate::runtime::shared_runtime()?;
+    runtime.block_on(async move {
+        let (store, path) = parse_src(src)?;
+        let reader = ObjectReader::new(store, path);
+        let cache = ReadaheadMetadataCache::new(reader.clone());
+        let mut meta = TiffMetadataReader::try_open(&cache).await?;
+        let ifds = meta.read_all_ifds(&cache).await?;
+        let endianness = meta.endianness();
+        let tiff = TIFF::new(ifds, endianness);
+        let ifd0 = tiff
+            .ifds()
+            .first()
+            .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?
+            .clone();
+        let geo = ifd0
+            .geo_key_directory()
+            .ok_or(A5CogError::MissingGeoKey("GeoKeyDirectory"))?;
+        let src_proj = build_src_proj(geo)?;
+        let gt0 = extract_geotransform(&ifd0)?;
+        let full_w = ifd0.image_width() as usize;
+        let full_h = ifd0.image_height() as usize;
+        let n_bands = ifd0.samples_per_pixel() as usize;
+        let level = select_overview_level(
+            &tiff,
+            full_w,
+            full_h,
+            n_bands,
+            &gt0,
+            src_proj.is_latlong(),
+            overview_target_m,
+        );
+        Ok(level as i32)
+    })
+}
+
 extendr_module! {
     mod read;
     fn a5_read_raster_rs;
@@ -1490,4 +1689,5 @@ extendr_module! {
     fn a5_raster_to_parquet_rs;
     fn a5_sample_at_cells_rs;
     fn a5_raster_bbox_lonlat_rs;
+    fn a5_select_overview_level_rs;
 }

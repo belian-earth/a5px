@@ -47,16 +47,21 @@ terra_fwd <- time_it("terra forward total", {
 })$val
 cat(sprintf("  cells: %d\n", nrow(terra_fwd)))
 
-# --------- terra: zonal pipeline (a5_grid -> polygons -> terra::extract) ----
+# --------- terra: zonal pipeline (a5 cells -> polygons -> terra::extract) ----
 # This is the "obvious" pre-a5px approach. Often slow because of polygon
 # rasterisation cost. Skip if expected runtime is unreasonable.
 RUN_ZONAL <- TRUE
 if (RUN_ZONAL) {
-  cat("\n=== terra zonal (a5_grid polygons -> extract) ===\n")
+  cat("\n=== terra zonal (a5 polygons -> extract) ===\n")
   t_zonal <- time_it("terra zonal total", {
     bbox_ll <- ext(project(r, "EPSG:4326"))
-    grid <- a5R::a5_grid(c(bbox_ll$xmin, bbox_ll$ymin, bbox_ll$xmax, bbox_ll$ymax),
-                          resolution = RES)
+    grid <- a5R::a5_uncompact(
+      a5R::a5_polygon_to_cells(
+        wk::rct(bbox_ll$xmin, bbox_ll$ymin, bbox_ll$xmax, bbox_ll$ymax),
+        resolution = RES
+      ),
+      resolution = RES
+    )
     bnd_wkt <- a5R::a5_cell_to_boundary(grid, format = "wkt")
     polys <- vect(as.character(bnd_wkt), crs = "EPSG:4326") |>
       project(crs(r))
