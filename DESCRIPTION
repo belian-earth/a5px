@@ -17,19 +17,22 @@ URL: https://github.com/belian-earth/a5px, https://belian-earth.github.io/a5px/
 BugReports: https://github.com/belian-earth/a5px/issues
 Depends:
     R (>= 4.2),
-    a5R
+    a5R (>= 0.4.0)
 Imports:
     cli,
     rlang (>= 1.1.0),
     tibble,
     tidyselect,
-    vctrs (>= 0.6.0)
+    vctrs (>= 0.6.0),
+    wk
 Suggests:
     a5view,
     arrow,
+    exactextractr,
+    sf,
+    terra,
     testthat (>= 3.0.0),
-    withr,
-    wk
+    withr
 Remotes:
     belian-earth/a5view,
     r-spatial/geoarrowWidget
@@ -38,4 +41,4 @@ Config/rextendr/version: 0.5.0
 SystemRequirements: Cargo (Rust's package manager), rustc >= 1.80.0
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
-RoxygenNote: 7.3.3
+Config/roxygen2/version: 8.0.0

@@ -27,13 +27,16 @@ reference:
   desc: >
     Stream a (Cloud-Optimised) GeoTIFF and aggregate pixels into A5 cells in
     one pass. All three readers share the same `stat`, `bands`, `bbox`,
-    `src_nodata`, `cpu_workers`, `io_concurrency`, and `as_vector`
-    arguments; they differ only in output type (tibble, Arrow Table, or a
-    Parquet file written direct from Rust).
+    `src_nodata`, `cpu_workers`, `io_concurrency`, `dequant`, `as_vector`,
+    and `use_overviews` arguments; they differ only in output type (tibble,
+    Arrow Table, or a Parquet file written direct from Rust). `dequant_aef()`
+    decodes Alpha Earth Foundations int8 codes ahead of aggregation via the
+    `dequant` argument.
   contents:
   - a5_read_raster
   - a5_read_raster_arrow
   - a5_raster_to_parquet
+  - dequant_aef
 - title: Aggregating to coarser cells
   desc: >
     Lift an existing `a5_cell`-keyed tibble to a coarser resolution via the

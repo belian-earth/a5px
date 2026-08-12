@@ -18,3 +18,4 @@ dev.R
 *.parquet
 docs
 dev/
+/.quarto/

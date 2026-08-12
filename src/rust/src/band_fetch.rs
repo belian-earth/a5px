@@ -132,7 +132,7 @@ pub(crate) fn decode_planar_subset_bytes(
 }
 
 /// Mirror of `async_tiff::DataType::from_tags`, which is crate-private.
-fn derive_data_type(ifd: &ImageFileDirectory) -> Option<async_tiff::DataType> {
+pub(crate) fn derive_data_type(ifd: &ImageFileDirectory) -> Option<async_tiff::DataType> {
     use async_tiff::DataType;
     use async_tiff::tags::SampleFormat;
     let sf = ifd.sample_format();

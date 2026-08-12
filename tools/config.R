@@ -70,6 +70,40 @@ cfg <- if (is_debug) "debug" else "release"
   ""
 )
 
+# On macOS, rustc's default deployment target (11.0 on arm64) can lag the
+# target of the R build itself (13.0 for CRAN's arm64 R >= 4.5), and linking
+# our staticlib against libR.dylib then emits
+#   ld: warning: building for macOS-11.0, but linking with dylib built for 13.0
+# which R CMD check --as-cran reports as a significant WARNING. Read the
+# deployment target off libR.dylib and export it for the cargo build, so the
+# Rust objects always match the R they are linked against.
+.macos_deploy <- ""
+if (Sys.info()[["sysname"]] == "Darwin") {
+  libr_target <- tryCatch({
+    libr <- file.path(R.home("lib"), "libR.dylib")
+    lc <- suppressWarnings(
+      system2("otool", c("-l", shQuote(libr)), stdout = TRUE, stderr = FALSE)
+    )
+    # modern toolchains: LC_BUILD_VERSION carries "minos <ver>"
+    ver <- sub(".*minos\\s+", "", grep("^\\s*minos\\s+[0-9.]+$", lc, value = TRUE))
+    if (!length(ver)) {
+      # older toolchains: LC_VERSION_MIN_MACOSX carries "version <ver>"
+      i <- grep("LC_VERSION_MIN_MACOSX", lc)
+      if (length(i)) {
+        blk <- lc[i[[1]]:min(i[[1]] + 3L, length(lc))]
+        ver <- sub(".*version\\s+", "",
+                   grep("^\\s*version\\s+[0-9.]+$", blk, value = TRUE))
+      }
+    }
+    if (length(ver)) ver[[1]] else ""
+  }, error = function(e) "")
+  if (nzchar(libr_target)) {
+    message("Setting MACOSX_DEPLOYMENT_TARGET=", libr_target,
+            " (from libR.dylib).")
+    .macos_deploy <- sprintf("MACOSX_DEPLOYMENT_TARGET=%s ", libr_target)
+  }
+}
+
 # read in the Makevars.in file checking
 is_windows <- .Platform[["OS.type"]] == "windows"
 
@@ -102,7 +136,8 @@ new_txt <- gsub("@CRAN_FLAGS@", .cran_flags, mv_txt) |>
   gsub("@CLEAN_TARGET@", .clean_targets, x = _) |>
   gsub("@LIBDIR@", .libdir, x = _) |>
   gsub("@TARGET@", .target, x = _) |>
-  gsub("@PANIC_EXPORTS@", .panic_exports, x = _)
+  gsub("@PANIC_EXPORTS@", .panic_exports, x = _) |>
+  gsub("@MACOS_DEPLOY@", .macos_deploy, x = _)
 
 message("Writing `", mv_ofp, "`.")
 con <- file(mv_ofp, open = "wb")

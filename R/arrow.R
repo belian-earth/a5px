@@ -6,7 +6,9 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,as_vector See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,as_vector,use_overviews See [a5_read_raster()].
+#' @param mode Sampling mode: `"forward"` (default) or `"overlay"`. The
+#'   `"centroid"` mode is only available in [a5_read_raster()].
 #' @param value_type Storage type for the value column. `"float64"` (default)
 #'   or `"float32"` (halves disk size for embeddings).
 #'
@@ -33,16 +35,22 @@ a5_read_raster_arrow <- function(src,
                                  bands = NULL,
                                  bbox = NULL,
                                  src_nodata = NULL,
+                                 mode = c("forward", "overlay"),
+                                 subsamples = NULL,
                                  cpu_workers = NULL,
                                  io_concurrency = NULL,
+                                 dequant = NULL,
                                  as_vector = FALSE,
-                                 value_type = c("float64", "float32")) {
+                                 value_type = c("float64", "float32"),
+                                 use_overviews = is.null(dequant)) {
   rlang::check_installed("arrow", reason = "to construct Arrow tables")
   check_scalar_string(src, "src")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
+  mode <- rlang::arg_match(mode)
+  subsamples_v <- check_subsamples(subsamples, mode)
   cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
                  else check_scalar_count(cpu_workers, "cpu_workers")
   io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
@@ -54,6 +62,10 @@ a5_read_raster_arrow <- function(src,
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
+  dequant_v <- check_dequant(dequant)
+  check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
+  warn_dequant_overviews(dequant, use_overviews)
+  overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
   out <- a5_read_raster_flat_rs(
     src = src,
@@ -64,7 +76,13 @@ a5_read_raster_arrow <- function(src,
     bbox = bbox_v,
     src_nodata = src_nodata_v,
     cpu_workers = cpu_workers,
-    io_concurrency = io_concurrency
+    io_concurrency = io_concurrency,
+    overview_target_m = overview_target_m,
+    dequant_lut = dequant_v$lut,
+    dequant_min = dequant_v$min,
+    overlay = identical(mode, "overlay"),
+    subsamples = subsamples_v,
+    cell_edge_m = cell_edge_metres(mode, resolution)
   )
 
   cells <- new_a5_cell_from_rs(out$cell)
@@ -129,8 +147,10 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,as_vector See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,as_vector,use_overviews See
 #'   [a5_read_raster()].
+#' @param mode Sampling mode: `"forward"` (default) or `"overlay"`. The
+#'   `"centroid"` mode is only available in [a5_read_raster()].
 #' @param dest Output Parquet path.
 #' @param value_type Storage type for the value column. `"float64"`
 #'   (default) or `"float32"` (halves the disk size for embeddings).
@@ -154,17 +174,23 @@ a5_raster_to_parquet <- function(src,
                                  bands = NULL,
                                  bbox = NULL,
                                  src_nodata = NULL,
+                                 mode = c("forward", "overlay"),
+                                 subsamples = NULL,
                                  as_vector = FALSE,
                                  value_type = c("float64", "float32"),
                                  compression = c("zstd", "snappy", "none"),
                                  cpu_workers = NULL,
-                                 io_concurrency = NULL) {
+                                 io_concurrency = NULL,
+                                 dequant = NULL,
+                                 use_overviews = is.null(dequant)) {
   check_scalar_string(src, "src")
   check_scalar_string(dest, "dest")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
+  mode <- rlang::arg_match(mode)
+  subsamples_v <- check_subsamples(subsamples, mode)
   value_type <- rlang::arg_match(value_type)
   compression <- rlang::arg_match(compression)
   cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
@@ -177,6 +203,10 @@ a5_raster_to_parquet <- function(src,
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
+  dequant_v <- check_dequant(dequant)
+  check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
+  warn_dequant_overviews(dequant, use_overviews)
+  overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
   invisible(a5_raster_to_parquet_rs(
     src = src,
@@ -191,7 +221,13 @@ a5_raster_to_parquet <- function(src,
     value_type = value_type,
     compression = compression,
     cpu_workers = cpu_workers,
-    io_concurrency = io_concurrency
+    io_concurrency = io_concurrency,
+    overview_target_m = overview_target_m,
+    dequant_lut = dequant_v$lut,
+    dequant_min = dequant_v$min,
+    overlay = identical(mode, "overlay"),
+    subsamples = subsamples_v,
+    cell_edge_m = cell_edge_metres(mode, resolution)
   ))
 }
 

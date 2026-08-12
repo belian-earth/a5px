@@ -41,52 +41,57 @@ and `rustc` \>= 1.85) and a recent version of
 
 ## Quick example
 
-A complete read of a public Cloud-Optimised GeoTIFF (the EOx 2020
-Sentinel-2 cloudless mosaic, RGB) into A5 cells, then a quick
-visualisation:
+A complete read of a public Cloud-Optimised GeoTIFF into A5 cells, then
+a quick visualisation. Here the source is an [Alpha Earth
+Foundations](https://source.coop/tge-labs/aef) embedding tile (64 Int8
+bands, 10 m, UTM 36S over Malawi); we take the first three embedding
+dimensions and render them as false-colour RGB. Because `stat = "mean"`,
+`a5_read_raster()` reads the coarsest COG overview that still
+oversamples each A5 cell, so the whole 2.7 GB tile resolves to ~900
+cells in a couple of seconds.
 
 ``` r
 library(a5px)
 #> Loading required package: a5R
 
 
-url <- "https://s2downloads.eox.at/demo/EOxCloudless/2020/rgb_corrected_geodetic/3/0/0.tif"
+url <- paste0(
+  "https://data.source.coop/tge-labs/aef/v1/annual/2021/36S/",
+  "xekh5rjs4wg6wb9b4-0000000000-0000000000.tiff"
+)
 
 
-EOx <- a5_read_raster(
+aef <- a5_read_raster(
   url,
-  resolution     = 5L,
+  resolution     = 15L,
+  bands          = 11:13,
   stat           = "mean"
 )
 
-EOx 
-#> # A tibble: 7,928 × 4
-#>    cell             band_01 band_02 band_03
-#>    <a5_cell>          <dbl>   <dbl>   <dbl>
-#>  1 3066000000000000    5.08   12.8    15.5 
-#>  2 04d6000000000000   55.7    50.0    23.6 
-#>  3 5276000000000000  251.    174.     94.5 
-#>  4 bd3e000000000000  253.    255.    254.  
-#>  5 00ca000000000000   23.2    32.3    28.5 
-#>  6 2dce000000000000   30.9    28.8    20.6 
-#>  7 1e1e000000000000   14.8    25.4    30.0 
-#>  8 8316000000000000    1.90    9.64    9.96
-#>  9 8d02000000000000   66.6    52.8    25.5 
-#> 10 3a56000000000000   27.1    54.5    27.0 
-#> # ℹ 7,918 more rows
+aef
+#> # A tibble: 213,007 × 4
+#>    cell                 A10    A11    A12
+#>    <a5_cell>          <dbl>  <dbl>  <dbl>
+#>  1 4a99ad11e0000000  -3.05  -30.9   18.0 
+#>  2 4a9988d2e0000000  40.6   -27.1  -25.6 
+#>  3 4a99a6d220000000 -30.0   -22     23.4 
+#>  4 48665e8220000000 -21.5   -32.1  -40.7 
+#>  5 4866469860000000  32.6    -3.21 -44.1 
+#>  6 4a998c1ee0000000 -16.8   -32.9    8.89
+#>  7 4a99f9d1e0000000  51.1    -5.35 -21.7 
+#>  8 4a992f4460000000 -13.0   -36.4  -46.1 
+#>  9 4a9958e6e0000000  -0.353 -40.7  -38.1 
+#> 10 4a99f04860000000  18     -39.7  -31.1 
+#> # ℹ 212,997 more rows
 
-# Render the three bands as RGB and view on the globe
+# Render the three embedding bands as false-colour RGB on the globe
 
-a5view::a5_view(EOx, 
-                fill = a5view::cells_rgb(EOx$band_01, EOx$band_02, EOx$band_03), 
-                fill_identity = TRUE,
-                border = "#ffffff", 
-                border_width = 0.25,
-                globe = TRUE, 
+a5view::a5_view(aef,
+                fill = a5view::cells_rgb(A10, A11, A12),
                 opacity = 1,
-                zoom=2,
-                lng = 0,
-                lat = 44)
+                zoom = 9,
+                fill_identity = TRUE,
+                border = NULL)
 ```
 
 <img src="man/figures/README-unnamed-chunk-2-1.png" alt="" width="100%" />
@@ -132,6 +137,75 @@ All three readers share the same arguments:
 agg <- a5_read_raster(src, resolution = 14L,
                       stat = c("mean", "sum", "count"))
 # columns: cell, B02__mean, B02__sum, B02__count, B03__mean, ...
+```
+
+### Pre-aggregation dequantization
+
+Quantized sources must be decoded per pixel *before* aggregation: a
+nonlinear decode does not commute with the mean, so averaging raw int8
+codes and decoding the result gives the wrong answer. `dequant` applies
+the decode on the Rust side, ahead of the accumulators:
+
+``` r
+# Alpha Earth Foundations int8 codes: sign(x) * (x / 127.5)^2
+emb <- a5_read_raster(url, resolution = 14L, bands = 1:8, dequant = dequant_aef)
+
+# or any vectorised R function over the integer code domain
+emb <- a5_read_raster(url, resolution = 14L, dequant = function(x) x / 250)
+```
+
+Arbitrary R functions work because the code domain is finite: the
+function is evaluated once over all possible codes and shipped to Rust
+as a lookup table. This restricts `dequant` to integer sources of 16
+bits or fewer (int8 / uint8 / int16 / uint16), which is what “quantized”
+means in practice. NoData is matched against the raw code before
+decoding.
+
+Setting `dequant` also flips the `use_overviews` default to `FALSE`: COG
+overviews are typically average-resampled, and an overview pixel that is
+a mean of quantized codes decodes incorrectly. Pass
+`use_overviews = TRUE` explicitly (it warns) only when the source’s
+overviews were built with nearest or mode resampling.
+
+### Overlay sampling
+
+The default forward mode assigns each pixel wholly to the cell
+containing its centre. `mode = "overlay"` instead weights each pixel’s
+contribution by the fraction of its area inside each cell it overlaps,
+approximated by sub-pixel supersampling (`subsamples`, auto-selected by
+default):
+
+``` r
+# area-weighted mean (boundary pixels apportioned, not all-or-nothing)
+a5_read_raster(src, resolution = 12L, mode = "overlay")
+
+# mass-preserving sum: totals (e.g. population counts) are conserved
+a5_read_raster(src, resolution = 12L, mode = "overlay", stat = "sum")
+```
+
+Pixels interior to a cell take a fast path costing the same as forward
+mode; only pixels straddling a cell boundary pay the supersampling cost.
+
+### Categorical rasters
+
+For integer rasters whose values are class labels (land cover, masks),
+`stat = "majority"` gives each cell’s dominant class and
+`stat = "fractions"` gives per-class shares as a list-column. Under
+`mode = "overlay"` both are area-weighted:
+
+``` r
+a5_read_raster(landcover, resolution = 12L, stat = "majority", mode = "overlay")
+a5_read_raster(landcover, resolution = 12L, stat = "fractions")
+```
+
+### Interpolated centroid sampling
+
+When cells are finer than pixels, `mode = "centroid"` samples one value
+per cell; `interp` picks the kernel:
+
+``` r
+a5_read_raster(dem, resolution = 18L, mode = "centroid", interp = "bilinear")
+# also "bicubic" (Keys) and "lanczos"; "nearest" is the default
 ```
 
 ### Band selection on the wire

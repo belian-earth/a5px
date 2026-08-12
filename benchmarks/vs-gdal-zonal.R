@@ -25,11 +25,16 @@ zones_gpkg  <- file.path(tmpdir, "zones.gpkg")
 output_gpkg <- file.path(tmpdir, "out.gpkg")
 
 cat("\n=== polygon prep (shared cost: any polygon-driven backend pays this) ===\n")
-prep <- time_it("a5_grid + boundary + project + writeVector", {
+prep <- time_it("a5 grid + boundary + project + writeVector", {
   r <- rast(PATH)
   bbox_ll <- ext(project(r, "EPSG:4326"))
-  grid <- a5R::a5_grid(c(bbox_ll$xmin, bbox_ll$ymin, bbox_ll$xmax, bbox_ll$ymax),
-                       resolution = RES)
+  grid <- a5R::a5_uncompact(
+    a5R::a5_polygon_to_cells(
+      wk::rct(bbox_ll$xmin, bbox_ll$ymin, bbox_ll$xmax, bbox_ll$ymax),
+      resolution = RES
+    ),
+    resolution = RES
+  )
   bnd_wkt <- a5R::a5_cell_to_boundary(grid, format = "wkt")
   polys <- vect(as.character(bnd_wkt), crs = "EPSG:4326") |>
     project(crs(r))
