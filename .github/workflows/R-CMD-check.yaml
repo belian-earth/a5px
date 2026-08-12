@@ -28,10 +28,6 @@ jobs:
     env:
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
       R_KEEP_PKG_SOURCE: yes
-      # Match R's macOS deployment target so cc-rs (used by zstd-sys) does
-      # not emit "object built for newer macOS than being linked" warnings,
-      # which rcmdcheck escalates to errors via error_on = "warning".
-      MACOSX_DEPLOYMENT_TARGET: '11.0'
 
     steps:
       - uses: actions/checkout@v6
@@ -42,6 +38,23 @@ jobs:
         with:
           r-version: ${{ matrix.config.r }}
           http-user-agent: ${{ matrix.config.http-user-agent }}
+
+      # Match the macOS deployment target to the installed R build so
+      # neither direction of ld's version-skew warning fires (rcmdcheck
+      # escalates warnings to errors via error_on = "warning"). A hardcoded
+      # value rots when the CRAN R build moves (11.0 until R 4.4, 13.0 from
+      # R 4.5 arm64), so read it off libR.dylib instead.
+      - name: Match macOS deployment target to R
+        if: runner.os == 'macOS'
+        run: |
+          TARGET=$(otool -l "$(R RHOME)/lib/libR.dylib" | awk '/minos/ {print $2; exit}')
+          if [ -z "$TARGET" ]; then
+            TARGET=$(otool -l "$(R RHOME)/lib/libR.dylib" | awk '/LC_VERSION_MIN_MACOSX/{f=1} f && /version/ {print $2; exit}')
+          fi
+          if [ -n "$TARGET" ]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=$TARGET" >> "$GITHUB_ENV"
+          fi
+          echo "deployment target from libR.dylib: ${TARGET:-<not found, leaving unset>}"
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
