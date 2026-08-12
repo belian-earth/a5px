@@ -11,7 +11,8 @@ a5_read_raster(
   bands = NULL,
   bbox = NULL,
   src_nodata = NULL,
-  mode = c("forward", "centroid"),
+  mode = c("forward", "overlay", "centroid"),
+  subsamples = NULL,
   cpu_workers = NULL,
   io_concurrency = NULL,
   dequant = NULL,
@@ -26,11 +27,23 @@ a5_read_raster(
 \item{resolution}{Integer scalar A5 resolution (0--30).}
 
 \item{stat}{Aggregation. One of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"},
-\code{"max"}, \code{"var"}, \code{"sd"}, or any non-duplicated subset of those for a
-one-pass multi-stat read. Default \code{"mean"}. \code{"var"} / \code{"sd"} use the
-sample formula (divisor n - 1) computed via Welford's online algorithm
-in the streaming aggregator, matching \code{\link[stats:var]{stats::var()}} / \code{\link[stats:sd]{stats::sd()}};
-cells covered by a single pixel return \code{NA}.}
+\code{"max"}, \code{"var"}, \code{"sd"}, \code{"majority"}, \code{"fractions"}, or any
+non-duplicated subset of those (except \code{"fractions"}, which must be
+alone) for a one-pass multi-stat read. Default \code{"mean"}. \code{"var"} /
+\code{"sd"} use the sample formula (divisor n - 1) computed via Welford's
+online algorithm in the streaming aggregator, matching \code{\link[stats:var]{stats::var()}} /
+\code{\link[stats:sd]{stats::sd()}}; cells covered by a single pixel return \code{NA}.
+
+\code{"majority"} and \code{"fractions"} are categorical: they treat the raw
+integer codes as class labels, and require an integer source of 16
+bits or fewer (like \code{dequant}, with which they cannot be combined).
+\code{"majority"} returns the class with the greatest total weight in each
+cell (pixel count under \code{mode = "forward"}, overlap area under
+\code{mode = "overlay"}), ties broken toward the smallest class code.
+\code{"fractions"} returns, per band, a list-column of named numeric
+vectors: each cell's per-class share of its total valid weight
+(shares sum to 1; names are the class codes). \code{"fractions"} is only
+available in \code{a5_read_raster()} with \code{as_vector = FALSE}.}
 
 \item{bands}{Bands to read. One of:
 \itemize{
@@ -51,8 +64,18 @@ it takes precedence over the metadata value when set. \code{NULL} (default)
 uses whatever \code{async-tiff} exposes.}
 
 \item{mode}{Sampling mode. \code{"forward"} (default) aggregates pixels into
-cells; \code{"centroid"} samples one pixel per cell at the cell centroid.
+cells by their centres; \code{"overlay"} aggregates with pixel-cell overlap
+weights; \code{"centroid"} samples one pixel per cell at the cell centroid.
 See Details.}
+
+\item{subsamples}{Sub-point grid dimension per pixel for
+\code{mode = "overlay"}: each pixel straddling a cell boundary is split
+into \code{subsamples^2} sub-points whose per-cell counts give the overlap
+weights (interior pixels take a fast path and never pay this cost).
+\code{NULL} (default) auto-selects from the pixel/cell edge ratio so
+sub-point spacing is at most half the cell edge, clamped to \verb{[2, 16]}.
+Larger values approximate exact area weighting more closely. Only
+used when \code{mode = "overlay"}; an error otherwise.}
 
 \item{cpu_workers}{Number of CPU consumers in the tile-processing pool.
 \code{NULL} (default) resolves from \code{getOption("a5px.cpu_workers")}, env
@@ -119,7 +142,7 @@ loading the full raster into memory. CRS reprojection uses pure-Rust
 \code{proj4rs}. Pixel sampling is forward (pixel-driven): each pixel contributes
 its value to exactly one A5 cell, determined by the lon/lat of its centre.
 
-Two sampling modes are available:
+Three sampling modes are available:
 
 Multi-stat output naming: with \code{stat = c("mean", "max")} the wide
 (per-band) tibble columns are \verb{<band>_mean}, \verb{<band>_max}. Single
@@ -131,6 +154,16 @@ underscore separator. Same convention applies in
 containing its centroid. Good when cells are larger than (or
 comparable to) the pixels and you want a real aggregation. Equivalent
 to GDAL's \verb{gdal raster zonal-stats --pixels=default}.
+\item \code{"overlay"}: each pixel contributes to every cell it overlaps,
+weighted by the overlapped fraction of its area (approximated by
+sub-pixel supersampling; see \code{subsamples}). More accurate than
+\code{"forward"} at cell/pixel boundaries, at some extra cost for pixels
+that straddle a cell edge. Under overlay, \code{"mean"} is the
+area-weighted mean, \code{"sum"} is mass-preserving (a pixel's value is
+split across the cells covering it, so totals such as population
+counts are conserved), and \code{"count"} is the effective (fractional)
+number of contributing pixels. \code{"var"} / \code{"sd"} use frequency
+weights with divisor \code{sum(w) - 1}.
 \item \code{"centroid"}: for each cell intersecting the raster, sample the pixel
 that contains the cell's centroid. Single value per cell, no
 aggregation. Use this when the cell size is comparable to or smaller

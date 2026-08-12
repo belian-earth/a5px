@@ -315,10 +315,17 @@ impl GeoTransform {
     /// Compute the projected (x, y) of a pixel centre at index (col, row).
     #[inline]
     pub fn pixel_centre(&self, col: usize, row: usize) -> (f64, f64) {
-        let c = col as f64 + 0.5;
-        let r = row as f64 + 0.5;
-        let x = self.0[0] + c * self.0[1] + r * self.0[2];
-        let y = self.0[3] + c * self.0[4] + r * self.0[5];
+        self.pixel_xy(col as f64 + 0.5, row as f64 + 0.5)
+    }
+
+    /// Projected (x, y) at fractional pixel coordinates: integer values lie
+    /// on pixel corners, (col + 0.5, row + 0.5) is the pixel centre. The
+    /// pixel grid is affine in the source CRS, so sub-pixel positions are
+    /// exact here (unlike interpolating already-projected coordinates).
+    #[inline]
+    pub fn pixel_xy(&self, col: f64, row: f64) -> (f64, f64) {
+        let x = self.0[0] + col * self.0[1] + row * self.0[2];
+        let y = self.0[3] + col * self.0[4] + row * self.0[5];
         (x, y)
     }
 }

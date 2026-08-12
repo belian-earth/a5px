@@ -1,5 +1,31 @@
 # a5px 0.0.0.9000
 
+* New categorical stats for integer rasters of 16 bits or fewer (land cover,
+  masks, zone IDs): `stat = "majority"` returns each cell's most-weighted
+  class (pixel counts under `mode = "forward"`, overlap areas under
+  `mode = "overlay"`; ties break toward the smallest class code) and
+  combines freely with the continuous stats in one pass.
+  `stat = "fractions"` returns per-band list-columns of named per-class
+  weight shares summing to 1 (`a5_read_raster()` only, as the sole stat).
+  Both treat raw codes as class labels and cannot be combined with
+  `dequant`. Distinct classes per cell are capped at 4096 so a continuous
+  raster passed by mistake fails loudly.
+
+* New sampling mode `mode = "overlay"` in `a5_read_raster()`,
+  `a5_read_raster_arrow()` and `a5_raster_to_parquet()`: each pixel
+  contributes to every A5 cell it overlaps, weighted by the overlapped
+  fraction of its area, approximated by sub-pixel supersampling
+  (`subsamples`, auto-selected by default). Under overlay, `mean` is the
+  area-weighted mean, `sum` is mass-preserving (totals such as population
+  counts are conserved exactly), and `count` is the effective fractional
+  pixel count. Pixels interior to a cell take a fast path costing the same
+  as `mode = "forward"`; only pixels straddling a cell boundary pay the
+  supersampling cost. Agreement with exactextract's exact area weighting is
+  within 0.05% of the value range at `subsamples = 16` on the test fixture,
+  converging quadratically in `subsamples`. All stats now use weighted
+  accumulators internally; forward and centroid results are unchanged
+  (weights of 1).
+
 * `a5_read_raster()`, `a5_read_raster_arrow()` and `a5_raster_to_parquet()`
   gain `dequant`: a per-pixel decode applied before aggregation, as any
   vectorised R function evaluated over the integer code domain and applied

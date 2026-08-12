@@ -28,7 +28,7 @@ NULL
 #'   for length>1), `band_names`, and `stats` (character).
 #' @noRd
 #' @keywords internal
-a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min)
+a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells, returning a
 #' flat cell-major numeric buffer suitable for direct construction of an
@@ -51,7 +51,7 @@ a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bb
 #'   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
 #' @noRd
 #' @keywords internal
-a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min)
+a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF straight into a Parquet
 #' file. RecordBatch construction and Parquet write happen in Rust without
@@ -73,7 +73,7 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @returns The destination path (character scalar) on success.
 #' @noRd
 #' @keywords internal
-a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min)
+a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m)
 
 #' Sample one pixel value per A5 cell. Inverse / cell-driven path.
 #'
