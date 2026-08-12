@@ -13,13 +13,14 @@ a5_read_raster_arrow(
   src_nodata = NULL,
   cpu_workers = NULL,
   io_concurrency = NULL,
+  dequant = NULL,
   as_vector = FALSE,
   value_type = c("float64", "float32"),
-  use_overviews = TRUE
+  use_overviews = is.null(dequant)
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, as_vector, use_overviews}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, as_vector, use_overviews}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{value_type}{Storage type for the value column. \code{"float64"} (default)
 or \code{"float32"} (halves disk size for embeddings).}

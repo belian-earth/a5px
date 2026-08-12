@@ -124,6 +124,72 @@ fn parse_stats(stats: &[String]) -> Result<Vec<Stat>> {
 }
 
 // ---------------------------------------------------------------------------
+// pre-aggregation dequantization
+
+/// Per-pixel decode applied before values enter the accumulators, as a lookup
+/// table over the integer code domain `[min, min + lut.len())`. Built on the
+/// R side (which can evaluate an arbitrary R function over the finite code
+/// domain); applied here because nonlinear decodes do not commute with
+/// aggregation — the mean of decoded codes is not the decode of the mean.
+pub(crate) struct DequantLut {
+    pub lut: Vec<f64>,
+    pub min: i64,
+}
+
+impl DequantLut {
+    /// `v` is an integer code read from the raster (exact in f64 for all
+    /// supported dtypes). Out-of-range codes cannot occur once the source
+    /// dtype has been validated; NaN is a safe backstop, not a code path.
+    #[inline]
+    pub fn apply(&self, v: f64) -> f64 {
+        let i = (v as i64).wrapping_sub(self.min) as usize;
+        self.lut.get(i).copied().unwrap_or(f64::NAN)
+    }
+}
+
+/// Decode the extendr-passed LUT args: empty `lut` means "no dequant".
+pub(crate) fn parse_dequant_arg(lut: Vec<f64>, min: f64) -> Option<DequantLut> {
+    if lut.is_empty() {
+        None
+    } else {
+        Some(DequantLut {
+            lut,
+            min: min as i64,
+        })
+    }
+}
+
+/// Dequantization is only defined for quantized integer codes; require an
+/// integer dtype whose full range the LUT covers.
+pub(crate) fn validate_dequant_dtype(
+    ifd: &async_tiff::ImageFileDirectory,
+    dq: &DequantLut,
+) -> Result<()> {
+    use async_tiff::DataType;
+    let dtype = crate::band_fetch::derive_data_type(ifd);
+    let (lo, hi): (i64, i64) = match dtype {
+        Some(DataType::Bool) => (0, 1),
+        Some(DataType::UInt8) => (0, u8::MAX as i64),
+        Some(DataType::UInt16) => (0, u16::MAX as i64),
+        Some(DataType::Int8) => (i8::MIN as i64, i8::MAX as i64),
+        Some(DataType::Int16) => (i16::MIN as i64, i16::MAX as i64),
+        other => {
+            return Err(A5CogError::Unsupported(format!(
+                "dequant requires an integer source of 16 bits or fewer; source data type is {other:?}"
+            )));
+        }
+    };
+    let covered_hi = dq.min + dq.lut.len() as i64 - 1;
+    if lo < dq.min || hi > covered_hi {
+        return Err(A5CogError::Invalid(format!(
+            "dequant LUT domain [{}, {covered_hi}] does not cover the source dtype range [{lo}, {hi}]",
+            dq.min
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // per-cell, per-band running accumulator
 
 #[derive(Clone, Copy, Debug)]
@@ -329,6 +395,7 @@ fn process_tile(
     resolution: i32,
     nodata: Option<f64>,
     bbox_lonlat: Option<[f64; 4]>,
+    dequant: Option<&DequantLut>,
 ) -> Result<AHashMap<u64, Vec<Accum>>> {
     let n_out = data_band_offsets.len();
     let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
@@ -420,19 +487,28 @@ fn process_tile(
         let pixel_base = r * h_stride + c * w_stride;
         let t = if prof { Some(Instant::now()) } else { None };
         let mut any_valid = false;
+        // nodata is compared against the raw code; the dequant LUT (when
+        // present) is applied after, so decoded values enter the accumulators.
         if let Some(nd) = nodata_v {
             for (out_b, &src_b) in data_band_offsets.iter().enumerate() {
                 let off = pixel_base + src_b * b_stride;
-                let v = read_pixel_chunky(&data, off);
-                let valid = !is_nodata(v, nd);
-                band_vals[out_b] = v;
+                let raw = read_pixel_chunky(&data, off);
+                let valid = !is_nodata(raw, nd);
+                band_vals[out_b] = match dequant {
+                    Some(d) => d.apply(raw),
+                    None => raw,
+                };
                 band_valid[out_b] = valid;
                 any_valid |= valid;
             }
         } else {
             for (out_b, &src_b) in data_band_offsets.iter().enumerate() {
                 let off = pixel_base + src_b * b_stride;
-                band_vals[out_b] = read_pixel_chunky(&data, off);
+                let raw = read_pixel_chunky(&data, off);
+                band_vals[out_b] = match dequant {
+                    Some(d) => d.apply(raw),
+                    None => raw,
+                };
                 band_valid[out_b] = true;
             }
             any_valid = true;
@@ -546,6 +622,7 @@ async fn read_raster_async(
     cpu_workers: usize,
     io_concurrency: usize,
     overview_target_m: f64,
+    dequant: Option<Arc<DequantLut>>,
 ) -> Result<Output> {
     let (store, path) = parse_src(src)?;
     let reader = ObjectReader::new(store, path);
@@ -563,6 +640,10 @@ async fn read_raster_async(
         .first()
         .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?
         .clone();
+
+    if let Some(dq) = dequant.as_deref() {
+        validate_dequant_dtype(&ifd0, dq)?;
+    }
 
     let geo = ifd0
         .geo_key_directory()
@@ -745,6 +826,7 @@ async fn read_raster_async(
         let registry = Arc::clone(&registry_arc);
         let gt_c = gt;
         let bbox_lonlat_c = bbox_lonlat;
+        let dequant_c = dequant.clone();
         consumer_handles.push(tokio::task::spawn_blocking(move || {
             let mut local: AHashMap<u64, Vec<Accum>> = AHashMap::new();
             let prof = profile_enabled();
@@ -795,6 +877,7 @@ async fn read_raster_async(
                     resolution,
                     nodata,
                     bbox_lonlat_c,
+                    dequant_c.as_deref(),
                 )?;
                 let t_merge = Instant::now();
                 for (cell, accs) in tile_local {
@@ -1204,6 +1287,9 @@ fn projected_tile_range(
 /// @param overview_target_m A5 cell edge length in metres; when > 0 a COG
 ///   overview that still oversamples the cell is read instead of full
 ///   resolution. 0 disables overview use (always read IFD 0).
+/// @param dequant_lut Pre-aggregation decode LUT over the integer code domain
+///   starting at `dequant_min`; empty = no dequantization.
+/// @param dequant_min First code covered by `dequant_lut`.
 /// @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
 ///   vectors; key form is `<band>` for length-1 stats and `<band>__<stat>`
 ///   for length>1), `band_names`, and `stats` (character).
@@ -1221,6 +1307,8 @@ fn a5_read_raster_rs(
     cpu_workers: i32,
     io_concurrency: i32,
     overview_target_m: f64,
+    dequant_lut: Vec<f64>,
+    dequant_min: f64,
 ) -> Result<Robj> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1246,6 +1334,7 @@ fn a5_read_raster_rs(
 
     let bbox_opt = parse_bbox_arg(bbox)?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
+    let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -1258,6 +1347,7 @@ fn a5_read_raster_rs(
         cpu_workers,
         io_concurrency,
         overview_target_m,
+        dequant,
     ))?;
 
     if prof {
@@ -1331,6 +1421,8 @@ fn a5_read_raster_flat_rs(
     cpu_workers: i32,
     io_concurrency: i32,
     overview_target_m: f64,
+    dequant_lut: Vec<f64>,
+    dequant_min: f64,
 ) -> Result<Robj> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1356,6 +1448,7 @@ fn a5_read_raster_flat_rs(
 
     let bbox_opt = parse_bbox_arg(bbox)?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
+    let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -1368,6 +1461,7 @@ fn a5_read_raster_flat_rs(
         cpu_workers,
         io_concurrency,
         overview_target_m,
+        dequant,
     ))?;
 
     if prof {
@@ -1440,6 +1534,8 @@ fn a5_raster_to_parquet_rs(
     cpu_workers: i32,
     io_concurrency: i32,
     overview_target_m: f64,
+    dequant_lut: Vec<f64>,
+    dequant_min: f64,
 ) -> Result<String> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1467,6 +1563,7 @@ fn a5_raster_to_parquet_rs(
 
     let bbox_opt = parse_bbox_arg(bbox)?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
+    let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -1479,6 +1576,7 @@ fn a5_raster_to_parquet_rs(
         cpu_workers,
         io_concurrency,
         overview_target_m,
+        dequant,
     ))?;
 
     if prof {
@@ -1521,6 +1619,8 @@ fn a5_sample_at_cells_rs(
     src_nodata: Vec<f64>,
     cpu_workers: i32,
     io_concurrency: i32,
+    dequant_lut: Vec<f64>,
+    dequant_min: f64,
 ) -> Result<Robj> {
     if !bands_idx.is_empty() && !bands_names.is_empty() {
         return Err(A5CogError::Invalid(
@@ -1530,6 +1630,7 @@ fn a5_sample_at_cells_rs(
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
+    let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let cells_in = crate::cell_raw::raw8_list_to_u64s(&cells_raw);
 
     let runtime = crate::runtime::shared_runtime()?;
@@ -1543,6 +1644,7 @@ fn a5_sample_at_cells_rs(
             src_nodata_opt,
             cpu_workers,
             io_concurrency,
+            dequant,
         ))?;
 
     let cell_list = u64s_to_raw8_list(&out.cells);

@@ -17,11 +17,12 @@ a5_raster_to_parquet(
   compression = c("zstd", "snappy", "none"),
   cpu_workers = NULL,
   io_concurrency = NULL,
-  use_overviews = TRUE
+  dequant = NULL,
+  use_overviews = is.null(dequant)
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, as_vector, use_overviews}{See
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, as_vector, use_overviews}{See
 \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{dest}{Output Parquet path.}

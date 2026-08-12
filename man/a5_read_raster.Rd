@@ -14,8 +14,9 @@ a5_read_raster(
   mode = c("forward", "centroid"),
   cpu_workers = NULL,
   io_concurrency = NULL,
+  dequant = NULL,
   as_vector = FALSE,
-  use_overviews = TRUE
+  use_overviews = is.null(dequant)
 )
 }
 \arguments{
@@ -64,21 +65,38 @@ to the I/O stage. \code{NULL} (default) resolves from
 embedding rasters where the network can absorb more parallelism than
 the CPU pool. See \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.}
 
+\item{dequant}{Optional per-pixel decode applied \emph{before} aggregation: a
+vectorised R function mapping raw integer codes to decoded values, e.g.
+\link{dequant_aef} for Alpha Earth Foundations int8 embedding codes.
+Nonlinear decodes do not commute with aggregation, so quantized values
+must be decoded per pixel before the mean, not after; this argument
+does exactly that.
+The function is evaluated once over the full integer code domain to
+build a lookup table applied on the Rust side, which restricts
+\code{dequant} to sources with an integer data type of 16 bits or fewer
+(int8 / uint8 / int16 / uint16); other dtypes error at read time.
+nodata is matched against the raw code, before decoding. \code{NULL}
+(default) reads raw values.}
+
 \item{as_vector}{Logical. If \code{TRUE}, collapse the (selected) bands into
 list columns of fixed-length numeric vectors -- one per stat. Single
 stat returns a single column \code{value}; multi-stat returns
 \verb{value_<stat>} columns (e.g. \code{value_mean}, \code{value_max}). Useful for
 embedding rasters. Default \code{FALSE} (one numeric column per band).}
 
-\item{use_overviews}{Logical. When \code{TRUE} (default) and \code{stat = "mean"},
-read the coarsest COG overview that still oversamples the target A5 cell
+\item{use_overviews}{Logical. When \code{TRUE} and \code{stat = "mean"}, read the
+coarsest COG overview that still oversamples the target A5 cell
 instead of the full-resolution image. For aggregations to cells much
 coarser than the source pixels this moves far fewer bytes and does far
 less per-pixel work for a near-identical mean. Ignored unless the stat is
 exactly \code{"mean"} (\code{sum}/\code{count}/\code{var}/\code{sd}/\code{min}/\code{max} are not preserved
 under decimation) and in \code{mode = "centroid"}. Set \code{FALSE} to always read
 full resolution. Requires the source to carry overviews; otherwise the
-full-resolution image is read regardless.}
+full-resolution image is read regardless. The default is \code{TRUE} unless
+\code{dequant} is set: overviews are typically average-resampled, and an
+overview pixel that is a mean of quantized codes decodes incorrectly.
+Explicitly passing \code{TRUE} together with \code{dequant} warns and proceeds,
+for sources whose overviews were built with nearest or mode resampling.}
 }
 \value{
 A \code{\link[tibble:tibble]{tibble::tibble()}} with columns:

@@ -132,6 +132,34 @@ agg <- a5_read_raster(src, resolution = 14L,
 # columns: cell, B02__mean, B02__sum, B02__count, B03__mean, ...
 ```
 
+### Pre-aggregation dequantization
+
+Quantized sources must be decoded per pixel *before* aggregation: a
+nonlinear decode does not commute with the mean, so averaging raw int8
+codes and decoding the result gives the wrong answer. `dequant` applies
+the decode on the Rust side, ahead of the accumulators:
+
+```r
+# Alpha Earth Foundations int8 codes: sign(x) * (x / 127.5)^2
+emb <- a5_read_raster(url, resolution = 14L, bands = 1:8, dequant = dequant_aef)
+
+# or any vectorised R function over the integer code domain
+emb <- a5_read_raster(url, resolution = 14L, dequant = function(x) x / 250)
+```
+
+Arbitrary R functions work because the code domain is finite: the
+function is evaluated once over all possible codes and shipped to Rust
+as a lookup table. This restricts `dequant` to integer sources of 16
+bits or fewer (int8 / uint8 / int16 / uint16), which is what "quantized"
+means in practice. NoData is matched against the raw code before
+decoding.
+
+Setting `dequant` also flips the `use_overviews` default to `FALSE`:
+COG overviews are typically average-resampled, and an overview pixel
+that is a mean of quantized codes decodes incorrectly. Pass
+`use_overviews = TRUE` explicitly (it warns) only when the source's
+overviews were built with nearest or mode resampling.
+
 ### Band selection on the wire
 
 For planar (`INTERLEAVE=BAND`) COGs --- common in embedding rasters

@@ -67,6 +67,7 @@ pub(crate) async fn sample_at_cells_async(
     src_nodata_override: Option<f64>,
     cpu_workers: usize,
     io_concurrency: usize,
+    dequant: Option<Arc<crate::read::DequantLut>>,
 ) -> Result<CentroidOutput> {
     let (store, path) = crate::read::parse_src_pub(src)?;
     let reader = ObjectReader::new(store, path);
@@ -80,6 +81,10 @@ pub(crate) async fn sample_at_cells_async(
         .first()
         .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?
         .clone();
+
+    if let Some(dq) = dequant.as_deref() {
+        crate::read::validate_dequant_dtype(&ifd_owned, dq)?;
+    }
 
     let geo = ifd_owned
         .geo_key_directory()
@@ -244,6 +249,7 @@ pub(crate) async fn sample_at_cells_async(
         let registry = Arc::clone(&registry_arc);
         let identity_offsets = Arc::clone(&identity_offsets_arc);
         let selected_bands = Arc::clone(&selected_bands_arc);
+        let dequant_c = dequant.clone();
         consumer_handles.push(tokio::task::spawn_blocking(move || {
             let mut flat_local = vec![f64::NAN; n_in * n_out];
             let mut valid_local = vec![false; n_in];
@@ -283,13 +289,17 @@ pub(crate) async fn sample_at_cells_async(
                     let mut any_valid = false;
                     for (out_b, &src_b) in offsets_arc.iter().enumerate() {
                         let off = pixel_base + src_b * b_stride;
-                        let v = crate::read::read_pixel_chunky_pub(&data, off);
+                        let raw = crate::read::read_pixel_chunky_pub(&data, off);
+                        // nodata compares the raw code; dequant decodes after
                         let valid_v = match nodata {
-                            Some(nd) => !is_nodata(v, nd),
+                            Some(nd) => !is_nodata(raw, nd),
                             None => true,
                         };
                         if valid_v {
-                            flat_local[base + out_b] = v;
+                            flat_local[base + out_b] = match dequant_c.as_deref() {
+                                Some(d) => d.apply(raw),
+                                None => raw,
+                            };
                             any_valid = true;
                         }
                     }

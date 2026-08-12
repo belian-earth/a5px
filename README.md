@@ -72,16 +72,16 @@ aef
 #> # A tibble: 213,007 × 4
 #>    cell                A10   A11   A12
 #>    <a5_cell>         <dbl> <dbl> <dbl>
-#>  1 4a99a162e0000000 -22.7  -31.3  23.2
-#>  2 4a99930ba0000000  23.2  -34.2 -48.0
-#>  3 4a992e1b60000000  22.0  -31.8 -35.8
-#>  4 4a9991b3a0000000  24.2  -26.7 -43.8
-#>  5 4a9971b4a0000000   2.78 -13.6  30.2
-#>  6 4a998deb20000000 -33.3  -18.8  25.9
-#>  7 4a99a92220000000   9.19 -36.8 -18.0
-#>  8 4a99bb4720000000  10.5  -42.2 -32.3
-#>  9 4a992abae0000000  11.1  -35.8 -29.9
-#> 10 4a99a935e0000000  11.7  -43.6 -23.9
+#>  1 48666267a0000000   7.24 -39.5 -36.8
+#>  2 4a99a52820000000 -31.9  -17.1  33.3
+#>  3 4a9929e760000000  -3.63 -48.4 -41.3
+#>  4 4a993e4460000000 -24.5  -31.3  23.3
+#>  5 4a9927bc20000000  -2.68 -15.7 -29.9
+#>  6 4a99b71960000000  43.6  -19.5 -45.8
+#>  7 4a99b2bc20000000  -2.76 -39.8 -29.3
+#>  8 4a99a1cd60000000 -14.1  -24.5  24.3
+#>  9 48667288a0000000 -30.1  -30.5 -43.7
+#> 10 4a99b5dda0000000  35.2  -21.3 -31.8
 #> # ℹ 212,997 more rows
 
 # Render the three embedding bands as false-colour RGB on the globe
@@ -138,6 +138,34 @@ agg <- a5_read_raster(src, resolution = 14L,
                       stat = c("mean", "sum", "count"))
 # columns: cell, B02__mean, B02__sum, B02__count, B03__mean, ...
 ```
+
+### Pre-aggregation dequantization
+
+Quantized sources must be decoded per pixel *before* aggregation: a
+nonlinear decode does not commute with the mean, so averaging raw int8
+codes and decoding the result gives the wrong answer. `dequant` applies
+the decode on the Rust side, ahead of the accumulators:
+
+``` r
+# Alpha Earth Foundations int8 codes: sign(x) * (x / 127.5)^2
+emb <- a5_read_raster(url, resolution = 14L, bands = 1:8, dequant = dequant_aef)
+
+# or any vectorised R function over the integer code domain
+emb <- a5_read_raster(url, resolution = 14L, dequant = function(x) x / 250)
+```
+
+Arbitrary R functions work because the code domain is finite: the
+function is evaluated once over all possible codes and shipped to Rust
+as a lookup table. This restricts `dequant` to integer sources of 16
+bits or fewer (int8 / uint8 / int16 / uint16), which is what “quantized”
+means in practice. NoData is matched against the raw code before
+decoding.
+
+Setting `dequant` also flips the `use_overviews` default to `FALSE`: COG
+overviews are typically average-resampled, and an overview pixel that is
+a mean of quantized codes decodes incorrectly. Pass
+`use_overviews = TRUE` explicitly (it warns) only when the source’s
+overviews were built with nearest or mode resampling.
 
 ### Band selection on the wire
 

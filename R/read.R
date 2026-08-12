@@ -62,20 +62,36 @@
 #'   `min(32, max(cpu_workers, 8))`. Bump this for cloud reads of multi-band
 #'   embedding rasters where the network can absorb more parallelism than
 #'   the CPU pool. See [a5px_set_concurrency()].
+#' @param dequant Optional per-pixel decode applied *before* aggregation: a
+#'   vectorised R function mapping raw integer codes to decoded values, e.g.
+#'   [dequant_aef] for Alpha Earth Foundations int8 embedding codes.
+#'   Nonlinear decodes do not commute with aggregation, so quantized values
+#'   must be decoded per pixel before the mean, not after; this argument
+#'   does exactly that.
+#'   The function is evaluated once over the full integer code domain to
+#'   build a lookup table applied on the Rust side, which restricts
+#'   `dequant` to sources with an integer data type of 16 bits or fewer
+#'   (int8 / uint8 / int16 / uint16); other dtypes error at read time.
+#'   nodata is matched against the raw code, before decoding. `NULL`
+#'   (default) reads raw values.
 #' @param as_vector Logical. If `TRUE`, collapse the (selected) bands into
 #'   list columns of fixed-length numeric vectors -- one per stat. Single
 #'   stat returns a single column `value`; multi-stat returns
 #'   `value_<stat>` columns (e.g. `value_mean`, `value_max`). Useful for
 #'   embedding rasters. Default `FALSE` (one numeric column per band).
-#' @param use_overviews Logical. When `TRUE` (default) and `stat = "mean"`,
-#'   read the coarsest COG overview that still oversamples the target A5 cell
+#' @param use_overviews Logical. When `TRUE` and `stat = "mean"`, read the
+#'   coarsest COG overview that still oversamples the target A5 cell
 #'   instead of the full-resolution image. For aggregations to cells much
 #'   coarser than the source pixels this moves far fewer bytes and does far
 #'   less per-pixel work for a near-identical mean. Ignored unless the stat is
 #'   exactly `"mean"` (`sum`/`count`/`var`/`sd`/`min`/`max` are not preserved
 #'   under decimation) and in `mode = "centroid"`. Set `FALSE` to always read
 #'   full resolution. Requires the source to carry overviews; otherwise the
-#'   full-resolution image is read regardless.
+#'   full-resolution image is read regardless. The default is `TRUE` unless
+#'   `dequant` is set: overviews are typically average-resampled, and an
+#'   overview pixel that is a mean of quantized codes decodes incorrectly.
+#'   Explicitly passing `TRUE` together with `dequant` warns and proceeds,
+#'   for sources whose overviews were built with nearest or mode resampling.
 #'
 #' @returns A [tibble::tibble()] with columns:
 #'   - `cell`: an [a5R::a5_cell] vector at `resolution`
@@ -109,8 +125,9 @@ a5_read_raster <- function(src,
                            mode = c("forward", "centroid"),
                            cpu_workers = NULL,
                            io_concurrency = NULL,
+                           dequant = NULL,
                            as_vector = FALSE,
-                           use_overviews = TRUE) {
+                           use_overviews = is.null(dequant)) {
   check_scalar_string(src, "src")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
@@ -127,6 +144,8 @@ a5_read_raster <- function(src,
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   src_nodata_v <- check_src_nodata(src_nodata)
+  dequant_v <- check_dequant(dequant)
+  warn_dequant_overviews(dequant, use_overviews)
   overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
   if (mode == "centroid") {
@@ -140,7 +159,8 @@ a5_read_raster <- function(src,
       cpu_workers = cpu_workers,
       io_concurrency = io_concurrency,
       as_vector = as_vector,
-      stats = stats
+      stats = stats,
+      dequant_v = dequant_v
     ))
   }
 
@@ -154,7 +174,9 @@ a5_read_raster <- function(src,
     src_nodata = src_nodata_v,
     cpu_workers = cpu_workers,
     io_concurrency = io_concurrency,
-    overview_target_m = overview_target_m
+    overview_target_m = overview_target_m,
+    dequant_lut = dequant_v$lut,
+    dequant_min = dequant_v$min
   )
 
   cells <- new_a5_cell_from_rs(out$cell)
@@ -194,7 +216,8 @@ a5_read_raster <- function(src,
 #' @noRd
 read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
                                  bbox, src_nodata, cpu_workers,
-                                 io_concurrency, as_vector, stats) {
+                                 io_concurrency, as_vector, stats,
+                                 dequant_v = list(lut = numeric(0), min = 0)) {
   if (length(stats) > 1L || stats[1] != "mean") {
     cli::cli_warn(
       "{.code mode = \"centroid\"} returns one sample per cell; the {.arg stat} arg is ignored.",
@@ -226,7 +249,9 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
     bands_names = bands_names,
     src_nodata = src_nodata,
     cpu_workers = cpu_workers,
-    io_concurrency = io_concurrency
+    io_concurrency = io_concurrency,
+    dequant_lut = dequant_v$lut,
+    dequant_min = dequant_v$min
   )
   cells_out <- new_a5_cell_from_rs(out$cell)
   bands <- out$bands
