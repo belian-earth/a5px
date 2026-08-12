@@ -31,21 +31,27 @@ align_by_cell <- function(a, b) {
   )
 }
 
-test_that("dequant = dequant_aef decodes per pixel before aggregating (terra reference)", {
-  skip_if_not_installed("terra")
+test_that("dequant = dequant_aef decodes per pixel before aggregating (analytic reference)", {
   f <- aef_tif()
   skip_if(f == "")
 
   got <- a5_read_raster(f, resolution = 12L, dequant = dequant_aef)
 
-  # independent reference: terra pixel values + a5R cell assignment
-  r <- terra::rast(f)
-  vals <- terra::values(r)                       # ncell x 2, NA at nodata
-  xy <- terra::xyFromCell(r, seq_len(terra::ncell(r)))
-  cells <- a5R::a5_lonlat_to_cell(xy[, 1], xy[, 2], resolution = 12L)
-  key <- hexset(cells)
+  # analytic reference: the fixture's values and geotransform are fully
+  # determined by the formulas in the header comment, so pixel values and
+  # centres are reconstructed here without reading the file at all
+  w <- 128L
+  px <- 0.1 / w
+  cr <- expand.grid(c = 0:(w - 1L), r = 0:(w - 1L))
+  lon <- 12 + (cr$c + 0.5) * px
+  lat <- 48.1 - (cr$r + 0.5) * px
+  vals <- cbind(
+    A01 = (3 * cr$c + 7 * cr$r) %% 255 - 127,
+    A02 = (5 * cr$c + 2 * cr$r) %% 255 - 127
+  )
+  ok <- !(cr$c < 10 & cr$r < 10)                 # nodata patch
+  key <- hexset(a5R::a5_lonlat_to_cell(lon, lat, resolution = 12L))
   for (b in c("A01", "A02")) {
-    ok <- !is.na(vals[, b])
     ref <- tapply(aef_decode(vals[ok, b]), key[ok], mean)
     expect_setequal(hexset(got$cell), names(ref))
     expect_equal(got[[b]][match(names(ref), hexset(got$cell))],

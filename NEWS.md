@@ -1,4 +1,4 @@
-# a5px (development version)
+# a5px 0.0.0.9000
 
 * `a5_read_raster()`, `a5_read_raster_arrow()` and `a5_raster_to_parquet()`
   gain `dequant`: a per-pixel decode applied before aggregation, as any
