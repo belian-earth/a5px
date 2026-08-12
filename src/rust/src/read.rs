@@ -2336,6 +2336,7 @@ fn a5_sample_at_cells_rs(
     io_concurrency: i32,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    interp: &str,
 ) -> Result<Robj> {
     if !bands_idx.is_empty() && !bands_names.is_empty() {
         return Err(A5CogError::Invalid(
@@ -2346,6 +2347,7 @@ fn a5_sample_at_cells_rs(
     let io_concurrency = io_concurrency.max(1) as usize;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
+    let interp_e = crate::sample::Interp::parse(interp)?;
     let cells_in = crate::cell_raw::raw8_list_to_u64s(&cells_raw);
 
     let runtime = crate::runtime::shared_runtime()?;
@@ -2360,6 +2362,7 @@ fn a5_sample_at_cells_rs(
             cpu_workers,
             io_concurrency,
             dequant,
+            interp_e,
         ))?;
 
     let cell_list = u64s_to_raw8_list(&out.cells);

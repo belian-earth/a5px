@@ -70,18 +70,18 @@ aef <- a5_read_raster(
 
 aef
 #> # A tibble: 213,007 × 4
-#>    cell                A10     A11    A12
-#>    <a5_cell>         <dbl>   <dbl>  <dbl>
-#>  1 4866e648e0000000 -15.8  -20.7   -20.0 
-#>  2 4a99f9a820000000  -2.95  -0.737   5.26
-#>  3 486664a520000000  14.2  -43.6   -39.2 
-#>  4 48664c23e0000000 -20.8  -48.1   -38.8 
-#>  5 4a9965cd60000000 -18.5   -6.32   29.9 
-#>  6 4a999f75e0000000   2.86 -40.6   -37.9 
-#>  7 4a99b3c520000000  44.4  -27     -33.6 
-#>  8 4866d89720000000  13.1  -37.3   -37.6 
-#>  9 4a9994bda0000000   6    -38.8   -31.1 
-#> 10 486659d8e0000000  26.8  -35.6   -41.1 
+#>    cell                 A10    A11    A12
+#>    <a5_cell>          <dbl>  <dbl>  <dbl>
+#>  1 4a99ad11e0000000  -3.05  -30.9   18.0 
+#>  2 4a9988d2e0000000  40.6   -27.1  -25.6 
+#>  3 4a99a6d220000000 -30.0   -22     23.4 
+#>  4 48665e8220000000 -21.5   -32.1  -40.7 
+#>  5 4866469860000000  32.6    -3.21 -44.1 
+#>  6 4a998c1ee0000000 -16.8   -32.9    8.89
+#>  7 4a99f9d1e0000000  51.1    -5.35 -21.7 
+#>  8 4a992f4460000000 -13.0   -36.4  -46.1 
+#>  9 4a9958e6e0000000  -0.353 -40.7  -38.1 
+#> 10 4a99f04860000000  18     -39.7  -31.1 
 #> # ℹ 212,997 more rows
 
 # Render the three embedding bands as false-colour RGB on the globe
@@ -196,6 +196,16 @@ For integer rasters whose values are class labels (land cover, masks),
 ``` r
 a5_read_raster(landcover, resolution = 12L, stat = "majority", mode = "overlay")
 a5_read_raster(landcover, resolution = 12L, stat = "fractions")
+```
+
+### Interpolated centroid sampling
+
+When cells are finer than pixels, `mode = "centroid"` samples one value
+per cell; `interp` picks the kernel:
+
+``` r
+a5_read_raster(dem, resolution = 18L, mode = "centroid", interp = "bilinear")
+# also "bicubic" (Keys) and "lanczos"; "nearest" is the default
 ```
 
 ### Band selection on the wire

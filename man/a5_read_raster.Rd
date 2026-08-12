@@ -13,6 +13,7 @@ a5_read_raster(
   src_nodata = NULL,
   mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
+  interp = c("nearest", "bilinear", "bicubic", "lanczos"),
   cpu_workers = NULL,
   io_concurrency = NULL,
   dequant = NULL,
@@ -76,6 +77,18 @@ weights (interior pixels take a fast path and never pay this cost).
 sub-point spacing is at most half the cell edge, clamped to \verb{[2, 16]}.
 Larger values approximate exact area weighting more closely. Only
 used when \code{mode = "overlay"}; an error otherwise.}
+
+\item{interp}{Resampling kernel for \code{mode = "centroid"}:
+\code{"nearest"} (default, the containing pixel), \code{"bilinear"} (2x2),
+\code{"bicubic"} (Keys 4x4), or \code{"lanczos"} (Lanczos-3, 6x6). Kernel
+weights are renormalised over valid pixels, so nodata holes and
+raster edges shrink the stencil instead of propagating \code{NA}; a cell
+whose whole stencil is invalid returns \code{NA}. With \code{dequant}, each
+stencil pixel is decoded before the kernel is applied (nonlinear
+decodes do not commute with interpolation). Use \code{"nearest"} for
+categorical rasters; the smooth kernels blend class codes into
+meaningless intermediates. Only used when \code{mode = "centroid"}; an
+error otherwise.}
 
 \item{cpu_workers}{Number of CPU consumers in the tile-processing pool.
 \code{NULL} (default) resolves from \code{getOption("a5px.cpu_workers")}, env

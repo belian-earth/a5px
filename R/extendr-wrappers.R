@@ -86,7 +86,7 @@ a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, ban
 #'   `band_names`.
 #' @noRd
 #' @keywords internal
-a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min) .Call(wrap__a5_sample_at_cells_rs, src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min)
+a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp) .Call(wrap__a5_sample_at_cells_rs, src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp)
 
 #' Compute the WGS84 lon/lat bbox of the raster at `src`, by projecting the
 #' 4 corners + 4 edge midpoints of the raster's projected extent into

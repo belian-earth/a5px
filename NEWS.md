@@ -1,5 +1,15 @@
 # a5px 0.0.0.9000
 
+* `mode = "centroid"` gains an `interp` argument: `"nearest"` (default,
+  unchanged), `"bilinear"`, `"bicubic"` (Keys) or `"lanczos"` (Lanczos-3).
+  Stencils crossing internal tile boundaries are handled by accumulating
+  partial weighted sums per tile and merging additively, so no extra tile
+  fetches are needed. Kernel weights renormalise over valid pixels: nodata
+  holes and raster edges shrink the stencil instead of propagating NA, and
+  a smooth kernel can recover cells whose centroid pixel is nodata. With
+  `dequant`, stencil pixels are decoded before the kernel. Bilinear matches
+  `terra::extract(method = "bilinear")` to float32 precision.
+
 * New categorical stats for integer rasters of 16 bits or fewer (land cover,
   masks, zone IDs): `stat = "majority"` returns each cell's most-weighted
   class (pixel counts under `mode = "forward"`, overlap areas under

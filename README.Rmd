@@ -190,6 +190,16 @@ a5_read_raster(landcover, resolution = 12L, stat = "majority", mode = "overlay")
 a5_read_raster(landcover, resolution = 12L, stat = "fractions")
 ```
 
+### Interpolated centroid sampling
+
+When cells are finer than pixels, `mode = "centroid"` samples one value
+per cell; `interp` picks the kernel:
+
+```r
+a5_read_raster(dem, resolution = 18L, mode = "centroid", interp = "bilinear")
+# also "bicubic" (Keys) and "lanczos"; "nearest" is the default
+```
+
 ### Band selection on the wire
 
 For planar (`INTERLEAVE=BAND`) COGs --- common in embedding rasters

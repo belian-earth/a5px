@@ -84,6 +84,17 @@
 #'   sub-point spacing is at most half the cell edge, clamped to `[2, 16]`.
 #'   Larger values approximate exact area weighting more closely. Only
 #'   used when `mode = "overlay"`; an error otherwise.
+#' @param interp Resampling kernel for `mode = "centroid"`:
+#'   `"nearest"` (default, the containing pixel), `"bilinear"` (2x2),
+#'   `"bicubic"` (Keys 4x4), or `"lanczos"` (Lanczos-3, 6x6). Kernel
+#'   weights are renormalised over valid pixels, so nodata holes and
+#'   raster edges shrink the stencil instead of propagating `NA`; a cell
+#'   whose whole stencil is invalid returns `NA`. With `dequant`, each
+#'   stencil pixel is decoded before the kernel is applied (nonlinear
+#'   decodes do not commute with interpolation). Use `"nearest"` for
+#'   categorical rasters; the smooth kernels blend class codes into
+#'   meaningless intermediates. Only used when `mode = "centroid"`; an
+#'   error otherwise.
 #' @param cpu_workers Number of CPU consumers in the tile-processing pool.
 #'   `NULL` (default) resolves from `getOption("a5px.cpu_workers")`, env
 #'   `A5PX_CPU_WORKERS`, then [parallel::detectCores()].
@@ -155,6 +166,7 @@ a5_read_raster <- function(src,
                            src_nodata = NULL,
                            mode = c("forward", "overlay", "centroid"),
                            subsamples = NULL,
+                           interp = c("nearest", "bilinear", "bicubic", "lanczos"),
                            cpu_workers = NULL,
                            io_concurrency = NULL,
                            dequant = NULL,
@@ -167,6 +179,12 @@ a5_read_raster <- function(src,
   stats <- check_stats(stat)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
+  interp <- rlang::arg_match(interp)
+  if (interp != "nearest" && mode != "centroid") {
+    cli::cli_abort(
+      "{.arg interp} is only used when {.code mode = \"centroid\"}."
+    )
+  }
   cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
                  else check_scalar_count(cpu_workers, "cpu_workers")
   io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
@@ -194,7 +212,8 @@ a5_read_raster <- function(src,
       io_concurrency = io_concurrency,
       as_vector = as_vector,
       stats = stats,
-      dequant_v = dequant_v
+      dequant_v = dequant_v,
+      interp = interp
     ))
   }
 
@@ -276,7 +295,8 @@ a5_read_raster <- function(src,
 read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
                                  bbox, src_nodata, cpu_workers,
                                  io_concurrency, as_vector, stats,
-                                 dequant_v = list(lut = numeric(0), min = 0)) {
+                                 dequant_v = list(lut = numeric(0), min = 0),
+                                 interp = "nearest") {
   if (length(stats) > 1L || stats[1] != "mean") {
     cli::cli_warn(
       "{.code mode = \"centroid\"} returns one sample per cell; the {.arg stat} arg is ignored.",
@@ -310,7 +330,8 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
     cpu_workers = cpu_workers,
     io_concurrency = io_concurrency,
     dequant_lut = dequant_v$lut,
-    dequant_min = dequant_v$min
+    dequant_min = dequant_v$min,
+    interp = interp
   )
   cells_out <- new_a5_cell_from_rs(out$cell)
   bands <- out$bands
