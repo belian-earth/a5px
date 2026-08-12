@@ -38,6 +38,9 @@ static T_PIX_READ_NS: AtomicU64 = AtomicU64::new(0);
 static T_A5_CELL_NS: AtomicU64 = AtomicU64::new(0);
 static T_HM_NS: AtomicU64 = AtomicU64::new(0);
 static T_PUSH_NS: AtomicU64 = AtomicU64::new(0);
+// overlay-mode fast-path effectiveness (pixel counts, not timings)
+static N_OVERLAY_INTERIOR: AtomicU64 = AtomicU64::new(0);
+static N_OVERLAY_BOUNDARY: AtomicU64 = AtomicU64::new(0);
 
 fn profile_enabled() -> bool {
     std::env::var_os("A5PX_PROFILE").is_some()
@@ -48,6 +51,7 @@ fn reset_timers() {
         &T_FETCH_NS, &T_DECODE_NS, &T_BUILD_PTS_NS, &T_PROJ_NS,
         &T_INDEX_NS, &T_MERGE_NS,
         &T_PIX_READ_NS, &T_A5_CELL_NS, &T_HM_NS, &T_PUSH_NS,
+        &N_OVERLAY_INTERIOR, &N_OVERLAY_BOUNDARY,
     ] {
         t.store(0, Ordering::Relaxed);
     }
@@ -73,6 +77,15 @@ fn print_timers(total: f64) {
     one("  hashmap lookup", T_HM_NS.load(Ordering::Relaxed));
     one("  push to accums", T_PUSH_NS.load(Ordering::Relaxed));
     one("merge into global", T_MERGE_NS.load(Ordering::Relaxed));
+    let n_int = N_OVERLAY_INTERIOR.load(Ordering::Relaxed);
+    let n_bnd = N_OVERLAY_BOUNDARY.load(Ordering::Relaxed);
+    if n_int + n_bnd > 0 {
+        eprintln!(
+            "  overlay interior fast path: {n_int} of {} pixels ({:.1}%)",
+            n_int + n_bnd,
+            100.0 * n_int as f64 / (n_int + n_bnd) as f64
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +100,9 @@ enum Stat {
     Max,
     Var,
     Sd,
+    /// Most-weighted class code (categorical rasters). Backed by the
+    /// per-cell class-weight map rather than the continuous accumulator.
+    Majority,
 }
 
 impl Stat {
@@ -99,6 +115,7 @@ impl Stat {
             "max" => Ok(Self::Max),
             "var" => Ok(Self::Var),
             "sd" => Ok(Self::Sd),
+            "majority" => Ok(Self::Majority),
             other => Err(A5CogError::Invalid(format!("unknown stat: {other}"))),
         }
     }
@@ -112,15 +129,51 @@ impl Stat {
             Self::Max => "max",
             Self::Var => "var",
             Self::Sd => "sd",
+            Self::Majority => "majority",
         }
+    }
+
+    /// Whether this stat reads the continuous (weighted Welford) accumulator.
+    fn needs_cont(&self) -> bool {
+        !matches!(self, Self::Majority)
     }
 }
 
-fn parse_stats(stats: &[String]) -> Result<Vec<Stat>> {
+/// Split the R-side stat vector into enum stats plus the `fractions` flag.
+/// "fractions" has a per-cell variable-length output (class -> weight share)
+/// so it is not a `Stat`; the R wrappers enforce that it arrives alone.
+fn parse_stats(stats: &[String]) -> Result<(Vec<Stat>, bool)> {
     if stats.is_empty() {
         return Err(A5CogError::Invalid("at least one stat is required".into()));
     }
-    stats.iter().map(|s| Stat::parse(s.as_str())).collect()
+    let fractions = stats.iter().any(|s| s == "fractions");
+    if fractions && stats.len() > 1 {
+        return Err(A5CogError::Invalid(
+            "\"fractions\" must be the only requested stat".into(),
+        ));
+    }
+    let parsed: Vec<Stat> = stats
+        .iter()
+        .filter(|s| s.as_str() != "fractions")
+        .map(|s| Stat::parse(s.as_str()))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((parsed, fractions))
+}
+
+/// Per-band accumulation config, derived once from the requested stats.
+#[derive(Clone, Copy)]
+struct AccCfg {
+    has_cont: bool,
+    has_cat: bool,
+}
+
+impl AccCfg {
+    fn from_stats(stats: &[Stat], fractions: bool) -> Self {
+        Self {
+            has_cont: stats.iter().any(|s| s.needs_cont()),
+            has_cat: fractions || stats.iter().any(|s| matches!(s, Stat::Majority)),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -159,25 +212,32 @@ pub(crate) fn parse_dequant_arg(lut: Vec<f64>, min: f64) -> Option<DequantLut> {
     }
 }
 
+/// The value range of an integer source of 16 bits or fewer, or `None` for
+/// any other dtype. The finite-code-domain features (dequant LUTs and the
+/// categorical class maps) are only defined for these sources.
+fn integer_code_range(ifd: &async_tiff::ImageFileDirectory) -> Option<(i64, i64)> {
+    use async_tiff::DataType;
+    match crate::band_fetch::derive_data_type(ifd) {
+        Some(DataType::Bool) => Some((0, 1)),
+        Some(DataType::UInt8) => Some((0, u8::MAX as i64)),
+        Some(DataType::UInt16) => Some((0, u16::MAX as i64)),
+        Some(DataType::Int8) => Some((i8::MIN as i64, i8::MAX as i64)),
+        Some(DataType::Int16) => Some((i16::MIN as i64, i16::MAX as i64)),
+        _ => None,
+    }
+}
+
 /// Dequantization is only defined for quantized integer codes; require an
 /// integer dtype whose full range the LUT covers.
 pub(crate) fn validate_dequant_dtype(
     ifd: &async_tiff::ImageFileDirectory,
     dq: &DequantLut,
 ) -> Result<()> {
-    use async_tiff::DataType;
-    let dtype = crate::band_fetch::derive_data_type(ifd);
-    let (lo, hi): (i64, i64) = match dtype {
-        Some(DataType::Bool) => (0, 1),
-        Some(DataType::UInt8) => (0, u8::MAX as i64),
-        Some(DataType::UInt16) => (0, u16::MAX as i64),
-        Some(DataType::Int8) => (i8::MIN as i64, i8::MAX as i64),
-        Some(DataType::Int16) => (i16::MIN as i64, i16::MAX as i64),
-        other => {
-            return Err(A5CogError::Unsupported(format!(
-                "dequant requires an integer source of 16 bits or fewer; source data type is {other:?}"
-            )));
-        }
+    let Some((lo, hi)) = integer_code_range(ifd) else {
+        return Err(A5CogError::Unsupported(format!(
+            "dequant requires an integer source of 16 bits or fewer; source data type is {:?}",
+            crate::band_fetch::derive_data_type(ifd)
+        )));
     };
     let covered_hi = dq.min + dq.lut.len() as i64 - 1;
     if lo < dq.min || hi > covered_hi {
@@ -189,18 +249,36 @@ pub(crate) fn validate_dequant_dtype(
     Ok(())
 }
 
+/// majority / fractions treat raw codes as class labels; require an integer
+/// dtype of 16 bits or fewer so the class space is finite.
+fn validate_categorical_dtype(ifd: &async_tiff::ImageFileDirectory) -> Result<()> {
+    if integer_code_range(ifd).is_none() {
+        return Err(A5CogError::Unsupported(format!(
+            "majority/fractions require an integer source of 16 bits or fewer; source data type is {:?}",
+            crate::band_fetch::derive_data_type(ifd)
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // per-cell, per-band running accumulator
 
 #[derive(Clone, Copy, Debug)]
 struct Accum {
+    /// Weighted sum Σ w·v. Under forward/centroid sampling every weight is
+    /// 1.0, so this is the plain sum; under overlay sampling the weights are
+    /// pixel-cell overlap fractions, making Sum mass-preserving.
     sum: f64,
-    count: u64,
+    /// Total weight Σ w. Equals the pixel count when weights are 1.0;
+    /// the effective (fractional) source-pixel count under overlay.
+    sum_w: f64,
     min: f64,
     max: f64,
-    // Welford running mean and sum-of-squared-deviations, used for var / sd.
-    // Mean is also derivable as sum/count; we keep mean_w purely so the
-    // M2 update stays numerically stable when combining workers.
+    // Weighted Welford (West 1979) running mean and sum-of-squared-
+    // deviations, used for var / sd. Mean is also derivable as sum/sum_w; we
+    // keep mean_w purely so the M2 update stays numerically stable when
+    // combining workers.
     mean_w: f64,
     m2: f64,
 }
@@ -210,7 +288,7 @@ impl Accum {
     fn new() -> Self {
         Self {
             sum: 0.0,
-            count: 0,
+            sum_w: 0.0,
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             mean_w: 0.0,
@@ -218,39 +296,42 @@ impl Accum {
         }
     }
     #[inline]
-    fn push(&mut self, v: f64) {
-        self.sum += v;
-        self.count += 1;
+    fn push(&mut self, v: f64, w: f64) {
+        if w <= 0.0 {
+            return;
+        }
+        self.sum += w * v;
+        self.sum_w += w;
+        // min/max are presence-based: any positive overlap counts fully
         if v < self.min {
             self.min = v;
         }
         if v > self.max {
             self.max = v;
         }
-        // Welford
+        // weighted Welford
         let delta = v - self.mean_w;
-        self.mean_w += delta / self.count as f64;
-        let delta2 = v - self.mean_w;
-        self.m2 += delta * delta2;
+        self.mean_w += (w / self.sum_w) * delta;
+        self.m2 += w * delta * (v - self.mean_w);
     }
     #[inline]
     fn merge(&mut self, other: &Self) {
-        if other.count == 0 {
+        if other.sum_w == 0.0 {
             return;
         }
-        if self.count == 0 {
+        if self.sum_w == 0.0 {
             *self = *other;
             return;
         }
-        let n_a = self.count as f64;
-        let n_b = other.count as f64;
-        let n = n_a + n_b;
+        let w_a = self.sum_w;
+        let w_b = other.sum_w;
+        let w = w_a + w_b;
         let delta = other.mean_w - self.mean_w;
-        let new_mean = self.mean_w + delta * n_b / n;
-        self.m2 += other.m2 + delta * delta * n_a * n_b / n;
+        let new_mean = self.mean_w + delta * w_b / w;
+        self.m2 += other.m2 + delta * delta * w_a * w_b / w;
         self.mean_w = new_mean;
         self.sum += other.sum;
-        self.count += other.count;
+        self.sum_w += other.sum_w;
         if other.min < self.min {
             self.min = other.min;
         }
@@ -262,45 +343,141 @@ impl Accum {
     fn finalise(&self, stat: Stat) -> f64 {
         match stat {
             Stat::Mean => {
-                if self.count == 0 {
+                if self.sum_w == 0.0 {
                     f64::NAN
                 } else {
-                    self.sum / self.count as f64
+                    self.sum / self.sum_w
                 }
             }
             Stat::Sum => self.sum,
-            Stat::Count => self.count as f64,
+            Stat::Count => self.sum_w,
             Stat::Min => {
-                if self.count == 0 {
+                if self.sum_w == 0.0 {
                     f64::NAN
                 } else {
                     self.min
                 }
             }
             Stat::Max => {
-                if self.count == 0 {
+                if self.sum_w == 0.0 {
                     f64::NAN
                 } else {
                     self.max
                 }
             }
-            // Sample variance / stdev: matches R's var() / sd() (divisor n-1).
-            // Single-observation cells yield NaN.
+            // Sample variance / stdev with frequency weights: divisor
+            // Σw - 1, matching R's var() / sd() when all weights are 1.
+            // Cells with effective sample size <= 1 yield NaN.
             Stat::Var => {
-                if self.count < 2 {
+                if self.sum_w <= 1.0 {
                     f64::NAN
                 } else {
-                    self.m2 / (self.count as f64 - 1.0)
+                    self.m2 / (self.sum_w - 1.0)
                 }
             }
             Stat::Sd => {
-                if self.count < 2 {
+                if self.sum_w <= 1.0 {
                     f64::NAN
                 } else {
-                    (self.m2 / (self.count as f64 - 1.0)).sqrt()
+                    (self.m2 / (self.sum_w - 1.0)).sqrt()
                 }
             }
+            // majority is finalised from the class-weight map, not this
+            // accumulator; the output stage never routes it here
+            Stat::Majority => f64::NAN,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// categorical accumulation (majority / fractions)
+
+/// Per-(cell, band) class-weight map. A plain vector with linear scan: a
+/// genuinely categorical raster puts a handful of classes in each cell, and
+/// the hard cap below turns a continuous raster passed by mistake into a
+/// clear error instead of unbounded memory growth.
+type ClassWeights = Vec<(i32, f64)>;
+
+const MAX_CLASSES_PER_CELL: usize = 4096;
+
+#[inline]
+fn cat_push(m: &mut ClassWeights, class: i32, w: f64) -> Result<()> {
+    if w <= 0.0 {
+        return Ok(());
+    }
+    match m.iter_mut().find(|(c, _)| *c == class) {
+        Some((_, wt)) => *wt += w,
+        None => {
+            if m.len() >= MAX_CLASSES_PER_CELL {
+                return Err(A5CogError::Invalid(format!(
+                    "more than {MAX_CLASSES_PER_CELL} distinct classes in a single cell; \
+                     majority/fractions require a categorical raster"
+                )));
+            }
+            m.push((class, w));
+        }
+    }
+    Ok(())
+}
+
+/// Most-weighted class, ties broken toward the smallest class code so the
+/// result is deterministic regardless of accumulation order. NaN when the
+/// cell/band saw no valid pixels.
+fn finalise_majority(m: &ClassWeights) -> f64 {
+    let mut best: Option<(i32, f64)> = None;
+    for &(c, w) in m {
+        best = Some(match best {
+            None => (c, w),
+            Some((bc, bw)) => {
+                if w > bw || (w == bw && c < bc) {
+                    (c, w)
+                } else {
+                    (bc, bw)
+                }
+            }
+        });
+    }
+    match best {
+        Some((c, _)) => c as f64,
+        None => f64::NAN,
+    }
+}
+
+/// Per-cell accumulation state: continuous accumulators and/or class-weight
+/// maps, one per selected band, allocated only for what the requested stats
+/// actually need.
+#[derive(Clone)]
+struct CellAcc {
+    cont: Vec<Accum>,
+    cat: Vec<ClassWeights>,
+}
+
+impl CellAcc {
+    fn new(n_out: usize, cfg: AccCfg) -> Self {
+        Self {
+            cont: if cfg.has_cont {
+                vec![Accum::new(); n_out]
+            } else {
+                Vec::new()
+            },
+            cat: if cfg.has_cat {
+                vec![Vec::new(); n_out]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn merge(&mut self, other: &Self) -> Result<()> {
+        for (e, a) in self.cont.iter_mut().zip(other.cont.iter()) {
+            e.merge(a);
+        }
+        for (e, a) in self.cat.iter_mut().zip(other.cat.iter()) {
+            for &(c, w) in a {
+                cat_push(e, c, w)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -396,7 +573,8 @@ fn process_tile(
     nodata: Option<f64>,
     bbox_lonlat: Option<[f64; 4]>,
     dequant: Option<&DequantLut>,
-) -> Result<AHashMap<u64, Vec<Accum>>> {
+    cfg: AccCfg,
+) -> Result<AHashMap<u64, CellAcc>> {
     let n_out = data_band_offsets.len();
     let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
     let actual_h = tile_h.min(height.saturating_sub(ty * tile_h));
@@ -435,7 +613,7 @@ fn process_tile(
         T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    let mut local: AHashMap<u64, Vec<Accum>> = AHashMap::with_capacity(n / 4);
+    let mut local: AHashMap<u64, CellAcc> = AHashMap::with_capacity(n / 4);
 
     // shape interpretation
     // chunky: shape = [tile_h, tile_w, n_bands]
@@ -468,7 +646,7 @@ fn process_tile(
     // falling back to the full search-based `a5::lonlat_to_cell` (~26 estimates).
     let mut last_cell: Option<u64> = None;
     let mut last_a5cell: Option<a5::A5Cell> = None;
-    let mut last_entry_ptr: *mut Accum = std::ptr::null_mut();
+    let mut last_entry_ptr: *mut CellAcc = std::ptr::null_mut();
     // hoist nodata branch out of the per-pixel loop
     let nodata_v = nodata;
 
@@ -556,25 +734,31 @@ fn process_tile(
 
         let t = if prof { Some(Instant::now()) } else { None };
         // SAFETY: `last_entry_ptr` is only dereferenced when `last_cell == Some(cell)`,
-        // and the underlying Vec it points into lives in `local` (this function's
-        // local map). We never mutate `local` between setting and reading the
-        // pointer when the cell repeats, so the address stays valid.
-        let entry: &mut [Accum] = if last_cell == Some(cell) && !last_entry_ptr.is_null() {
-            unsafe { std::slice::from_raw_parts_mut(last_entry_ptr, n_out) }
+        // and the CellAcc it points at lives in `local` (this function's local
+        // map). Every path that touches the map resets the pointer, so it is
+        // only reused across consecutive same-cell hits with no interleaved
+        // mutation, and the address stays valid.
+        let entry: &mut CellAcc = if last_cell == Some(cell) && !last_entry_ptr.is_null() {
+            unsafe { &mut *last_entry_ptr }
         } else {
             let v = local
                 .entry(cell)
-                .or_insert_with(|| vec![Accum::new(); n_out]);
+                .or_insert_with(|| CellAcc::new(n_out, cfg));
             last_cell = Some(cell);
-            last_entry_ptr = v.as_mut_ptr();
-            v.as_mut_slice()
+            last_entry_ptr = v as *mut CellAcc;
+            v
         };
         if let Some(t0) = t { sub_hm += t0.elapsed().as_nanos() as u64; }
 
         let t = if prof { Some(Instant::now()) } else { None };
         for b in 0..n_out {
             if band_valid[b] {
-                entry[b].push(band_vals[b]);
+                if cfg.has_cont {
+                    entry.cont[b].push(band_vals[b], 1.0);
+                }
+                if cfg.has_cat {
+                    cat_push(&mut entry.cat[b], band_vals[b] as i32, 1.0)?;
+                }
             }
         }
         if let Some(t0) = t { sub_push += t0.elapsed().as_nanos() as u64; }
@@ -586,6 +770,375 @@ fn process_tile(
         T_HM_NS.fetch_add(sub_hm, Ordering::Relaxed);
         T_PUSH_NS.fetch_add(sub_push, Ordering::Relaxed);
     }
+
+    Ok(local)
+}
+
+// ---------------------------------------------------------------------------
+// overlay (area-weighted) tile processing
+
+/// Read one pixel's selected-band values and validity into the caller's
+/// buffers. nodata is compared against the raw code; the dequant LUT (when
+/// present) is applied after, matching the forward path.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn gather_bands(
+    data: &TypedArray,
+    pixel_base: usize,
+    b_stride: usize,
+    offsets: &[usize],
+    nodata: Option<f64>,
+    dequant: Option<&DequantLut>,
+    band_vals: &mut [f64],
+    band_valid: &mut [bool],
+) -> bool {
+    let mut any_valid = false;
+    for (out_b, &src_b) in offsets.iter().enumerate() {
+        let off = pixel_base + src_b * b_stride;
+        let raw = read_pixel_chunky(data, off);
+        let valid = match nodata {
+            Some(nd) => !is_nodata(raw, nd),
+            None => true,
+        };
+        band_vals[out_b] = match dequant {
+            Some(d) => d.apply(raw),
+            None => raw,
+        };
+        band_valid[out_b] = valid;
+        any_valid |= valid;
+    }
+    any_valid
+}
+
+/// Sentinel for "no A5 cell" (projection failure or indexing failure).
+const NO_CELL: u64 = u64::MAX;
+
+/// Overlay-mode configuration as passed from R. `subsamples == 0` means
+/// auto-select k from the pixel/cell edge ratio (done after overview level
+/// selection, so a decimated read supersamples its own pixel size).
+pub(crate) struct OverlayParams {
+    pub subsamples: usize,
+    pub cell_edge_m: f64,
+}
+
+/// Sub-point grid dimension for overlay mode. Auto mode keeps sub-point
+/// spacing at or below half the cell edge so cells finer than the pixel are
+/// still hit, clamped to [2, 16].
+fn resolve_overlay_k(
+    p: &OverlayParams,
+    gt: &GeoTransform,
+    height: usize,
+    src_is_latlong: bool,
+) -> Result<usize> {
+    if !(p.cell_edge_m > 0.0) {
+        return Err(A5CogError::Invalid(
+            "overlay requires a positive cell_edge_m".into(),
+        ));
+    }
+    if p.subsamples > 0 {
+        return Ok(p.subsamples);
+    }
+    let centre_lat = gt.0[3] + (height as f64 * 0.5) * gt.0[5];
+    let (px, py) = pixel_size_m(gt, src_is_latlong, centre_lat);
+    let pmax = px.max(py);
+    Ok(((2.0 * pmax / p.cell_edge_m).ceil() as usize).clamp(2, 16))
+}
+
+/// Cached lonlat -> cell lookup: try `a5cell_contains_point` against the
+/// previous cell (a single pentagon test) before the full search-based
+/// `lonlat_to_cell`. Same technique as the forward path, shared by the
+/// corner and sub-point passes.
+#[inline]
+fn cell_lookup_cached(
+    lonlat: a5::LonLat,
+    resolution: i32,
+    last_id: &mut u64,
+    last_a5cell: &mut Option<a5::A5Cell>,
+) -> u64 {
+    if let Some(prev) = last_a5cell.as_ref() {
+        if *last_id != NO_CELL {
+            if let Ok(d) = a5::core::cell::a5cell_contains_point(prev, lonlat) {
+                if d > 0.0 {
+                    return *last_id;
+                }
+            }
+        }
+    }
+    match a5::lonlat_to_cell(lonlat, resolution) {
+        Ok(id) => {
+            *last_a5cell = a5::core::serialization::deserialize(id).ok();
+            *last_id = id;
+            id
+        }
+        Err(_) => NO_CELL,
+    }
+}
+
+/// Area-weighted tile processing for `mode = "overlay"`: each pixel
+/// contributes to every A5 cell it overlaps, weighted by the overlapped
+/// fraction of its area, approximated by k x k sub-point supersampling.
+///
+/// Cost containment: the (w+1) x (h+1) pixel-corner lattice is projected
+/// once (about one extra point per pixel versus the forward path) and each
+/// corner is indexed to a cell. A pixel whose four corners share a cell is
+/// interior: it takes a fast path equivalent to forward sampling with
+/// weight 1. Only pixels straddling a cell boundary (or the bbox edge) pay
+/// the k² sub-point cost, and their sub-points are generated in the source
+/// CRS, where the pixel grid is exactly affine, then batch-projected.
+#[allow(clippy::too_many_arguments)]
+fn process_tile_overlay(
+    tx: usize,
+    ty: usize,
+    data: TypedArray,
+    planar: PlanarConfiguration,
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+    data_n_bands: usize,
+    data_band_offsets: &[usize],
+    src_proj: &Proj,
+    dst_proj: &Proj,
+    gt: &GeoTransform,
+    resolution: i32,
+    nodata: Option<f64>,
+    bbox_lonlat: Option<[f64; 4]>,
+    dequant: Option<&DequantLut>,
+    k: usize,
+    cfg: AccCfg,
+) -> Result<AHashMap<u64, CellAcc>> {
+    let n_out = data_band_offsets.len();
+    let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
+    let actual_h = tile_h.min(height.saturating_sub(ty * tile_h));
+    if actual_w == 0 || actual_h == 0 {
+        return Ok(AHashMap::new());
+    }
+
+    let src_is_latlong = src_proj.is_latlong();
+    let dst_is_latlong = dst_proj.is_latlong();
+    let prof = profile_enabled();
+
+    // --- corner lattice: project once, index each corner to a cell
+    let cw = actual_w + 1;
+    let ch = actual_h + 1;
+    let t_pts = Instant::now();
+    let mut corners: Vec<(f64, f64, f64)> = Vec::with_capacity(cw * ch);
+    for r in 0..ch {
+        let row_g = (ty * tile_h + r) as f64;
+        for c in 0..cw {
+            let col_g = (tx * tile_w + c) as f64;
+            let (mut x, mut y) = gt.pixel_xy(col_g, row_g);
+            if src_is_latlong {
+                x = x.to_radians();
+                y = y.to_radians();
+            }
+            corners.push((x, y, 0.0));
+        }
+    }
+    if prof {
+        T_BUILD_PTS_NS.fetch_add(t_pts.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_proj = Instant::now();
+    proj_transform(src_proj, dst_proj, &mut corners[..])?;
+    if prof {
+        T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    let t_idx = Instant::now();
+    let mut last_id: u64 = NO_CELL;
+    let mut last_a5cell: Option<a5::A5Cell> = None;
+    let mut corner_cell: Vec<u64> = vec![NO_CELL; cw * ch];
+    let mut corner_ll: Vec<(f64, f64)> = Vec::with_capacity(cw * ch);
+    for (i, &(lon_o, lat_o, _)) in corners.iter().enumerate() {
+        let lon = if dst_is_latlong { lon_o.to_degrees() } else { lon_o };
+        let lat = if dst_is_latlong { lat_o.to_degrees() } else { lat_o };
+        corner_ll.push((lon, lat));
+        if !lon.is_finite() || !lat.is_finite() {
+            continue;
+        }
+        corner_cell[i] = cell_lookup_cached(
+            a5::LonLat::new(lon, lat),
+            resolution,
+            &mut last_id,
+            &mut last_a5cell,
+        );
+    }
+    drop(corners);
+
+    // --- strides (same layout logic as the forward path)
+    let (h_stride, w_stride, b_stride): (usize, usize, usize) = match planar {
+        PlanarConfiguration::Chunky => (tile_w * data_n_bands, data_n_bands, 1),
+        PlanarConfiguration::Planar => (tile_w, 1, tile_h * tile_w),
+        other => {
+            return Err(A5CogError::Unsupported(format!(
+                "unhandled planar configuration: {other:?}"
+            )));
+        }
+    };
+
+    let n = actual_w * actual_h;
+    let mut local: AHashMap<u64, CellAcc> = AHashMap::with_capacity(n / 4);
+    let mut band_vals: Vec<f64> = vec![0.0; n_out];
+    let mut band_valid: Vec<bool> = vec![false; n_out];
+    // cell-entry cache (same SAFETY argument as the forward path: the pointer
+    // is only dereferenced when the cell id repeats with no interleaved map
+    // mutation, because any new cell resets it)
+    let mut last_entry_cell: u64 = NO_CELL;
+    let mut last_entry_ptr: *mut CellAcc = std::ptr::null_mut();
+
+    let in_bbox = |lon: f64, lat: f64| -> bool {
+        match bbox_lonlat {
+            None => true,
+            Some(b) => lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3],
+        }
+    };
+
+    // --- interior pass; boundary pixels are deferred
+    let mut boundary: Vec<(usize, usize)> = Vec::new();
+    let mut n_interior: u64 = 0;
+    for r in 0..actual_h {
+        for c in 0..actual_w {
+            let pixel_base = r * h_stride + c * w_stride;
+            if !gather_bands(
+                &data, pixel_base, b_stride, data_band_offsets,
+                nodata, dequant, &mut band_vals, &mut band_valid,
+            ) {
+                continue;
+            }
+            let i00 = r * cw + c;
+            let ids = [
+                corner_cell[i00],
+                corner_cell[i00 + 1],
+                corner_cell[i00 + cw],
+                corner_cell[i00 + cw + 1],
+            ];
+            let one_cell = ids[0] != NO_CELL && ids[1..].iter().all(|&x| x == ids[0]);
+            let corners_in_bbox = bbox_lonlat.is_none()
+                || [i00, i00 + 1, i00 + cw, i00 + cw + 1]
+                    .iter()
+                    .all(|&i| in_bbox(corner_ll[i].0, corner_ll[i].1));
+            if one_cell && corners_in_bbox {
+                n_interior += 1;
+                let cell = ids[0];
+                let entry: &mut CellAcc = if last_entry_cell == cell
+                    && !last_entry_ptr.is_null()
+                {
+                    unsafe { &mut *last_entry_ptr }
+                } else {
+                    let v = local
+                        .entry(cell)
+                        .or_insert_with(|| CellAcc::new(n_out, cfg));
+                    last_entry_cell = cell;
+                    last_entry_ptr = v as *mut CellAcc;
+                    v
+                };
+                for b in 0..n_out {
+                    if band_valid[b] {
+                        if cfg.has_cont {
+                            entry.cont[b].push(band_vals[b], 1.0);
+                        }
+                        if cfg.has_cat {
+                            cat_push(&mut entry.cat[b], band_vals[b] as i32, 1.0)?;
+                        }
+                    }
+                }
+            } else {
+                boundary.push((r, c));
+            }
+        }
+    }
+
+    // --- boundary pass: k x k sub-points in source CRS, batch-projected
+    let inv_k = 1.0 / k as f64;
+    let w_sub = inv_k * inv_k;
+    let kk = k * k;
+    const CHUNK: usize = 1024;
+    let mut pts: Vec<(f64, f64, f64)> = Vec::with_capacity(CHUNK.min(boundary.len()) * kk);
+    let mut touched: Vec<(u64, u32)> = Vec::with_capacity(8);
+    for chunk in boundary.chunks(CHUNK) {
+        pts.clear();
+        for &(r, c) in chunk {
+            let row0 = (ty * tile_h + r) as f64;
+            let col0 = (tx * tile_w + c) as f64;
+            for j in 0..k {
+                let rowf = row0 + (j as f64 + 0.5) * inv_k;
+                for i in 0..k {
+                    let colf = col0 + (i as f64 + 0.5) * inv_k;
+                    let (mut x, mut y) = gt.pixel_xy(colf, rowf);
+                    if src_is_latlong {
+                        x = x.to_radians();
+                        y = y.to_radians();
+                    }
+                    pts.push((x, y, 0.0));
+                }
+            }
+        }
+        let t_proj = Instant::now();
+        proj_transform(src_proj, dst_proj, &mut pts[..])?;
+        if prof {
+            T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        for (pi, &(r, c)) in chunk.iter().enumerate() {
+            let pixel_base = r * h_stride + c * w_stride;
+            if !gather_bands(
+                &data, pixel_base, b_stride, data_band_offsets,
+                nodata, dequant, &mut band_vals, &mut band_valid,
+            ) {
+                continue;
+            }
+            touched.clear();
+            for &(lon_o, lat_o, _) in &pts[pi * kk..(pi + 1) * kk] {
+                let lon = if dst_is_latlong { lon_o.to_degrees() } else { lon_o };
+                let lat = if dst_is_latlong { lat_o.to_degrees() } else { lat_o };
+                if !lon.is_finite() || !lat.is_finite() || !in_bbox(lon, lat) {
+                    continue;
+                }
+                let id = cell_lookup_cached(
+                    a5::LonLat::new(lon, lat),
+                    resolution,
+                    &mut last_id,
+                    &mut last_a5cell,
+                );
+                if id == NO_CELL {
+                    continue;
+                }
+                match touched.iter_mut().find(|(cell, _)| *cell == id) {
+                    Some((_, cnt)) => *cnt += 1,
+                    None => touched.push((id, 1)),
+                }
+            }
+            for &(cell, cnt) in &touched {
+                let wgt = cnt as f64 * w_sub;
+                let entry: &mut CellAcc = if last_entry_cell == cell
+                    && !last_entry_ptr.is_null()
+                {
+                    unsafe { &mut *last_entry_ptr }
+                } else {
+                    let v = local
+                        .entry(cell)
+                        .or_insert_with(|| CellAcc::new(n_out, cfg));
+                    last_entry_cell = cell;
+                    last_entry_ptr = v as *mut CellAcc;
+                    v
+                };
+                for b in 0..n_out {
+                    if band_valid[b] {
+                        if cfg.has_cont {
+                            entry.cont[b].push(band_vals[b], wgt);
+                        }
+                        if cfg.has_cat {
+                            cat_push(&mut entry.cat[b], band_vals[b] as i32, wgt)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if prof {
+        T_INDEX_NS.fetch_add(t_idx.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    N_OVERLAY_INTERIOR.fetch_add(n_interior, Ordering::Relaxed);
+    N_OVERLAY_BOUNDARY.fetch_add(boundary.len() as u64, Ordering::Relaxed);
 
     Ok(local)
 }
@@ -623,7 +1176,10 @@ async fn read_raster_async(
     io_concurrency: usize,
     overview_target_m: f64,
     dequant: Option<Arc<DequantLut>>,
+    overlay: Option<OverlayParams>,
+    fractions: bool,
 ) -> Result<Output> {
+    let cfg = AccCfg::from_stats(&stats, fractions);
     let (store, path) = parse_src(src)?;
     let reader = ObjectReader::new(store, path);
     let cache = ReadaheadMetadataCache::new(reader.clone());
@@ -643,6 +1199,16 @@ async fn read_raster_async(
 
     if let Some(dq) = dequant.as_deref() {
         validate_dequant_dtype(&ifd0, dq)?;
+    }
+    if cfg.has_cat {
+        validate_categorical_dtype(&ifd0)?;
+        if dequant.is_some() {
+            return Err(A5CogError::Invalid(
+                "dequant cannot be combined with majority/fractions: categorical \
+                 stats operate on the raw integer codes"
+                    .into(),
+            ));
+        }
     }
 
     let geo = ifd0
@@ -695,6 +1261,13 @@ async fn read_raster_async(
 
     let width = ifd_owned.image_width() as usize;
     let height = ifd_owned.image_height() as usize;
+
+    // overlay k is resolved against the selected level's pixel size, so an
+    // overview read supersamples the decimated pixels it actually visits
+    let overlay_k: Option<usize> = match overlay.as_ref() {
+        None => None,
+        Some(p) => Some(resolve_overlay_k(p, &gt, height, src_proj.is_latlong())?),
+    };
 
     let planar = ifd_owned.planar_configuration();
 
@@ -768,7 +1341,7 @@ async fn read_raster_async(
             b, &src_proj, &dst_proj, &gt, width, height, tile_w, tile_h,
         )? {
             Some(rng) => rng,
-            None => return Ok(empty_output(band_names, n_out, &stats)),
+            None => return Ok(empty_output(band_names, n_out, &stats, fractions)),
         };
         let mut v = Vec::with_capacity((tx_hi - tx_lo + 1) * (ty_hi - ty_lo + 1));
         for ty in ty_lo..=ty_hi {
@@ -814,7 +1387,7 @@ async fn read_raster_async(
 
     // Spawn consumer workers up-front so they're ready as soon as the
     // producer starts pushing. Each runs on the tokio blocking pool.
-    let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<AHashMap<u64, Vec<Accum>>>>> =
+    let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<AHashMap<u64, CellAcc>>>> =
         Vec::with_capacity(cpu_workers);
     for _ in 0..cpu_workers {
         let rx = rx_chan.clone();
@@ -828,7 +1401,7 @@ async fn read_raster_async(
         let bbox_lonlat_c = bbox_lonlat;
         let dequant_c = dequant.clone();
         consumer_handles.push(tokio::task::spawn_blocking(move || {
-            let mut local: AHashMap<u64, Vec<Accum>> = AHashMap::new();
+            let mut local: AHashMap<u64, CellAcc> = AHashMap::new();
             let prof = profile_enabled();
             while let Ok(item) = rx.recv_blocking() {
                 let (data, shape, data_n_bands_eff, offsets_arc): (
@@ -859,38 +1432,64 @@ async fn read_raster_async(
                         (typed, sh, n_out, Arc::clone(&identity_offsets))
                     }
                 };
-                let tile_local = process_tile(
-                    item.tx,
-                    item.ty,
-                    data,
-                    shape,
-                    planar,
-                    width,
-                    height,
-                    tile_w,
-                    tile_h,
-                    data_n_bands_eff,
-                    &offsets_arc,
-                    &src_proj,
-                    &dst_proj,
-                    &gt_c,
-                    resolution,
-                    nodata,
-                    bbox_lonlat_c,
-                    dequant_c.as_deref(),
-                )?;
+                let tile_local = if let Some(k) = overlay_k {
+                    process_tile_overlay(
+                        item.tx,
+                        item.ty,
+                        data,
+                        planar,
+                        width,
+                        height,
+                        tile_w,
+                        tile_h,
+                        data_n_bands_eff,
+                        &offsets_arc,
+                        &src_proj,
+                        &dst_proj,
+                        &gt_c,
+                        resolution,
+                        nodata,
+                        bbox_lonlat_c,
+                        dequant_c.as_deref(),
+                        k,
+                        cfg,
+                    )?
+                } else {
+                    process_tile(
+                        item.tx,
+                        item.ty,
+                        data,
+                        shape,
+                        planar,
+                        width,
+                        height,
+                        tile_w,
+                        tile_h,
+                        data_n_bands_eff,
+                        &offsets_arc,
+                        &src_proj,
+                        &dst_proj,
+                        &gt_c,
+                        resolution,
+                        nodata,
+                        bbox_lonlat_c,
+                        dequant_c.as_deref(),
+                        cfg,
+                    )?
+                };
                 let t_merge = Instant::now();
-                for (cell, accs) in tile_local {
-                    let entry = local.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
-                    for (e, a) in entry.iter_mut().zip(accs.iter()) {
-                        e.merge(a);
+                for (cell, acc) in tile_local {
+                    if let Some(entry) = local.get_mut(&cell) {
+                        entry.merge(&acc)?;
+                    } else {
+                        local.insert(cell, acc);
                     }
                 }
                 if prof {
                     T_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
             }
-            Ok::<AHashMap<u64, Vec<Accum>>, A5CogError>(local)
+            Ok::<AHashMap<u64, CellAcc>, A5CogError>(local)
         }));
     }
     // Consumers each hold their own rx clone; drop the outer one so the
@@ -963,7 +1562,7 @@ async fn read_raster_async(
     // Drain consumers and tree-reduce. Collect all results first (rather
     // than short-circuit on the first Err) so a panic / error in worker N
     // doesn't detach workers N+1.. while they're still running.
-    let mut consumer_results: Vec<Result<AHashMap<u64, Vec<Accum>>>> =
+    let mut consumer_results: Vec<Result<AHashMap<u64, CellAcc>>> =
         Vec::with_capacity(cpu_workers);
     for h in consumer_handles {
         match h.await {
@@ -973,22 +1572,21 @@ async fn read_raster_async(
             )))),
         }
     }
-    let mut local_maps: Vec<AHashMap<u64, Vec<Accum>>> = Vec::with_capacity(cpu_workers);
+    let mut map: AHashMap<u64, CellAcc> = AHashMap::new();
     for r in consumer_results {
-        local_maps.push(r?);
-    }
-    let map = local_maps
-        .into_iter()
-        .reduce(|mut a, b| {
-            for (cell, accs) in b {
-                let entry = a.entry(cell).or_insert_with(|| vec![Accum::new(); n_out]);
-                for (e, ac) in entry.iter_mut().zip(accs.iter()) {
-                    e.merge(ac);
-                }
+        let m = r?;
+        if map.is_empty() {
+            map = m;
+            continue;
+        }
+        for (cell, acc) in m {
+            if let Some(entry) = map.get_mut(&cell) {
+                entry.merge(&acc)?;
+            } else {
+                map.insert(cell, acc);
             }
-            a
-        })
-        .unwrap_or_default();
+        }
+    }
 
     let n_stats = stats.len();
     let n = map.len();
@@ -997,11 +1595,38 @@ async fn read_raster_async(
     // stat of band b of cell i.
     let mut flat_per_stat: Vec<Vec<f64>> =
         (0..n_stats).map(|_| Vec::with_capacity(n * n_out)).collect();
-    for (cell, accs) in map {
+    let mut frac_out: Option<FracOut> = if fractions {
+        Some(FracOut {
+            classes: vec![Vec::new(); n_out],
+            shares: vec![Vec::new(); n_out],
+            offsets: vec![vec![0i32]; n_out],
+        })
+    } else {
+        None
+    };
+    for (cell, acc) in map {
         cells.push(cell);
-        for a in accs.iter() {
+        for b in 0..n_out {
             for (s_i, s) in stats.iter().enumerate() {
-                flat_per_stat[s_i].push(a.finalise(*s));
+                let v = match s {
+                    Stat::Majority => finalise_majority(&acc.cat[b]),
+                    _ => acc.cont[b].finalise(*s),
+                };
+                flat_per_stat[s_i].push(v);
+            }
+            if let Some(fr) = frac_out.as_mut() {
+                // classes sorted ascending so output order is deterministic;
+                // shares are each class's fraction of the cell's valid weight
+                let mut sorted = acc.cat[b].clone();
+                sorted.sort_unstable_by_key(|&(c, _)| c);
+                let tot: f64 = sorted.iter().map(|&(_, w)| w).sum();
+                if tot > 0.0 {
+                    for &(c, w) in &sorted {
+                        fr.classes[b].push(c);
+                        fr.shares[b].push(w / tot);
+                    }
+                }
+                fr.offsets[b].push(fr.classes[b].len() as i32);
             }
         }
     }
@@ -1012,6 +1637,7 @@ async fn read_raster_async(
         n_bands: n_out,
         band_names,
         stats: stats.iter().map(|s| s.as_str().to_string()).collect(),
+        fractions: frac_out,
     })
 }
 
@@ -1023,6 +1649,17 @@ struct Output {
     n_bands: usize,
     band_names: Vec<String>,
     stats: Vec<String>,
+    /// Present only for a "fractions" read; ragged per-cell class shares.
+    fractions: Option<FracOut>,
+}
+
+/// Class-share output in CSR form, one entry per band: `offsets[b]` has
+/// `n_cells + 1` values delimiting cell `i`'s slice of `classes[b]` /
+/// `shares[b]`, in the same cell order as `Output::cells`.
+struct FracOut {
+    classes: Vec<Vec<i32>>,
+    shares: Vec<Vec<f64>>,
+    offsets: Vec<Vec<i32>>,
 }
 
 /// Decode an extendr-passed `Vec<f64>` whose length is the cheap NULL
@@ -1056,13 +1693,41 @@ fn parse_src_nodata_arg(v: Vec<f64>) -> Result<Option<f64>> {
     opt_f64_arg::<1>(v, "src_nodata").map(|opt| opt.map(|a| a[0]))
 }
 
-fn empty_output(band_names: Vec<String>, n_out: usize, stats: &[Stat]) -> Output {
+fn parse_overlay_args(
+    overlay: bool,
+    subsamples: i32,
+    cell_edge_m: f64,
+) -> Result<Option<OverlayParams>> {
+    if !overlay {
+        return Ok(None);
+    }
+    if !(0..=64).contains(&subsamples) {
+        return Err(A5CogError::Invalid(format!(
+            "subsamples must be in 0..=64 (0 = auto); got {subsamples}"
+        )));
+    }
+    Ok(Some(OverlayParams {
+        subsamples: subsamples as usize,
+        cell_edge_m,
+    }))
+}
+
+fn empty_output(band_names: Vec<String>, n_out: usize, stats: &[Stat], fractions: bool) -> Output {
     Output {
         cells: Vec::new(),
         flat_values: stats.iter().map(|_| Vec::new()).collect(),
         n_bands: n_out,
         band_names,
         stats: stats.iter().map(|s| s.as_str().to_string()).collect(),
+        fractions: if fractions {
+            Some(FracOut {
+                classes: vec![Vec::new(); n_out],
+                shares: vec![Vec::new(); n_out],
+                offsets: vec![vec![0i32]; n_out],
+            })
+        } else {
+            None
+        },
     }
 }
 
@@ -1309,6 +1974,9 @@ fn a5_read_raster_rs(
     overview_target_m: f64,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    overlay: bool,
+    subsamples: i32,
+    cell_edge_m: f64,
 ) -> Result<Robj> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1320,7 +1988,7 @@ fn a5_read_raster_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let stats_e = parse_stats(&stats)?;
+    let (stats_e, fractions) = parse_stats(&stats)?;
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
@@ -1335,6 +2003,7 @@ fn a5_read_raster_rs(
     let bbox_opt = parse_bbox_arg(bbox)?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
+    let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -1348,6 +2017,8 @@ fn a5_read_raster_rs(
         io_concurrency,
         overview_target_m,
         dequant,
+        overlay_opt,
+        fractions,
     ))?;
 
     if prof {
@@ -1379,11 +2050,33 @@ fn a5_read_raster_rs(
     let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
     let stats_out: Vec<&str> = out.stats.iter().map(|s| s.as_str()).collect();
 
+    // ragged class-share output for a "fractions" read: per band, CSR arrays
+    // (classes / shares / offsets) that the R wrapper splits into a list col
+    let fractions_robj: Robj = match out.fractions {
+        None => ().into(),
+        Some(fr) => {
+            let mut pairs: Vec<(String, Robj)> = Vec::with_capacity(out.band_names.len());
+            for (b, name) in out.band_names.iter().enumerate() {
+                pairs.push((
+                    name.clone(),
+                    list!(
+                        classes = fr.classes[b].clone(),
+                        shares = fr.shares[b].clone(),
+                        offsets = fr.offsets[b].clone()
+                    )
+                    .into(),
+                ));
+            }
+            List::from_pairs(pairs).into()
+        }
+    };
+
     Ok(list!(
         cell = cell_list,
         bands = bands,
         band_names = band_names,
-        stats = stats_out
+        stats = stats_out,
+        fractions = fractions_robj
     )
     .into())
 }
@@ -1423,6 +2116,9 @@ fn a5_read_raster_flat_rs(
     overview_target_m: f64,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    overlay: bool,
+    subsamples: i32,
+    cell_edge_m: f64,
 ) -> Result<Robj> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1434,7 +2130,12 @@ fn a5_read_raster_flat_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let stats_e = parse_stats(&stats)?;
+    let (stats_e, fractions) = parse_stats(&stats)?;
+    if fractions {
+        return Err(A5CogError::Unsupported(
+            "\"fractions\" is only available via a5_read_raster()".into(),
+        ));
+    }
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
@@ -1449,6 +2150,7 @@ fn a5_read_raster_flat_rs(
     let bbox_opt = parse_bbox_arg(bbox)?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
+    let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -1462,6 +2164,8 @@ fn a5_read_raster_flat_rs(
         io_concurrency,
         overview_target_m,
         dequant,
+        overlay_opt,
+        false,
     ))?;
 
     if prof {
@@ -1536,6 +2240,9 @@ fn a5_raster_to_parquet_rs(
     overview_target_m: f64,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    overlay: bool,
+    subsamples: i32,
+    cell_edge_m: f64,
 ) -> Result<String> {
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
@@ -1547,7 +2254,12 @@ fn a5_raster_to_parquet_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let stats_e = parse_stats(&stats)?;
+    let (stats_e, fractions) = parse_stats(&stats)?;
+    if fractions {
+        return Err(A5CogError::Unsupported(
+            "\"fractions\" is only available via a5_read_raster()".into(),
+        ));
+    }
     let value_type_e = crate::parquet_write::ValueType::parse(value_type)?;
     let compression_e = crate::parquet_write::CompressionChoice::parse(compression)?;
     let cpu_workers = cpu_workers.max(1) as usize;
@@ -1564,6 +2276,7 @@ fn a5_raster_to_parquet_rs(
     let bbox_opt = parse_bbox_arg(bbox)?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
+    let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -1577,6 +2290,8 @@ fn a5_raster_to_parquet_rs(
         io_concurrency,
         overview_target_m,
         dequant,
+        overlay_opt,
+        false,
     ))?;
 
     if prof {
@@ -1621,6 +2336,7 @@ fn a5_sample_at_cells_rs(
     io_concurrency: i32,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    interp: &str,
 ) -> Result<Robj> {
     if !bands_idx.is_empty() && !bands_names.is_empty() {
         return Err(A5CogError::Invalid(
@@ -1631,6 +2347,7 @@ fn a5_sample_at_cells_rs(
     let io_concurrency = io_concurrency.max(1) as usize;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
+    let interp_e = crate::sample::Interp::parse(interp)?;
     let cells_in = crate::cell_raw::raw8_list_to_u64s(&cells_raw);
 
     let runtime = crate::runtime::shared_runtime()?;
@@ -1645,6 +2362,7 @@ fn a5_sample_at_cells_rs(
             cpu_workers,
             io_concurrency,
             dequant,
+            interp_e,
         ))?;
 
     let cell_list = u64s_to_raw8_list(&out.cells);

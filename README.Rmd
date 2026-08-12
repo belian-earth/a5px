@@ -160,6 +160,46 @@ that is a mean of quantized codes decodes incorrectly. Pass
 `use_overviews = TRUE` explicitly (it warns) only when the source's
 overviews were built with nearest or mode resampling.
 
+### Overlay sampling
+
+The default forward mode assigns each pixel wholly to the cell containing
+its centre. `mode = "overlay"` instead weights each pixel's contribution
+by the fraction of its area inside each cell it overlaps, approximated by
+sub-pixel supersampling (`subsamples`, auto-selected by default):
+
+```r
+# area-weighted mean (boundary pixels apportioned, not all-or-nothing)
+a5_read_raster(src, resolution = 12L, mode = "overlay")
+
+# mass-preserving sum: totals (e.g. population counts) are conserved
+a5_read_raster(src, resolution = 12L, mode = "overlay", stat = "sum")
+```
+
+Pixels interior to a cell take a fast path costing the same as forward
+mode; only pixels straddling a cell boundary pay the supersampling cost.
+
+### Categorical rasters
+
+For integer rasters whose values are class labels (land cover, masks),
+`stat = "majority"` gives each cell's dominant class and
+`stat = "fractions"` gives per-class shares as a list-column. Under
+`mode = "overlay"` both are area-weighted:
+
+```r
+a5_read_raster(landcover, resolution = 12L, stat = "majority", mode = "overlay")
+a5_read_raster(landcover, resolution = 12L, stat = "fractions")
+```
+
+### Interpolated centroid sampling
+
+When cells are finer than pixels, `mode = "centroid"` samples one value
+per cell; `interp` picks the kernel:
+
+```r
+a5_read_raster(dem, resolution = 18L, mode = "centroid", interp = "bilinear")
+# also "bicubic" (Keys) and "lanczos"; "nearest" is the default
+```
+
 ### Band selection on the wire
 
 For planar (`INTERLEAVE=BAND`) COGs --- common in embedding rasters

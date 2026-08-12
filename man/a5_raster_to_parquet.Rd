@@ -12,6 +12,8 @@ a5_raster_to_parquet(
   bands = NULL,
   bbox = NULL,
   src_nodata = NULL,
+  mode = c("forward", "overlay"),
+  subsamples = NULL,
   as_vector = FALSE,
   value_type = c("float64", "float32"),
   compression = c("zstd", "snappy", "none"),
@@ -22,10 +24,13 @@ a5_raster_to_parquet(
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, as_vector, use_overviews}{See
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, as_vector, use_overviews}{See
 \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{dest}{Output Parquet path.}
+
+\item{mode}{Sampling mode: \code{"forward"} (default) or \code{"overlay"}. The
+\code{"centroid"} mode is only available in \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{value_type}{Storage type for the value column. \code{"float64"}
 (default) or \code{"float32"} (halves the disk size for embeddings).}

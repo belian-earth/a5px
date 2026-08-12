@@ -28,6 +28,9 @@ Imports:
 Suggests:
     a5view,
     arrow,
+    exactextractr,
+    sf,
+    terra,
     testthat (>= 3.0.0),
     withr
 Remotes:

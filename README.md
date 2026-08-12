@@ -70,18 +70,18 @@ aef <- a5_read_raster(
 
 aef
 #> # A tibble: 213,007 × 4
-#>    cell                A10   A11   A12
-#>    <a5_cell>         <dbl> <dbl> <dbl>
-#>  1 48666267a0000000   7.24 -39.5 -36.8
-#>  2 4a99a52820000000 -31.9  -17.1  33.3
-#>  3 4a9929e760000000  -3.63 -48.4 -41.3
-#>  4 4a993e4460000000 -24.5  -31.3  23.3
-#>  5 4a9927bc20000000  -2.68 -15.7 -29.9
-#>  6 4a99b71960000000  43.6  -19.5 -45.8
-#>  7 4a99b2bc20000000  -2.76 -39.8 -29.3
-#>  8 4a99a1cd60000000 -14.1  -24.5  24.3
-#>  9 48667288a0000000 -30.1  -30.5 -43.7
-#> 10 4a99b5dda0000000  35.2  -21.3 -31.8
+#>    cell                 A10    A11    A12
+#>    <a5_cell>          <dbl>  <dbl>  <dbl>
+#>  1 4a99ad11e0000000  -3.05  -30.9   18.0 
+#>  2 4a9988d2e0000000  40.6   -27.1  -25.6 
+#>  3 4a99a6d220000000 -30.0   -22     23.4 
+#>  4 48665e8220000000 -21.5   -32.1  -40.7 
+#>  5 4866469860000000  32.6    -3.21 -44.1 
+#>  6 4a998c1ee0000000 -16.8   -32.9    8.89
+#>  7 4a99f9d1e0000000  51.1    -5.35 -21.7 
+#>  8 4a992f4460000000 -13.0   -36.4  -46.1 
+#>  9 4a9958e6e0000000  -0.353 -40.7  -38.1 
+#> 10 4a99f04860000000  18     -39.7  -31.1 
 #> # ℹ 212,997 more rows
 
 # Render the three embedding bands as false-colour RGB on the globe
@@ -166,6 +166,47 @@ overviews are typically average-resampled, and an overview pixel that is
 a mean of quantized codes decodes incorrectly. Pass
 `use_overviews = TRUE` explicitly (it warns) only when the source’s
 overviews were built with nearest or mode resampling.
+
+### Overlay sampling
+
+The default forward mode assigns each pixel wholly to the cell
+containing its centre. `mode = "overlay"` instead weights each pixel’s
+contribution by the fraction of its area inside each cell it overlaps,
+approximated by sub-pixel supersampling (`subsamples`, auto-selected by
+default):
+
+``` r
+# area-weighted mean (boundary pixels apportioned, not all-or-nothing)
+a5_read_raster(src, resolution = 12L, mode = "overlay")
+
+# mass-preserving sum: totals (e.g. population counts) are conserved
+a5_read_raster(src, resolution = 12L, mode = "overlay", stat = "sum")
+```
+
+Pixels interior to a cell take a fast path costing the same as forward
+mode; only pixels straddling a cell boundary pay the supersampling cost.
+
+### Categorical rasters
+
+For integer rasters whose values are class labels (land cover, masks),
+`stat = "majority"` gives each cell’s dominant class and
+`stat = "fractions"` gives per-class shares as a list-column. Under
+`mode = "overlay"` both are area-weighted:
+
+``` r
+a5_read_raster(landcover, resolution = 12L, stat = "majority", mode = "overlay")
+a5_read_raster(landcover, resolution = 12L, stat = "fractions")
+```
+
+### Interpolated centroid sampling
+
+When cells are finer than pixels, `mode = "centroid"` samples one value
+per cell; `interp` picks the kernel:
+
+``` r
+a5_read_raster(dem, resolution = 18L, mode = "centroid", interp = "bilinear")
+# also "bicubic" (Keys) and "lanczos"; "nearest" is the default
+```
 
 ### Band selection on the wire
 

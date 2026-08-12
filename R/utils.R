@@ -90,7 +90,8 @@ check_src_nodata <- function(src_nodata, call = rlang::caller_env()) {
 #' valid stat names.
 #' @noRd
 check_stats <- function(stat, call = rlang::caller_env()) {
-  valid <- c("mean", "sum", "count", "min", "max", "var", "sd")
+  valid <- c("mean", "sum", "count", "min", "max", "var", "sd",
+             "majority", "fractions")
   if (!is.character(stat) || length(stat) == 0L || anyNA(stat)) {
     cli::cli_abort(
       "{.arg stat} must be a non-empty character vector with no NAs.",
@@ -109,6 +110,75 @@ check_stats <- function(stat, call = rlang::caller_env()) {
     cli::cli_abort("{.arg stat} must not contain duplicates.", call = call)
   }
   invisible(stat)
+}
+
+#' Cross-argument rules for the categorical stats (majority / fractions).
+#' @noRd
+check_stat_context <- function(stats, dequant, as_vector = FALSE,
+                               fractions_ok = TRUE,
+                               call = rlang::caller_env()) {
+  has_frac <- "fractions" %in% stats
+  has_cat <- has_frac || "majority" %in% stats
+  if (has_frac) {
+    if (!fractions_ok) {
+      cli::cli_abort(
+        "{.val fractions} is only available in {.fn a5_read_raster}.",
+        call = call
+      )
+    }
+    if (length(stats) > 1L) {
+      cli::cli_abort(
+        "{.val fractions} must be the only requested stat.",
+        call = call
+      )
+    }
+    if (isTRUE(as_vector)) {
+      cli::cli_abort(
+        "{.val fractions} cannot be combined with {.code as_vector = TRUE}.",
+        call = call
+      )
+    }
+  }
+  if (has_cat && !is.null(dequant)) {
+    cli::cli_abort(
+      "majority/fractions operate on raw integer codes and cannot be combined with {.arg dequant}.",
+      call = call
+    )
+  }
+  invisible(stats)
+}
+
+#' Validate the user-facing `subsamples` arg. Returns the integer passed to
+#' Rust: 0 = auto-select k, otherwise the explicit sub-point grid dimension.
+#' @noRd
+check_subsamples <- function(subsamples, mode, call = rlang::caller_env()) {
+  if (is.null(subsamples)) {
+    return(0L)
+  }
+  if (!identical(mode, "overlay")) {
+    cli::cli_abort(
+      "{.arg subsamples} is only used when {.code mode = \"overlay\"}.",
+      call = call
+    )
+  }
+  s <- vctrs::vec_cast(subsamples, integer(), x_arg = "subsamples")
+  if (length(s) != 1L || is.na(s) || s < 2L || s > 64L) {
+    cli::cli_abort(
+      "{.arg subsamples} must be a single integer in 2..64, or NULL for auto.",
+      call = call
+    )
+  }
+  s
+}
+
+#' A5 cell edge length in metres, passed to Rust for overlay auto-k.
+#' 0 when overlay is off (the value is unused there).
+#' @noRd
+cell_edge_metres <- function(mode, resolution) {
+  if (!identical(mode, "overlay")) {
+    return(0)
+  }
+  sqrt(as.numeric(a5R::a5_cell_area(resolution, units = "m^2")))
 }
 
 #' Resolve the overview target passed to Rust.
