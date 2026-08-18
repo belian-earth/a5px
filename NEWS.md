@@ -1,5 +1,13 @@
 # a5px 0.0.0.9000
 
+* `a5_read_raster_arrow()` and `a5_raster_to_parquet()` gain
+  `mode = "centroid"` and the `interp` argument, closing the mode gap with
+  `a5_read_raster()`: centroid samples now stream straight into an Arrow
+  Table or a Parquet file from the Rust flat buffer, with no per-cell R
+  materialisation. The `stat` argument is ignored under centroid (one
+  sample per cell); table and file metadata record the pseudo-stat
+  `"centroid"`.
+
 * `mode = "centroid"` gains an `interp` argument: `"nearest"` (default,
   unchanged), `"bilinear"`, `"bicubic"` (Keys) or `"lanczos"` (Lanczos-3).
   Stencils crossing internal tile boundaries are handled by accumulating

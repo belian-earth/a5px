@@ -36,7 +36,8 @@ a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bb
 #'
 #' @param src Path or URL string.
 #' @param resolution A5 resolution (0--30).
-#' @param stats Character vector of stats (subset of mean/sum/count/min/max).
+#' @param stats Character vector of stats (any non-"fractions" subset of the
+#'   stats accepted by `a5_read_raster`).
 #' @param bands_idx 1-based band indices to read (empty for all unless
 #'   `bands_names` is provided).
 #' @param bands_names Band names to read (matched against the GDAL
@@ -61,7 +62,8 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @param src Path or URL string.
 #' @param dest Output Parquet path.
 #' @param resolution A5 resolution (0--30).
-#' @param stats Character vector of stats (subset of mean/sum/count/min/max).
+#' @param stats Character vector of stats (any non-"fractions" subset of the
+#'   stats accepted by `a5_read_raster`).
 #' @param bands_idx,bands_names Band selection (see `a5_read_raster_rs`).
 #' @param value_type Storage type for the value column ("float64" | "float32").
 #' @param compression Parquet compression codec ("zstd" | "snappy" | "none").
@@ -75,18 +77,24 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @keywords internal
 a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m)
 
-#' Sample one pixel value per A5 cell. Inverse / cell-driven path.
-#'
-#' @param src Path or URL string.
-#' @param cells_raw a5R-style cell list (b1..b8 raw fields).
-#' @param bands_idx,bands_names Band selection.
-#' @param src_nodata Length-1 vec or empty for no override.
-#' @param threads,io_concurrency See `a5_read_raster_rs`.
-#' @returns A list with `cell` (b1..b8 raw), `bands` (named numeric), and
-#'   `band_names`.
+a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp) .Call(wrap__a5_sample_at_cells_rs, src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp)
+
+#' Flat-output variant of `a5_sample_at_cells_rs`: same sampler, but the
+#' result mirrors the `a5_read_raster_flat_rs` shape (cell-major flat buffer
+#' under a single pseudo-stat "centroid") so the R-side Arrow assembly is
+#' shared across modes.
 #' @noRd
 #' @keywords internal
-a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp) .Call(wrap__a5_sample_at_cells_rs, src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp)
+a5_sample_at_cells_flat_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp) .Call(wrap__a5_sample_at_cells_flat_rs, src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp)
+
+#' Centroid samples straight to Parquet: same sampler as
+#' `a5_sample_at_cells_rs`, with the RecordBatch built from the flat buffer
+#' and written by the Rust `parquet` crate (no R materialisation). The
+#' single pseudo-stat is "centroid", so columns are plain band names
+#' (`as_vector = false`) or a single `value` FixedSizeList.
+#' @noRd
+#' @keywords internal
+a5_sample_to_parquet_rs <- function(src, dest, resolution, cells_raw, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp) .Call(wrap__a5_sample_to_parquet_rs, src, dest, resolution, cells_raw, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp)
 
 #' Compute the WGS84 lon/lat bbox of the raster at `src`, by projecting the
 #' 4 corners + 4 edge midpoints of the raster's projected extent into

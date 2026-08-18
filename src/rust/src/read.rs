@@ -2087,7 +2087,8 @@ fn a5_read_raster_rs(
 ///
 /// @param src Path or URL string.
 /// @param resolution A5 resolution (0--30).
-/// @param stats Character vector of stats (subset of mean/sum/count/min/max).
+/// @param stats Character vector of stats (any non-"fractions" subset of the
+///   stats accepted by `a5_read_raster`).
 /// @param bands_idx 1-based band indices to read (empty for all unless
 ///   `bands_names` is provided).
 /// @param bands_names Band names to read (matched against the GDAL
@@ -2210,7 +2211,8 @@ impl From<A5CogError> for extendr_api::Error {
 /// @param src Path or URL string.
 /// @param dest Output Parquet path.
 /// @param resolution A5 resolution (0--30).
-/// @param stats Character vector of stats (subset of mean/sum/count/min/max).
+/// @param stats Character vector of stats (any non-"fractions" subset of the
+///   stats accepted by `a5_read_raster`).
 /// @param bands_idx,bands_names Band selection (see `a5_read_raster_rs`).
 /// @param value_type Storage type for the value column ("float64" | "float32").
 /// @param compression Parquet compression codec ("zstd" | "snappy" | "none").
@@ -2325,8 +2327,10 @@ fn a5_raster_to_parquet_rs(
 ///   `band_names`.
 /// @noRd
 /// @keywords internal
-#[extendr]
-fn a5_sample_at_cells_rs(
+/// Shared argument parsing + sampler invocation for the centroid entry
+/// points (R-list, flat/Arrow, and Parquet outputs).
+#[allow(clippy::too_many_arguments)]
+fn run_sample_at_cells(
     src: &str,
     cells_raw: List,
     bands_idx: Vec<i32>,
@@ -2337,7 +2341,7 @@ fn a5_sample_at_cells_rs(
     dequant_lut: Vec<f64>,
     dequant_min: f64,
     interp: &str,
-) -> Result<Robj> {
+) -> Result<crate::sample::CentroidOutput> {
     if !bands_idx.is_empty() && !bands_names.is_empty() {
         return Err(A5CogError::Invalid(
             "specify bands by index OR by name, not both".into(),
@@ -2352,18 +2356,44 @@ fn a5_sample_at_cells_rs(
 
     let runtime = crate::runtime::shared_runtime()?;
 
-    let out: crate::sample::CentroidOutput =
-        runtime.block_on(crate::sample::sample_at_cells_async(
-            src,
-            cells_in,
-            bands_idx,
-            bands_names,
-            src_nodata_opt,
-            cpu_workers,
-            io_concurrency,
-            dequant,
-            interp_e,
-        ))?;
+    runtime.block_on(crate::sample::sample_at_cells_async(
+        src,
+        cells_in,
+        bands_idx,
+        bands_names,
+        src_nodata_opt,
+        cpu_workers,
+        io_concurrency,
+        dequant,
+        interp_e,
+    ))
+}
+
+#[extendr]
+fn a5_sample_at_cells_rs(
+    src: &str,
+    cells_raw: List,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
+    src_nodata: Vec<f64>,
+    cpu_workers: i32,
+    io_concurrency: i32,
+    dequant_lut: Vec<f64>,
+    dequant_min: f64,
+    interp: &str,
+) -> Result<Robj> {
+    let out = run_sample_at_cells(
+        src,
+        cells_raw,
+        bands_idx,
+        bands_names,
+        src_nodata,
+        cpu_workers,
+        io_concurrency,
+        dequant_lut,
+        dequant_min,
+        interp,
+    )?;
 
     let cell_list = u64s_to_raw8_list(&out.cells);
     let n_cells = out.cells.len();
@@ -2379,6 +2409,108 @@ fn a5_sample_at_cells_rs(
     let bands = List::from_pairs(band_pairs);
     let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
     Ok(list!(cell = cell_list, bands = bands, band_names = band_names).into())
+}
+
+/// Flat-output variant of `a5_sample_at_cells_rs`: same sampler, but the
+/// result mirrors the `a5_read_raster_flat_rs` shape (cell-major flat buffer
+/// under a single pseudo-stat "centroid") so the R-side Arrow assembly is
+/// shared across modes.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_sample_at_cells_flat_rs(
+    src: &str,
+    cells_raw: List,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
+    src_nodata: Vec<f64>,
+    cpu_workers: i32,
+    io_concurrency: i32,
+    dequant_lut: Vec<f64>,
+    dequant_min: f64,
+    interp: &str,
+) -> Result<Robj> {
+    let out = run_sample_at_cells(
+        src,
+        cells_raw,
+        bands_idx,
+        bands_names,
+        src_nodata,
+        cpu_workers,
+        io_concurrency,
+        dequant_lut,
+        dequant_min,
+        interp,
+    )?;
+
+    let cell_list = u64s_to_raw8_list(&out.cells);
+    let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
+    let n_bands = out.n_bands as i32;
+    let value_flat = List::from_pairs(vec![("centroid".to_string(), Robj::from(out.flat))]);
+    Ok(list!(
+        cell = cell_list,
+        value_flat = value_flat,
+        band_names = band_names,
+        stats = "centroid",
+        n_bands = n_bands
+    )
+    .into())
+}
+
+/// Centroid samples straight to Parquet: same sampler as
+/// `a5_sample_at_cells_rs`, with the RecordBatch built from the flat buffer
+/// and written by the Rust `parquet` crate (no R materialisation). The
+/// single pseudo-stat is "centroid", so columns are plain band names
+/// (`as_vector = false`) or a single `value` FixedSizeList.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_sample_to_parquet_rs(
+    src: &str,
+    dest: &str,
+    resolution: i32,
+    cells_raw: List,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
+    src_nodata: Vec<f64>,
+    as_vector: bool,
+    value_type: &str,
+    compression: &str,
+    cpu_workers: i32,
+    io_concurrency: i32,
+    dequant_lut: Vec<f64>,
+    dequant_min: f64,
+    interp: &str,
+) -> Result<String> {
+    let value_type_e = crate::parquet_write::ValueType::parse(value_type)?;
+    let compression_e = crate::parquet_write::CompressionChoice::parse(compression)?;
+    let out = run_sample_at_cells(
+        src,
+        cells_raw,
+        bands_idx,
+        bands_names,
+        src_nodata,
+        cpu_workers,
+        io_concurrency,
+        dequant_lut,
+        dequant_min,
+        interp,
+    )?;
+
+    crate::parquet_write::write_arrow_parquet(
+        dest,
+        out.cells,
+        vec![out.flat],
+        out.n_bands,
+        &out.band_names,
+        &["centroid".to_string()],
+        resolution,
+        value_type_e,
+        compression_e,
+        as_vector,
+    )?;
+
+    Ok(dest.to_string())
 }
 
 /// Compute the WGS84 lon/lat bbox of the raster at `src`, by projecting the
@@ -2508,6 +2640,8 @@ extendr_module! {
     fn a5_read_raster_flat_rs;
     fn a5_raster_to_parquet_rs;
     fn a5_sample_at_cells_rs;
+    fn a5_sample_at_cells_flat_rs;
+    fn a5_sample_to_parquet_rs;
     fn a5_raster_bbox_lonlat_rs;
     fn a5_select_overview_level_rs;
 }

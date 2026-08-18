@@ -6,9 +6,11 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,as_vector,use_overviews See [a5_read_raster()].
-#' @param mode Sampling mode: `"forward"` (default) or `"overlay"`. The
-#'   `"centroid"` mode is only available in [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews See [a5_read_raster()].
+#' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
+#'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
+#'   argument is ignored (one sample per cell) and the table metadata
+#'   records the pseudo-stat `"centroid"`.
 #' @param value_type Storage type for the value column. `"float64"` (default)
 #'   or `"float32"` (halves disk size for embeddings).
 #'
@@ -35,8 +37,9 @@ a5_read_raster_arrow <- function(src,
                                  bands = NULL,
                                  bbox = NULL,
                                  src_nodata = NULL,
-                                 mode = c("forward", "overlay"),
+                                 mode = c("forward", "overlay", "centroid"),
                                  subsamples = NULL,
+                                 interp = c("nearest", "bilinear", "bicubic", "lanczos"),
                                  cpu_workers = NULL,
                                  io_concurrency = NULL,
                                  dequant = NULL,
@@ -51,6 +54,12 @@ a5_read_raster_arrow <- function(src,
   stats <- check_stats(stat)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
+  interp <- rlang::arg_match(interp)
+  if (interp != "nearest" && mode != "centroid") {
+    cli::cli_abort(
+      "{.arg interp} is only used when {.code mode = \"centroid\"}."
+    )
+  }
   cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
                  else check_scalar_count(cpu_workers, "cpu_workers")
   io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
@@ -67,23 +76,41 @@ a5_read_raster_arrow <- function(src,
   warn_dequant_overviews(dequant, use_overviews)
   overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
-  out <- a5_read_raster_flat_rs(
-    src = src,
-    resolution = resolution,
-    stats = stats,
-    bands_idx = band_sel$idx,
-    bands_names = band_sel$names,
-    bbox = bbox_v,
-    src_nodata = src_nodata_v,
-    cpu_workers = cpu_workers,
-    io_concurrency = io_concurrency,
-    overview_target_m = overview_target_m,
-    dequant_lut = dequant_v$lut,
-    dequant_min = dequant_v$min,
-    overlay = identical(mode, "overlay"),
-    subsamples = subsamples_v,
-    cell_edge_m = cell_edge_metres(mode, resolution)
-  )
+  out <- if (mode == "centroid") {
+    warn_centroid_stat(stats)
+    cells_in <- centroid_cells(src, resolution,
+                               if (length(bbox_v)) bbox_v else NULL)
+    a5_sample_at_cells_flat_rs(
+      src = src,
+      cells_raw = vctrs::vec_data(cells_in),
+      bands_idx = band_sel$idx,
+      bands_names = band_sel$names,
+      src_nodata = src_nodata_v,
+      cpu_workers = cpu_workers,
+      io_concurrency = io_concurrency,
+      dequant_lut = dequant_v$lut,
+      dequant_min = dequant_v$min,
+      interp = interp
+    )
+  } else {
+    a5_read_raster_flat_rs(
+      src = src,
+      resolution = resolution,
+      stats = stats,
+      bands_idx = band_sel$idx,
+      bands_names = band_sel$names,
+      bbox = bbox_v,
+      src_nodata = src_nodata_v,
+      cpu_workers = cpu_workers,
+      io_concurrency = io_concurrency,
+      overview_target_m = overview_target_m,
+      dequant_lut = dequant_v$lut,
+      dequant_min = dequant_v$min,
+      overlay = identical(mode, "overlay"),
+      subsamples = subsamples_v,
+      cell_edge_m = cell_edge_metres(mode, resolution)
+    )
+  }
 
   cells <- new_a5_cell_from_rs(out$cell)
   band_names <- as.character(out$band_names)
@@ -147,10 +174,12 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,as_vector,use_overviews See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews See
 #'   [a5_read_raster()].
-#' @param mode Sampling mode: `"forward"` (default) or `"overlay"`. The
-#'   `"centroid"` mode is only available in [a5_read_raster()].
+#' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
+#'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
+#'   argument is ignored (one sample per cell) and the file metadata
+#'   records the pseudo-stat `"centroid"`.
 #' @param dest Output Parquet path.
 #' @param value_type Storage type for the value column. `"float64"`
 #'   (default) or `"float32"` (halves the disk size for embeddings).
@@ -174,8 +203,9 @@ a5_raster_to_parquet <- function(src,
                                  bands = NULL,
                                  bbox = NULL,
                                  src_nodata = NULL,
-                                 mode = c("forward", "overlay"),
+                                 mode = c("forward", "overlay", "centroid"),
                                  subsamples = NULL,
+                                 interp = c("nearest", "bilinear", "bicubic", "lanczos"),
                                  as_vector = FALSE,
                                  value_type = c("float64", "float32"),
                                  compression = c("zstd", "snappy", "none"),
@@ -191,6 +221,12 @@ a5_raster_to_parquet <- function(src,
   stats <- check_stats(stat)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
+  interp <- rlang::arg_match(interp)
+  if (interp != "nearest" && mode != "centroid") {
+    cli::cli_abort(
+      "{.arg interp} is only used when {.code mode = \"centroid\"}."
+    )
+  }
   value_type <- rlang::arg_match(value_type)
   compression <- rlang::arg_match(compression)
   cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
@@ -207,6 +243,29 @@ a5_raster_to_parquet <- function(src,
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
   warn_dequant_overviews(dequant, use_overviews)
   overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
+
+  if (mode == "centroid") {
+    warn_centroid_stat(stats)
+    cells_in <- centroid_cells(src, resolution,
+                               if (length(bbox_v)) bbox_v else NULL)
+    return(invisible(a5_sample_to_parquet_rs(
+      src = src,
+      dest = dest,
+      resolution = resolution,
+      cells_raw = vctrs::vec_data(cells_in),
+      bands_idx = band_sel$idx,
+      bands_names = band_sel$names,
+      src_nodata = src_nodata_v,
+      as_vector = as_vector,
+      value_type = value_type,
+      compression = compression,
+      cpu_workers = cpu_workers,
+      io_concurrency = io_concurrency,
+      dequant_lut = dequant_v$lut,
+      dequant_min = dequant_v$min,
+      interp = interp
+    )))
+  }
 
   invisible(a5_raster_to_parquet_rs(
     src = src,
