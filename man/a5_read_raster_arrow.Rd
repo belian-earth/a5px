@@ -11,8 +11,9 @@ a5_read_raster_arrow(
   bands = NULL,
   bbox = NULL,
   src_nodata = NULL,
-  mode = c("forward", "overlay"),
+  mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
+  interp = c("nearest", "bilinear", "bicubic", "lanczos"),
   cpu_workers = NULL,
   io_concurrency = NULL,
   dequant = NULL,
@@ -22,10 +23,12 @@ a5_read_raster_arrow(
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, as_vector, use_overviews}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, interp, as_vector, use_overviews}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
-\item{mode}{Sampling mode: \code{"forward"} (default) or \code{"overlay"}. The
-\code{"centroid"} mode is only available in \code{\link[=a5_read_raster]{a5_read_raster()}}.}
+\item{mode}{Sampling mode: \code{"forward"} (default), \code{"overlay"}, or
+\code{"centroid"}. See \code{\link[=a5_read_raster]{a5_read_raster()}}. Under \code{"centroid"} the \code{stat}
+argument is ignored (one sample per cell) and the table metadata
+records the pseudo-stat \code{"centroid"}.}
 
 \item{value_type}{Storage type for the value column. \code{"float64"} (default)
 or \code{"float32"} (halves disk size for embeddings).}

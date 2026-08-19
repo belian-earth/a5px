@@ -297,30 +297,8 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
                                  io_concurrency, as_vector, stats,
                                  dequant_v = list(lut = numeric(0), min = 0),
                                  interp = "nearest") {
-  if (length(stats) > 1L || stats[1] != "mean") {
-    cli::cli_warn(
-      "{.code mode = \"centroid\"} returns one sample per cell; the {.arg stat} arg is ignored.",
-      .frequency = "regularly", .frequency_id = "a5px-centroid-stat"
-    )
-  }
-  if (is.null(bbox)) {
-    bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src))
-  }
-  # a5R >= 0.4.0 replaced a5_grid() with a5_polygon_to_cells() (centre-in-polygon
-  # semantics, returns compacted cells). Uncompact to a uniform grid at the
-  # requested resolution so each cell gets one centroid sample.
-  cells <- a5R::a5_uncompact(
-    a5R::a5_polygon_to_cells(
-      wk::rct(bbox[1], bbox[2], bbox[3], bbox[4]),
-      resolution = resolution
-    ),
-    resolution = resolution
-  )
-  if (length(cells) == 0L) {
-    cli::cli_abort(
-      "No A5 cells have centroids within the requested bbox at resolution {resolution}. Use a finer resolution or a larger bbox."
-    )
-  }
+  warn_centroid_stat(stats)
+  cells <- centroid_cells(src, resolution, bbox)
   out <- a5_sample_at_cells_rs(
     src = src,
     cells_raw = vctrs::vec_data(cells),
@@ -346,5 +324,43 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
     tibble::tibble(cell = cells_out, value = value)
   } else {
     tibble::tibble(cell = cells_out, !!!bands)
+  }
+}
+
+#' Enumerate the uniform grid of A5 cells sampled in centroid mode. `bbox`
+#' defaults to the raster's WGS 84 envelope when NULL.
+#' @noRd
+centroid_cells <- function(src, resolution, bbox, call = rlang::caller_env()) {
+  if (is.null(bbox)) {
+    bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src))
+  }
+  # a5R >= 0.4.0 replaced a5_grid() with a5_polygon_to_cells() (centre-in-polygon
+  # semantics, returns compacted cells). Uncompact to a uniform grid at the
+  # requested resolution so each cell gets one centroid sample.
+  cells <- a5R::a5_uncompact(
+    a5R::a5_polygon_to_cells(
+      wk::rct(bbox[1], bbox[2], bbox[3], bbox[4]),
+      resolution = resolution
+    ),
+    resolution = resolution
+  )
+  if (length(cells) == 0L) {
+    cli::cli_abort(
+      "No A5 cells have centroids within the requested bbox at resolution {resolution}. Use a finer resolution or a larger bbox.",
+      call = call
+    )
+  }
+  cells
+}
+
+#' Centroid mode takes one sample per cell, so `stat` is meaningless there;
+#' warn once in a while if the user set it to anything but the default.
+#' @noRd
+warn_centroid_stat <- function(stats) {
+  if (length(stats) > 1L || stats[1] != "mean") {
+    cli::cli_warn(
+      "{.code mode = \"centroid\"} returns one sample per cell; the {.arg stat} arg is ignored.",
+      .frequency = "regularly", .frequency_id = "a5px-centroid-stat"
+    )
   }
 }
