@@ -15,7 +15,7 @@ path = 'document.rs'
 
 [dependencies]
 extendr-api = '0.9.0'
-a5 = '0.7.3'
+a5 = '0.10'
 async-tiff = { version = '0.3', default-features = false, features = ['object_store', 'reqwest', 'tokio'] }
 object_store = { version = '0.13', features = ['aws', 'gcp', 'azure', 'http'] }
 proj4rs = { version = '0.1', default-features = false, features = ['crs-definitions'] }
@@ -29,10 +29,10 @@ bytes = '1'
 ahash = '0.8'
 thiserror = '2'
 url = '2'
-arrow-array = '58'
-arrow-buffer = '58'
-arrow-schema = '58'
-parquet = { version = '58', default-features = false, features = ['arrow', 'zstd', 'snap'] }
+arrow-array = '59'
+arrow-buffer = '59'
+arrow-schema = '59'
+parquet = { version = '59', default-features = false, features = ['arrow', 'zstd', 'snap'] }
 
 [profile.release]
 lto = true

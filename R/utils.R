@@ -171,6 +171,14 @@ check_subsamples <- function(subsamples, mode, call = rlang::caller_env()) {
   s
 }
 
+#' Average A5 cell edge length in metres at `resolution` (a5R >= 0.6.0;
+#' individual edges vary by roughly +/-10%). Shared by the overlay auto-k
+#' rule and the overview target so both mean "cell edge" literally.
+#' @noRd
+a5_edge_metres <- function(resolution) {
+  as.numeric(a5R::a5_cell_edge_length_avg(resolution, units = "m"))
+}
+
 #' A5 cell edge length in metres, passed to Rust for overlay auto-k.
 #' 0 when overlay is off (the value is unused there).
 #' @noRd
@@ -178,7 +186,7 @@ cell_edge_metres <- function(mode, resolution) {
   if (!identical(mode, "overlay")) {
     return(0)
   }
-  sqrt(as.numeric(a5R::a5_cell_area(resolution, units = "m^2")))
+  a5_edge_metres(resolution)
 }
 
 #' Resolve the overview target passed to Rust.
@@ -200,7 +208,7 @@ overview_target_metres <- function(use_overviews, stats, resolution,
   if (!isTRUE(use_overviews) || !identical(stats, "mean")) {
     return(0)
   }
-  sqrt(as.numeric(a5R::a5_cell_area(resolution, units = "m^2")))
+  a5_edge_metres(resolution)
 }
 
 #' Normalise the user-facing `bands` arg into integer indices or character names.

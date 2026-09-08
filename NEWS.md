@@ -1,5 +1,21 @@
 # a5px 0.0.0.9000
 
+* Updated the bundled `a5` Rust crate from 0.7.3 to 0.10.0 and the Arrow /
+  Parquet crates to 59. The a5 point-to-cell projection is faster and the
+  cell cache fast path now converts each pixel to A5's internal spherical
+  frame once, sharing it between the cached pentagon test and the search
+  fallback. On the 12-band Sentinel-2 test COG at resolution 16 the a5
+  indexing sub-stage fell by about 37% and single-worker wall time by
+  about 25%. Cell identifiers and values are unchanged.
+
+* Requires a5R >= 0.6.0. The overlay auto-`subsamples` rule and the
+  overview target now use the true average cell edge length
+  (`a5R::a5_cell_edge_length_avg()`) instead of `sqrt(cell_area)`, which
+  overstates the edge by about 22%. Auto-selected `subsamples` rises by one
+  step in some pixel/cell ratios and overview selection is marginally more
+  conservative; both heuristics now match their documentation literally.
+  Explicit `subsamples` values are unaffected.
+
 * `a5_read_raster_arrow()` and `a5_raster_to_parquet()` gain
   `mode = "centroid"` and the `interp` argument, closing the mode gap with
   `a5_read_raster()`: centroid samples now stream straight into an Arrow

@@ -709,11 +709,13 @@ fn process_tile(
         }
 
         let t = if prof { Some(Instant::now()) } else { None };
-        let lonlat = a5::LonLat::new(lon_deg, lat_deg);
+        // Convert to A5's internal spherical frame once; both the cached
+        // pentagon test and the search fallback consume it directly.
+        let sph = a5_spherical(lon_deg, lat_deg);
         let cell = if let (Some(prev_id), Some(prev_a5)) = (last_cell, last_a5cell.as_ref()) {
-            match a5::core::cell::a5cell_contains_point(prev_a5, lonlat) {
+            match a5::core::cell::a5cell_contains_point(prev_a5, sph) {
                 Ok(d) if d > 0.0 => prev_id,
-                _ => match a5::lonlat_to_cell(lonlat, resolution) {
+                _ => match a5::core::cell::spherical_to_cell(sph, resolution) {
                     Ok(id) => {
                         last_a5cell = a5::core::serialization::deserialize(id).ok();
                         id
@@ -722,7 +724,7 @@ fn process_tile(
                 },
             }
         } else {
-            match a5::lonlat_to_cell(lonlat, resolution) {
+            match a5::core::cell::spherical_to_cell(sph, resolution) {
                 Ok(id) => {
                     last_a5cell = a5::core::serialization::deserialize(id).ok();
                     id
@@ -844,27 +846,37 @@ fn resolve_overlay_k(
     Ok(((2.0 * pmax / p.cell_edge_m).ceil() as usize).clamp(2, 16))
 }
 
-/// Cached lonlat -> cell lookup: try `a5cell_contains_point` against the
+/// Lon/lat in degrees -> A5's internal spherical frame (rotated authalic
+/// sphere). This is the projection `a5::lonlat_to_cell` performs internally;
+/// doing it once per point lets the cached pentagon test and the search
+/// fallback share it. `a5::core::*` paths are `#[doc(hidden)]` upstream but
+/// stable in practice (a5R depends on the same ones).
+#[inline]
+fn a5_spherical(lon_deg: f64, lat_deg: f64) -> a5::coordinate_systems::Spherical {
+    a5::core::coordinate_transforms::from_lon_lat(a5::LonLat::new(lon_deg, lat_deg))
+}
+
+/// Cached point -> cell lookup: try `a5cell_contains_point` against the
 /// previous cell (a single pentagon test) before the full search-based
-/// `lonlat_to_cell`. Same technique as the forward path, shared by the
+/// `spherical_to_cell`. Same technique as the forward path, shared by the
 /// corner and sub-point passes.
 #[inline]
 fn cell_lookup_cached(
-    lonlat: a5::LonLat,
+    sph: a5::coordinate_systems::Spherical,
     resolution: i32,
     last_id: &mut u64,
     last_a5cell: &mut Option<a5::A5Cell>,
 ) -> u64 {
     if let Some(prev) = last_a5cell.as_ref() {
         if *last_id != NO_CELL {
-            if let Ok(d) = a5::core::cell::a5cell_contains_point(prev, lonlat) {
+            if let Ok(d) = a5::core::cell::a5cell_contains_point(prev, sph) {
                 if d > 0.0 {
                     return *last_id;
                 }
             }
         }
     }
-    match a5::lonlat_to_cell(lonlat, resolution) {
+    match a5::core::cell::spherical_to_cell(sph, resolution) {
         Ok(id) => {
             *last_a5cell = a5::core::serialization::deserialize(id).ok();
             *last_id = id;
@@ -957,7 +969,7 @@ fn process_tile_overlay(
             continue;
         }
         corner_cell[i] = cell_lookup_cached(
-            a5::LonLat::new(lon, lat),
+            a5_spherical(lon, lat),
             resolution,
             &mut last_id,
             &mut last_a5cell,
@@ -1094,7 +1106,7 @@ fn process_tile_overlay(
                     continue;
                 }
                 let id = cell_lookup_cached(
-                    a5::LonLat::new(lon, lat),
+                    a5_spherical(lon, lat),
                     resolution,
                     &mut last_id,
                     &mut last_a5cell,
