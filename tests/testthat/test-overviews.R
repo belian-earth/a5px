@@ -9,7 +9,7 @@ ov_tif <- function() {
 # A5 cell edge length (metres) at a resolution, matching the value a5px passes
 # to Rust when use_overviews = TRUE and stat = "mean".
 edge_m <- function(res) {
-  sqrt(as.numeric(a5R::a5_cell_area(res, units = "m^2")))
+  as.numeric(a5R::a5_cell_edge_length_avg(res, units = "m"))
 }
 
 hexset <- function(cells) a5R::a5_u64_to_hex(cells)

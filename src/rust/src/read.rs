@@ -92,7 +92,7 @@ fn print_timers(total: f64) {
 // stat selector
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Stat {
+pub(crate) enum Stat {
     Mean,
     Sum,
     Count,
@@ -264,26 +264,136 @@ fn validate_categorical_dtype(ifd: &async_tiff::ImageFileDirectory) -> Result<()
 // ---------------------------------------------------------------------------
 // per-cell, per-band running accumulator
 
+/// Per-band running accumulator. Three layouts exist so memory scales with
+/// the statistics actually requested: `mean` / `sum` / `count` need only a
+/// weighted sum and a weight (16 B per band per cell), `min` / `max` add
+/// two extremes, and `var` / `sd` add the weighted Welford state. For a
+/// 64-band embedding raster the slim layout is a third of the memory of
+/// the full one, which is what bounds how many cells a read can hold.
+pub(crate) trait AccLayout: Copy + Send + Sync + 'static {
+    fn new() -> Self;
+    fn push(&mut self, v: f64, w: f64);
+    fn merge(&mut self, other: &Self);
+    fn finalise(&self, stat: Stat) -> f64;
+}
+
+/// Which accumulator layout a stat set needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    Sum,
+    Range,
+    Full,
+}
+
+fn layout_for(stats: &[Stat]) -> Layout {
+    if stats.iter().any(|s| matches!(s, Stat::Var | Stat::Sd)) {
+        Layout::Full
+    } else if stats.iter().any(|s| matches!(s, Stat::Min | Stat::Max)) {
+        Layout::Range
+    } else {
+        Layout::Sum
+    }
+}
+
+/// Weighted sum Σ w·v and total weight Σ w. Under forward/centroid sampling
+/// every weight is 1.0, so `sum` is the plain sum and `sum_w` the pixel
+/// count; under overlay sampling the weights are pixel-cell overlap
+/// fractions, making Sum mass-preserving and Count the effective
+/// (fractional) source-pixel count.
 #[derive(Clone, Copy, Debug)]
-struct Accum {
-    /// Weighted sum Σ w·v. Under forward/centroid sampling every weight is
-    /// 1.0, so this is the plain sum; under overlay sampling the weights are
-    /// pixel-cell overlap fractions, making Sum mass-preserving.
+pub(crate) struct AccSum {
     sum: f64,
-    /// Total weight Σ w. Equals the pixel count when weights are 1.0;
-    /// the effective (fractional) source-pixel count under overlay.
+    sum_w: f64,
+}
+
+impl AccLayout for AccSum {
+    #[inline]
+    fn new() -> Self {
+        Self { sum: 0.0, sum_w: 0.0 }
+    }
+    #[inline]
+    fn push(&mut self, v: f64, w: f64) {
+        if w <= 0.0 {
+            return;
+        }
+        self.sum += w * v;
+        self.sum_w += w;
+    }
+    #[inline]
+    fn merge(&mut self, other: &Self) {
+        self.sum += other.sum;
+        self.sum_w += other.sum_w;
+    }
+    #[inline]
+    fn finalise(&self, stat: Stat) -> f64 {
+        finalise_sum(self.sum, self.sum_w, stat)
+    }
+}
+
+/// `AccSum` plus presence-based min / max (any positive overlap counts fully).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AccRange {
+    sum: f64,
     sum_w: f64,
     min: f64,
     max: f64,
-    // Weighted Welford (West 1979) running mean and sum-of-squared-
-    // deviations, used for var / sd. Mean is also derivable as sum/sum_w; we
-    // keep mean_w purely so the M2 update stays numerically stable when
-    // combining workers.
+}
+
+impl AccLayout for AccRange {
+    #[inline]
+    fn new() -> Self {
+        Self { sum: 0.0, sum_w: 0.0, min: f64::INFINITY, max: f64::NEG_INFINITY }
+    }
+    #[inline]
+    fn push(&mut self, v: f64, w: f64) {
+        if w <= 0.0 {
+            return;
+        }
+        self.sum += w * v;
+        self.sum_w += w;
+        if v < self.min {
+            self.min = v;
+        }
+        if v > self.max {
+            self.max = v;
+        }
+    }
+    #[inline]
+    fn merge(&mut self, other: &Self) {
+        self.sum += other.sum;
+        self.sum_w += other.sum_w;
+        if other.min < self.min {
+            self.min = other.min;
+        }
+        if other.max > self.max {
+            self.max = other.max;
+        }
+    }
+    #[inline]
+    fn finalise(&self, stat: Stat) -> f64 {
+        match stat {
+            Stat::Min => if self.sum_w == 0.0 { f64::NAN } else { self.min },
+            Stat::Max => if self.sum_w == 0.0 { f64::NAN } else { self.max },
+            _ => finalise_sum(self.sum, self.sum_w, stat),
+        }
+    }
+}
+
+/// `AccRange` plus weighted Welford (West 1979) running mean and sum of
+/// squared deviations for var / sd. The mean is also derivable as
+/// sum / sum_w; `mean_w` is kept so the M2 update stays numerically stable
+/// when combining workers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AccFull {
+    sum: f64,
+    sum_w: f64,
+    min: f64,
+    max: f64,
     mean_w: f64,
     m2: f64,
 }
 
-impl Accum {
+impl AccLayout for AccFull {
     #[inline]
     fn new() -> Self {
         Self {
@@ -302,14 +412,12 @@ impl Accum {
         }
         self.sum += w * v;
         self.sum_w += w;
-        // min/max are presence-based: any positive overlap counts fully
         if v < self.min {
             self.min = v;
         }
         if v > self.max {
             self.max = v;
         }
-        // weighted Welford
         let delta = v - self.mean_w;
         self.mean_w += (w / self.sum_w) * delta;
         self.m2 += w * delta * (v - self.mean_w);
@@ -342,50 +450,30 @@ impl Accum {
     #[inline]
     fn finalise(&self, stat: Stat) -> f64 {
         match stat {
-            Stat::Mean => {
-                if self.sum_w == 0.0 {
-                    f64::NAN
-                } else {
-                    self.sum / self.sum_w
-                }
-            }
-            Stat::Sum => self.sum,
-            Stat::Count => self.sum_w,
-            Stat::Min => {
-                if self.sum_w == 0.0 {
-                    f64::NAN
-                } else {
-                    self.min
-                }
-            }
-            Stat::Max => {
-                if self.sum_w == 0.0 {
-                    f64::NAN
-                } else {
-                    self.max
-                }
-            }
+            Stat::Min => if self.sum_w == 0.0 { f64::NAN } else { self.min },
+            Stat::Max => if self.sum_w == 0.0 { f64::NAN } else { self.max },
             // Sample variance / stdev with frequency weights: divisor
             // Σw - 1, matching R's var() / sd() when all weights are 1.
             // Cells with effective sample size <= 1 yield NaN.
-            Stat::Var => {
-                if self.sum_w <= 1.0 {
-                    f64::NAN
-                } else {
-                    self.m2 / (self.sum_w - 1.0)
-                }
-            }
+            Stat::Var => if self.sum_w <= 1.0 { f64::NAN } else { self.m2 / (self.sum_w - 1.0) },
             Stat::Sd => {
-                if self.sum_w <= 1.0 {
-                    f64::NAN
-                } else {
-                    (self.m2 / (self.sum_w - 1.0)).sqrt()
-                }
+                if self.sum_w <= 1.0 { f64::NAN } else { (self.m2 / (self.sum_w - 1.0)).sqrt() }
             }
-            // majority is finalised from the class-weight map, not this
-            // accumulator; the output stage never routes it here
-            Stat::Majority => f64::NAN,
+            _ => finalise_sum(self.sum, self.sum_w, stat),
         }
+    }
+}
+
+/// Stats derivable from the weighted sum alone. Stats a layout does not
+/// carry are never requested for it (`layout_for` guarantees that), so they
+/// finalise to NaN rather than a wrong number.
+#[inline]
+fn finalise_sum(sum: f64, sum_w: f64, stat: Stat) -> f64 {
+    match stat {
+        Stat::Mean => if sum_w == 0.0 { f64::NAN } else { sum / sum_w },
+        Stat::Sum => sum,
+        Stat::Count => sum_w,
+        _ => f64::NAN,
     }
 }
 
@@ -447,16 +535,16 @@ fn finalise_majority(m: &ClassWeights) -> f64 {
 /// maps, one per selected band, allocated only for what the requested stats
 /// actually need.
 #[derive(Clone)]
-struct CellAcc {
-    cont: Vec<Accum>,
+struct CellAcc<L: AccLayout> {
+    cont: Vec<L>,
     cat: Vec<ClassWeights>,
 }
 
-impl CellAcc {
+impl<L: AccLayout> CellAcc<L> {
     fn new(n_out: usize, cfg: AccCfg) -> Self {
         Self {
             cont: if cfg.has_cont {
-                vec![Accum::new(); n_out]
+                vec![L::new(); n_out]
             } else {
                 Vec::new()
             },
@@ -484,6 +572,41 @@ impl CellAcc {
 // ---------------------------------------------------------------------------
 // src parsing
 
+
+/// Project a batch point by point, mapping per-point failures to NaN so a
+/// single unprojectable coordinate (a bbox corner outside a LAEA disc, a
+/// pixel beyond an orthographic horizon) does not abort the whole read.
+/// Every consumer already skips non-finite coordinates. Projection-level
+/// failures (no inverse / forward defined) still propagate.
+pub(crate) fn proj_points(src: &Proj, dst: &Proj, points: &mut [(f64, f64, f64)]) -> Result<()> {
+    use proj4rs::errors::Error as PE;
+    for p in points.iter_mut() {
+        match proj_transform(src, dst, p) {
+            Ok(()) => {}
+            Err(PE::NoInverseProjectionDefined) | Err(PE::NoForwardProjectionDefined) => {
+                return Err(A5CogError::Proj(format!(
+                    "projection has no inverse/forward transform: {}",
+                    src.projname()
+                )));
+            }
+            Err(_) => *p = (f64::NAN, f64::NAN, 0.0),
+        }
+    }
+    Ok(())
+}
+
+/// Pixels are compared to nodata after widening to f64, so a Float32 source
+/// whose nodata is not exactly representable in f32 (`-9999.9`) would never
+/// match unless the sentinel is rounded through f32 the same way.
+pub(crate) fn nodata_in_source_precision(
+    ifd: &async_tiff::ImageFileDirectory,
+    nodata: Option<f64>,
+) -> Option<f64> {
+    match crate::band_fetch::derive_data_type(ifd) {
+        Some(async_tiff::DataType::Float32) => nodata.map(|v| v as f32 as f64),
+        _ => nodata,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // pixel sampling helpers — band-major access into the decoded tile
@@ -518,7 +641,7 @@ fn read_pixel_chunky(data: &TypedArray, idx: usize) -> f64 {
 // per-tile processor
 
 #[allow(clippy::too_many_arguments)]
-fn process_tile(
+fn process_tile<L: AccLayout>(
     tx: usize,
     ty: usize,
     data: TypedArray,
@@ -539,7 +662,7 @@ fn process_tile(
     dequant: Option<&DequantLut>,
     mask: Option<&CellMask>,
     cfg: AccCfg,
-) -> Result<AHashMap<u64, CellAcc>> {
+) -> Result<AHashMap<u64, CellAcc<L>>> {
     let n_out = data_band_offsets.len();
     let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
     let actual_h = tile_h.min(height.saturating_sub(ty * tile_h));
@@ -553,33 +676,7 @@ fn process_tile(
     let prof = profile_enabled();
     let mut mask_cache = MaskCache::new();
 
-    // build per-pixel projected coords, transform en-masse
     let n = actual_w * actual_h;
-    let t_pts = Instant::now();
-    let mut points: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
-    for r in 0..actual_h {
-        let row_g = ty * tile_h + r;
-        for c in 0..actual_w {
-            let col_g = tx * tile_w + c;
-            let (mut x, mut y) = gt.pixel_centre(col_g, row_g);
-            if src_is_latlong {
-                x = x.to_radians();
-                y = y.to_radians();
-            }
-            points.push((x, y, 0.0));
-        }
-    }
-    if prof {
-        T_BUILD_PTS_NS.fetch_add(t_pts.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-
-    let t_proj = Instant::now();
-    proj_transform(src_proj, dst_proj, &mut points[..])?;
-    if prof {
-        T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-
-    let mut local: AHashMap<u64, CellAcc> = AHashMap::with_capacity(n / 4);
 
     // shape interpretation
     // chunky: shape = [tile_h, tile_w, n_bands]
@@ -602,6 +699,65 @@ fn process_tile(
     };
     let _ = shape; // shape is implied by tile_w/tile_h/data_n_bands
 
+    // Build the pixel-centre list to project. With a nodata sentinel, only
+    // pixels with at least one valid band are projected (projection is the
+    // second-largest per-tile cost after a5 indexing, and all-nodata pixels
+    // would be dropped after it anyway); `pix_idx` maps each projected point
+    // back to its tile pixel. Without nodata every pixel is valid and the
+    // point index is the pixel index.
+    let t_pts = Instant::now();
+    let mut points: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
+    let mut pix_idx: Vec<u32> = Vec::new();
+    if let Some(nd) = nodata {
+        pix_idx.reserve(n);
+        for r in 0..actual_h {
+            let row_g = ty * tile_h + r;
+            for c in 0..actual_w {
+                let pixel_base = r * h_stride + c * w_stride;
+                let any_valid = data_band_offsets
+                    .iter()
+                    .any(|&src_b| !is_nodata(read_pixel_chunky(&data, pixel_base + src_b * b_stride), nd));
+                if !any_valid {
+                    continue;
+                }
+                let col_g = tx * tile_w + c;
+                let (mut x, mut y) = gt.pixel_centre(col_g, row_g);
+                if src_is_latlong {
+                    x = x.to_radians();
+                    y = y.to_radians();
+                }
+                points.push((x, y, 0.0));
+                pix_idx.push((r * actual_w + c) as u32);
+            }
+        }
+    } else {
+        for r in 0..actual_h {
+            let row_g = ty * tile_h + r;
+            for c in 0..actual_w {
+                let col_g = tx * tile_w + c;
+                let (mut x, mut y) = gt.pixel_centre(col_g, row_g);
+                if src_is_latlong {
+                    x = x.to_radians();
+                    y = y.to_radians();
+                }
+                points.push((x, y, 0.0));
+            }
+        }
+    }
+    if prof {
+        T_BUILD_PTS_NS.fetch_add(t_pts.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    let t_proj = Instant::now();
+    proj_points(src_proj, dst_proj, &mut points[..])?;
+    if prof {
+        T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    // Capacity is a guess; tiles at coarse resolutions touch a handful of
+    // cells and a huge pre-allocation per tile was pure memset.
+    let mut local: AHashMap<u64, CellAcc<L>> = AHashMap::with_capacity((n / 64).clamp(16, 65_536));
+
     // small stack buffer reused per pixel to hold per-selected-band values + validity
     let mut band_vals: Vec<f64> = vec![0.0; n_out];
     let mut band_valid: Vec<bool> = vec![false; n_out];
@@ -616,7 +772,7 @@ fn process_tile(
     // a pixel can pass the lookup yet be dropped by the AOI mask, and the
     // lookup cache must still advance to its cell.
     let mut last_entry_cell: u64 = NO_CELL;
-    let mut last_entry_ptr: *mut CellAcc = std::ptr::null_mut();
+    let mut last_entry_ptr: *mut CellAcc<L> = std::ptr::null_mut();
     // hoist nodata branch out of the per-pixel loop
     let nodata_v = nodata;
 
@@ -627,9 +783,11 @@ fn process_tile(
     let mut sub_push: u64 = 0;
 
     let t_idx = Instant::now();
+    let has_pix_idx = !pix_idx.is_empty() || nodata.is_some();
     for (idx, &(lon_o, lat_o, _)) in points.iter().enumerate() {
-        let r = idx / actual_w;
-        let c = idx % actual_w;
+        let pidx = if has_pix_idx { pix_idx[idx] as usize } else { idx };
+        let r = pidx / actual_w;
+        let c = pidx % actual_w;
 
         // gather pixel values + validity first; skip pixel entirely if all-nodata
         let pixel_base = r * h_stride + c * w_stride;
@@ -714,14 +872,14 @@ fn process_tile(
         // map). Every path that touches the map resets the pointer, so it is
         // only reused across consecutive same-cell hits with no interleaved
         // mutation, and the address stays valid.
-        let entry: &mut CellAcc = if last_entry_cell == cell && !last_entry_ptr.is_null() {
+        let entry: &mut CellAcc<L> = if last_entry_cell == cell && !last_entry_ptr.is_null() {
             unsafe { &mut *last_entry_ptr }
         } else {
             let v = local
                 .entry(cell)
-                .or_insert_with(|| CellAcc::new(n_out, cfg));
+                .or_insert_with(|| CellAcc::<L>::new(n_out, cfg));
             last_entry_cell = cell;
-            last_entry_ptr = v as *mut CellAcc;
+            last_entry_ptr = v as *mut CellAcc<L>;
             v
         };
         if let Some(t0) = t { sub_hm += t0.elapsed().as_nanos() as u64; }
@@ -872,7 +1030,7 @@ fn cell_lookup_cached(
 /// the k² sub-point cost, and their sub-points are generated in the source
 /// CRS, where the pixel grid is exactly affine, then batch-projected.
 #[allow(clippy::too_many_arguments)]
-fn process_tile_overlay(
+fn process_tile_overlay<L: AccLayout>(
     tx: usize,
     ty: usize,
     data: TypedArray,
@@ -893,7 +1051,7 @@ fn process_tile_overlay(
     mask: Option<&CellMask>,
     k: usize,
     cfg: AccCfg,
-) -> Result<AHashMap<u64, CellAcc>> {
+) -> Result<AHashMap<u64, CellAcc<L>>> {
     let mut mask_cache = MaskCache::new();
     let n_out = data_band_offsets.len();
     let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
@@ -927,7 +1085,7 @@ fn process_tile_overlay(
         T_BUILD_PTS_NS.fetch_add(t_pts.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     let t_proj = Instant::now();
-    proj_transform(src_proj, dst_proj, &mut corners[..])?;
+    proj_points(src_proj, dst_proj, &mut corners[..])?;
     if prof {
         T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -965,14 +1123,14 @@ fn process_tile_overlay(
     };
 
     let n = actual_w * actual_h;
-    let mut local: AHashMap<u64, CellAcc> = AHashMap::with_capacity(n / 4);
+    let mut local: AHashMap<u64, CellAcc<L>> = AHashMap::with_capacity((n / 64).clamp(16, 65_536));
     let mut band_vals: Vec<f64> = vec![0.0; n_out];
     let mut band_valid: Vec<bool> = vec![false; n_out];
     // cell-entry cache (same SAFETY argument as the forward path: the pointer
     // is only dereferenced when the cell id repeats with no interleaved map
     // mutation, because any new cell resets it)
     let mut last_entry_cell: u64 = NO_CELL;
-    let mut last_entry_ptr: *mut CellAcc = std::ptr::null_mut();
+    let mut last_entry_ptr: *mut CellAcc<L> = std::ptr::null_mut();
 
     let in_bbox = |lon: f64, lat: f64| -> bool {
         match bbox_lonlat {
@@ -1011,16 +1169,16 @@ fn process_tile_overlay(
                 if !mask_cache.allows(mask, cell, resolution) {
                     continue;
                 }
-                let entry: &mut CellAcc = if last_entry_cell == cell
+                let entry: &mut CellAcc<L> = if last_entry_cell == cell
                     && !last_entry_ptr.is_null()
                 {
                     unsafe { &mut *last_entry_ptr }
                 } else {
                     let v = local
                         .entry(cell)
-                        .or_insert_with(|| CellAcc::new(n_out, cfg));
+                        .or_insert_with(|| CellAcc::<L>::new(n_out, cfg));
                     last_entry_cell = cell;
-                    last_entry_ptr = v as *mut CellAcc;
+                    last_entry_ptr = v as *mut CellAcc<L>;
                     v
                 };
                 for b in 0..n_out {
@@ -1065,7 +1223,7 @@ fn process_tile_overlay(
             }
         }
         let t_proj = Instant::now();
-        proj_transform(src_proj, dst_proj, &mut pts[..])?;
+        proj_points(src_proj, dst_proj, &mut pts[..])?;
         if prof {
             T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
@@ -1103,16 +1261,16 @@ fn process_tile_overlay(
                     continue;
                 }
                 let wgt = cnt as f64 * w_sub;
-                let entry: &mut CellAcc = if last_entry_cell == cell
+                let entry: &mut CellAcc<L> = if last_entry_cell == cell
                     && !last_entry_ptr.is_null()
                 {
                     unsafe { &mut *last_entry_ptr }
                 } else {
                     let v = local
                         .entry(cell)
-                        .or_insert_with(|| CellAcc::new(n_out, cfg));
+                        .or_insert_with(|| CellAcc::<L>::new(n_out, cfg));
                     last_entry_cell = cell;
-                    last_entry_ptr = v as *mut CellAcc;
+                    last_entry_ptr = v as *mut CellAcc<L>;
                     v
                 };
                 for b in 0..n_out {
@@ -1159,6 +1317,88 @@ pub(crate) enum TilePayload {
 
 #[allow(clippy::too_many_arguments)]
 async fn read_raster_async(
+
+    src: &str,
+    store_opts: StoreOpts,
+    resolution: i32,
+    stats: Vec<Stat>,
+    bands_idx: Vec<i32>,
+    bands_names: Vec<String>,
+    bbox_lonlat: Option<[f64; 4]>,
+    src_nodata_override: Option<f64>,
+    cpu_workers: usize,
+    io_concurrency: usize,
+    overview_target_m: f64,
+    dequant: Option<Arc<DequantLut>>,
+    overlay: Option<OverlayParams>,
+    fractions: bool,
+    bbox_align_block: bool,
+    tile_bbox: Option<[f64; 4]>,
+    mask: Option<Arc<CellMask>>,
+) -> Result<Output> {
+    match layout_for(&stats) {
+        Layout::Sum => read_raster_async_impl::<AccSum>(
+            src,
+            store_opts,
+            resolution,
+            stats,
+            bands_idx,
+            bands_names,
+            bbox_lonlat,
+            src_nodata_override,
+            cpu_workers,
+            io_concurrency,
+            overview_target_m,
+            dequant,
+            overlay,
+            fractions,
+            bbox_align_block,
+            tile_bbox,
+            mask,
+        ).await,
+        Layout::Range => read_raster_async_impl::<AccRange>(
+            src,
+            store_opts,
+            resolution,
+            stats,
+            bands_idx,
+            bands_names,
+            bbox_lonlat,
+            src_nodata_override,
+            cpu_workers,
+            io_concurrency,
+            overview_target_m,
+            dequant,
+            overlay,
+            fractions,
+            bbox_align_block,
+            tile_bbox,
+            mask,
+        ).await,
+        Layout::Full => read_raster_async_impl::<AccFull>(
+            src,
+            store_opts,
+            resolution,
+            stats,
+            bands_idx,
+            bands_names,
+            bbox_lonlat,
+            src_nodata_override,
+            cpu_workers,
+            io_concurrency,
+            overview_target_m,
+            dequant,
+            overlay,
+            fractions,
+            bbox_align_block,
+            tile_bbox,
+            mask,
+        ).await,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_raster_async_impl<L: AccLayout>(
     src: &str,
     store_opts: StoreOpts,
     resolution: i32,
@@ -1328,7 +1568,7 @@ async fn read_raster_async(
         .collect();
 
     // override nodata if user specified it; otherwise use what async-tiff exposed
-    let nodata = src_nodata_override.or(nodata);
+    let nodata = nodata_in_source_precision(&ifd0, src_nodata_override.or(nodata));
 
     // Bbox-driven tile filter. For most projections the bbox of 4 corners +
     // 4 edge midpoints (re-projected to the raster CRS) is a sufficient
@@ -1374,8 +1614,11 @@ async fn read_raster_async(
     let bbox_pixel_filter: Option<[f64; 4]> = if bbox_align_block { None } else { bbox_lonlat };
 
     // decide once whether the band-aware fetch path applies
+    // The band-subset path concatenates raw tile bytes without byte
+    // swapping, so it is only valid when the file's byte order is native.
     let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
         && n_out < n_bands
+        && endianness.is_native()
         && matches!(
             ifd_owned.predictor(),
             None | Some(async_tiff::tags::Predictor::None)
@@ -1404,7 +1647,7 @@ async fn read_raster_async(
 
     // Spawn consumer workers up-front so they're ready as soon as the
     // producer starts pushing. Each runs on the tokio blocking pool.
-    let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<AHashMap<u64, CellAcc>>>> =
+    let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<AHashMap<u64, CellAcc<L>>>>> =
         Vec::with_capacity(cpu_workers);
     for _ in 0..cpu_workers {
         let rx = rx_chan.clone();
@@ -1419,7 +1662,7 @@ async fn read_raster_async(
         let dequant_c = dequant.clone();
         let mask_c = mask.clone();
         consumer_handles.push(tokio::task::spawn_blocking(move || {
-            let mut local: AHashMap<u64, CellAcc> = AHashMap::new();
+            let mut local: AHashMap<u64, CellAcc<L>> = AHashMap::new();
             let prof = profile_enabled();
             while let Ok(item) = rx.recv_blocking() {
                 let (data, shape, data_n_bands_eff, offsets_arc): (
@@ -1451,7 +1694,7 @@ async fn read_raster_async(
                     }
                 };
                 let tile_local = if let Some(k) = overlay_k {
-                    process_tile_overlay(
+                    process_tile_overlay::<L>(
                         item.tx,
                         item.ty,
                         data,
@@ -1474,7 +1717,7 @@ async fn read_raster_async(
                         cfg,
                     )?
                 } else {
-                    process_tile(
+                    process_tile::<L>(
                         item.tx,
                         item.ty,
                         data,
@@ -1509,7 +1752,7 @@ async fn read_raster_async(
                     T_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
             }
-            Ok::<AHashMap<u64, CellAcc>, A5CogError>(local)
+            Ok::<AHashMap<u64, CellAcc<L>>, A5CogError>(local)
         }));
     }
     // Consumers each hold their own rx clone; drop the outer one so the
@@ -1582,7 +1825,7 @@ async fn read_raster_async(
     // Drain consumers and tree-reduce. Collect all results first (rather
     // than short-circuit on the first Err) so a panic / error in worker N
     // doesn't detach workers N+1.. while they're still running.
-    let mut consumer_results: Vec<Result<AHashMap<u64, CellAcc>>> =
+    let mut consumer_results: Vec<Result<AHashMap<u64, CellAcc<L>>>> =
         Vec::with_capacity(cpu_workers);
     for h in consumer_handles {
         match h.await {
@@ -1592,7 +1835,7 @@ async fn read_raster_async(
             )))),
         }
     }
-    let mut map: AHashMap<u64, CellAcc> = AHashMap::new();
+    let mut map: AHashMap<u64, CellAcc<L>> = AHashMap::new();
     for r in consumer_results {
         let m = r?;
         if map.is_empty() {
@@ -1851,9 +2094,13 @@ fn derive_level_geotransform(
     ])
 }
 
-/// Keep the tiles whose origin pixel centre (top-left pixel of the tile)
-/// projects into `bbox_lonlat`, half-open on the max edges so a partition of
-/// bboxes sharing edges assigns each tile to exactly one member.
+/// Keep the tiles whose representative point projects into `bbox_lonlat`,
+/// half-open on the max edges so a partition of bboxes sharing edges
+/// assigns each tile to exactly one member. The representative is the
+/// origin pixel centre (top-left pixel of the tile); when that point is
+/// outside the projection's domain (a corner tile of a LAEA raster padded
+/// beyond the disc) the tile centre and then the far corner are tried, so
+/// a tile with any projectable content still has a deterministic owner.
 fn filter_tiles_by_origin(
     tiles: &[(usize, usize)],
     bbox_lonlat: [f64; 4],
@@ -1863,40 +2110,59 @@ fn filter_tiles_by_origin(
     tile_w: usize,
     tile_h: usize,
 ) -> Result<Vec<(usize, usize)>> {
-    let mut points: Vec<(f64, f64, f64)> = tiles
-        .iter()
-        .map(|&(tx, ty)| {
-            let c = (tx * tile_w) as f64 + 0.5;
-            let r = (ty * tile_h) as f64 + 0.5;
+    const CANDIDATES: usize = 3;
+    let mut points: Vec<(f64, f64, f64)> = Vec::with_capacity(tiles.len() * CANDIDATES);
+    for &(tx, ty) in tiles {
+        let c0 = (tx * tile_w) as f64;
+        let r0 = (ty * tile_h) as f64;
+        let cands = [
+            (c0 + 0.5, r0 + 0.5),
+            (c0 + tile_w as f64 * 0.5, r0 + tile_h as f64 * 0.5),
+            (c0 + tile_w as f64 - 0.5, r0 + tile_h as f64 - 0.5),
+        ];
+        for (c, r) in cands {
             let x = gt.0[0] + c * gt.0[1] + r * gt.0[2];
             let y = gt.0[3] + c * gt.0[4] + r * gt.0[5];
-            (x, y, 0.0)
-        })
-        .collect();
+            points.push((x, y, 0.0));
+        }
+    }
     if src_proj.is_latlong() {
         for p in &mut points {
             p.0 = p.0.to_radians();
             p.1 = p.1.to_radians();
         }
     }
-    proj_transform(src_proj, dst_proj, &mut points[..])?;
+    proj_points(src_proj, dst_proj, &mut points[..])?;
     let dst_is_latlong = dst_proj.is_latlong();
     let [xmin, ymin, xmax, ymax] = bbox_lonlat;
     Ok(tiles
         .iter()
-        .zip(points.iter())
-        .filter_map(|(&t, &(x, y, _))| {
-            let lon = if dst_is_latlong { x.to_degrees() } else { x };
-            let lat = if dst_is_latlong { y.to_degrees() } else { y };
-            let inside = lon.is_finite()
-                && lat.is_finite()
-                && lon >= xmin
-                && lon < xmax
-                && lat >= ymin
-                && lat < ymax;
+        .enumerate()
+        .filter_map(|(k, &t)| {
+            let rep = points[k * CANDIDATES..(k + 1) * CANDIDATES]
+                .iter()
+                .find(|&&(x, y, _)| x.is_finite() && y.is_finite())?;
+            let lon = if dst_is_latlong { rep.0.to_degrees() } else { rep.0 };
+            let lat = if dst_is_latlong { rep.1.to_degrees() } else { rep.1 };
+            let inside = lon >= xmin && lon < xmax && lat >= ymin && lat < ymax;
             if inside { Some(t) } else { None }
         })
         .collect())
+}
+
+/// Points along the boundary of an axis-aligned rectangle: the 4 corners
+/// plus `EDGE_SAMPLES - 1` interior samples per edge.
+fn rect_edge_samples(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(f64, f64)> {
+    const EDGE_SAMPLES: usize = 32;
+    let mut v = Vec::with_capacity(4 * EDGE_SAMPLES);
+    for i in 0..EDGE_SAMPLES {
+        let t = i as f64 / EDGE_SAMPLES as f64;
+        v.push((x0 + t * (x1 - x0), y0)); // bottom, left -> right
+        v.push((x1, y0 + t * (y1 - y0))); // right, bottom -> top
+        v.push((x1 - t * (x1 - x0), y1)); // top, right -> left
+        v.push((x0, y1 - t * (y1 - y0))); // left, top -> bottom
+    }
+    v
 }
 
 /// Reproject a WGS84 lon/lat bbox into the raster CRS, take the axis-aligned
@@ -1921,20 +2187,14 @@ fn projected_tile_range(
             "bbox must satisfy xmin<xmax & ymin<ymax; got [{xmin_ll}, {ymin_ll}, {xmax_ll}, {ymax_ll}]"
         )));
     }
-    let xmid = (xmin_ll + xmax_ll) * 0.5;
-    let ymid = (ymin_ll + ymax_ll) * 0.5;
-    // 4 corners + 4 edge midpoints. Curved projections rarely bulge enough
-    // for this to miss; per-pixel filter inside `process_tile` is the exact one.
-    let mut points: Vec<(f64, f64, f64)> = vec![
-        (xmin_ll, ymin_ll, 0.0),
-        (xmax_ll, ymin_ll, 0.0),
-        (xmin_ll, ymax_ll, 0.0),
-        (xmax_ll, ymax_ll, 0.0),
-        (xmid, ymin_ll, 0.0),
-        (xmid, ymax_ll, 0.0),
-        (xmin_ll, ymid, 0.0),
-        (xmax_ll, ymid, 0.0),
-    ];
+    // Densely sampled rectangle boundary: the projected edges are curves and
+    // their extreme point is not always a corner or midpoint. Points that
+    // fail to project (outside the CRS domain) become NaN and are skipped;
+    // the per-pixel filter inside `process_tile` is the exact one.
+    let mut points: Vec<(f64, f64, f64)> = rect_edge_samples(xmin_ll, ymin_ll, xmax_ll, ymax_ll)
+        .into_iter()
+        .map(|(x, y)| (x, y, 0.0))
+        .collect();
     // dst_proj is +proj=longlat +datum=WGS84; latlong needs radians
     let dst_is_latlong = dst_proj.is_latlong();
     if dst_is_latlong {
@@ -1944,7 +2204,7 @@ fn projected_tile_range(
         }
     }
     // forward direction: WGS84 (dst) -> raster CRS (src)
-    proj_transform(dst_proj, src_proj, &mut points[..])?;
+    proj_points(dst_proj, src_proj, &mut points[..])?;
     if src_proj.is_latlong() {
         for p in &mut points {
             p.0 = p.0.to_degrees();
@@ -2642,13 +2902,9 @@ fn footprint_lonlat(
 ) -> Result<[f64; 4]> {
     let w = w as f64;
     let h = h as f64;
-    let pts_px = [
-        (0.0, 0.0), (w, 0.0), (0.0, h), (w, h),
-        (w * 0.5, 0.0), (w * 0.5, h), (0.0, h * 0.5), (w, h * 0.5),
-    ];
-    let mut points: Vec<(f64, f64, f64)> = pts_px
-        .iter()
-        .map(|&(c, r)| {
+    let mut points: Vec<(f64, f64, f64)> = rect_edge_samples(0.0, 0.0, w, h)
+        .into_iter()
+        .map(|(c, r)| {
             let x = gt.0[0] + c * gt.0[1] + r * gt.0[2];
             let y = gt.0[3] + c * gt.0[4] + r * gt.0[5];
             (x, y, 0.0)
@@ -2660,7 +2916,7 @@ fn footprint_lonlat(
             p.1 = p.1.to_radians();
         }
     }
-    proj_transform(src_proj, dst_proj, &mut points[..])?;
+    proj_points(src_proj, dst_proj, &mut points[..])?;
     if dst_proj.is_latlong() {
         for p in &mut points {
             p.0 = p.0.to_degrees();

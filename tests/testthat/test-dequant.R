@@ -17,7 +17,7 @@ aef_decode <- function(x) {
 hexset <- function(cells) a5R::a5_u64_to_hex(cells)
 
 edge_m <- function(res) {
-  sqrt(as.numeric(a5R::a5_cell_area(res, units = "m^2")))
+  as.numeric(a5R::a5_cell_edge_length_avg(res, units = "m"))
 }
 
 # join two reads on the cell key and return aligned data.frames

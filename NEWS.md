@@ -2,6 +2,46 @@
 
 First minor release.
 
+* Fixed: band subsets of big-endian (`MM`) planar TIFFs were decoded
+  without byte swapping and returned garbage; such files now take the
+  full-tile fetch path.
+
+* Fixed: a float32 nodata value not exactly representable in single
+  precision (for example a literal `-9999.9` tag) never matched, so nodata
+  pixels were counted as valid. The sentinel is now rounded through f32
+  when the source is float32, for tag values and `src_nodata` alike.
+
+* Fixed: any coordinate that failed to project aborted the whole read
+  (`bbox = c(-180, -90, 180, 90)` on a LAEA raster errored with a
+  tolerance message). Points are now projected individually and
+  unprojectable ones dropped, in the bbox and tile filters, the pixel
+  loops and the footprint envelope. Envelopes also sample 32 points per
+  rectangle edge instead of corners and midpoints, so curved projected
+  edges no longer clip the reported `bbox` or the tile selection.
+
+* Fixed: bicubic and lanczos centroid sampling renormalised partial
+  stencils over kernels with negative lobes, which could push values
+  outside the data range next to nodata or the raster edge. Cells whose
+  4x4 / 6x6 stencil is incomplete now fall back to bilinear over the
+  valid pixels; complete stencils are unchanged.
+
+* Memory: the per-cell accumulator now has three layouts chosen from the
+  requested stats. `mean` / `sum` / `count` use 16 bytes per band per cell
+  instead of 48, so a 64-band embedding read holds three times as many
+  cells in the same memory. `min` / `max` add the extremes and `var` /
+  `sd` the full Welford state. Results are unchanged.
+
+* Memory: centroid mode no longer allocates a dense cells x bands buffer
+  per CPU worker (16 bytes per cell-band per worker, so 6.6 GB for 0.8 M
+  cells x 64 bands on 8 workers). Workers now return sparse per-tile
+  partials merged into one buffer.
+
+* Performance: forward reads with a nodata sentinel project only pixels
+  with at least one valid band; all-nodata pixels are skipped before the
+  CRS transform. Centroid setup projects cell centroids in parallel. The
+  per-tile accumulator map is no longer pre-sized to a quarter of the
+  tile's pixels.
+
 * New `aoi` and `containment` arguments on `a5_read_raster()`,
   `a5_read_raster_arrow()` and `a5_raster_to_parquet()`. `aoi` is a
   polygon in WGS 84 (anything `a5R::a5_polygon_to_cells()` accepts); it is
