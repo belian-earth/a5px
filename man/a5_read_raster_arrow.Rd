@@ -19,11 +19,12 @@ a5_read_raster_arrow(
   dequant = NULL,
   as_vector = FALSE,
   value_type = c("float64", "float32"),
-  use_overviews = is.null(dequant)
+  use_overviews = is.null(dequant),
+  store_opts = NULL
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, interp, as_vector, use_overviews}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, interp, as_vector, use_overviews, store_opts}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{mode}{Sampling mode: \code{"forward"} (default), \code{"overlay"}, or
 \code{"centroid"}. See \code{\link[=a5_read_raster]{a5_read_raster()}}. Under \code{"centroid"} the \code{stat}

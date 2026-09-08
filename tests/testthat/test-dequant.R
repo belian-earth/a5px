@@ -94,7 +94,7 @@ test_that("dequant disables overview reads by default; explicit TRUE warns", {
   f <- aef_tif()
   skip_if(f == "")
   # an overview would be selected at this resolution if allowed
-  expect_gt(a5px:::a5_select_overview_level_rs(f, edge_m(12L)), 0L)
+  expect_gt(a5px:::a5_select_overview_level_rs(f, edge_m(12L), character(), character()), 0L)
 
   ord <- function(df) df[order(hexset(df$cell)), , drop = FALSE]
   d_def <- a5_read_raster(f, resolution = 12L, dequant = dequant_aef)

@@ -8,6 +8,7 @@ mod parquet_write;
 mod read;
 mod runtime;
 mod sample;
+mod store;
 
 extendr_module! {
     mod a5px;

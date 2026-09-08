@@ -19,13 +19,13 @@ test_that("overview level selection picks coarser levels for coarser cells", {
   skip_if(f == "")
   # res 11 cells (~2.8 km) are far coarser than the 30 m pixels: the decim-4
   # overview (level 2) still oversamples them.
-  expect_equal(a5px:::a5_select_overview_level_rs(f, edge_m(11L)), 2L)
+  expect_equal(a5px:::a5_select_overview_level_rs(f, edge_m(11L), character(), character()), 2L)
   # res 14 cells (~360 m) only leave room for the decim-2 overview (level 1).
-  expect_equal(a5px:::a5_select_overview_level_rs(f, edge_m(14L)), 1L)
+  expect_equal(a5px:::a5_select_overview_level_rs(f, edge_m(14L), character(), character()), 1L)
   # very fine cells (finer than the source pixels) fall back to full resolution.
-  expect_equal(a5px:::a5_select_overview_level_rs(f, edge_m(20L)), 0L)
+  expect_equal(a5px:::a5_select_overview_level_rs(f, edge_m(20L), character(), character()), 0L)
   # a target of 0 disables overview use entirely.
-  expect_equal(a5px:::a5_select_overview_level_rs(f, 0), 0L)
+  expect_equal(a5px:::a5_select_overview_level_rs(f, 0, character(), character()), 0L)
 })
 
 test_that("use_overviews preserves the mean against a full-resolution read", {
@@ -35,7 +35,7 @@ test_that("use_overviews preserves the mean against a full-resolution read", {
   ov   <- a5_read_raster(f, resolution = 11L, use_overviews = TRUE)
 
   # an overview really was used (not a silent full-res fallback)
-  expect_gt(a5px:::a5_select_overview_level_rs(f, edge_m(11L)), 0L)
+  expect_gt(a5px:::a5_select_overview_level_rs(f, edge_m(11L), character(), character()), 0L)
 
   # same coverage at this resolution
   expect_setequal(hexset(ov$cell), hexset(full$cell))
@@ -75,7 +75,7 @@ test_that("single-IFD rasters are unaffected by use_overviews", {
   f <- system.file("extdata", "laea_custom.tif", package = "a5px")
   skip_if(f == "")
   # no overviews present -> always full resolution regardless of the target.
-  expect_equal(a5px:::a5_select_overview_level_rs(f, 1e6), 0L)
+  expect_equal(a5px:::a5_select_overview_level_rs(f, 1e6, character(), character()), 0L)
 
   ord <- function(df) df[order(hexset(df$cell)), , drop = FALSE]
   a <- ord(a5_read_raster(f, resolution = 14L, use_overviews = TRUE))

@@ -183,6 +183,7 @@ struct TileWork {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sample_at_cells_async(
     src: &str,
+    store_opts: crate::store::StoreOpts,
     cells_in: Vec<u64>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
@@ -192,7 +193,7 @@ pub(crate) async fn sample_at_cells_async(
     dequant: Option<Arc<crate::read::DequantLut>>,
     interp: Interp,
 ) -> Result<CentroidOutput> {
-    let (store, path) = crate::read::parse_src_pub(src)?;
+    let (store, path) = crate::store::parse_src(src, &store_opts)?;
     let reader = ObjectReader::new(store, path);
     let cache = ReadaheadMetadataCache::new(reader.clone());
     let mut meta = TiffMetadataReader::try_open(&cache).await?;

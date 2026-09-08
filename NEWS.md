@@ -1,5 +1,18 @@
 # a5px 0.0.0.9000
 
+* Remote sources are now configured from the environment and from a new
+  `store_opts` argument on `a5_read_raster()`, `a5_read_raster_arrow()`
+  and `a5_raster_to_parquet()` (#4). Previously `s3://`, `gs://` and
+  `az://` clients were built from the URL alone: `AWS_REGION` and
+  credential variables were ignored, the region defaulted to `us-east-1`,
+  and there was no unsigned mode, so public buckets outside us-east-1 were
+  unreadable (off-AWS the client spent 13 s timing out against instance
+  metadata). Clients now start from `object_store`'s `from_env()`
+  defaults, honour GDAL's `AWS_NO_SIGN_REQUEST=YES`, and apply
+  `store_opts` last so explicit keys win. Unknown keys, and any key passed
+  with a local path, are errors. New `a5_store_config()` reports the
+  resolved region, endpoint and signing mode without a request.
+
 * Updated the bundled `a5` Rust crate from 0.7.3 to 0.10.0 and the Arrow /
   Parquet crates to 59. The a5 point-to-cell projection is faster and the
   cell cache fast path now converts each pixel to A5's internal spherical

@@ -11,8 +11,7 @@ use async_tiff::tags::PlanarConfiguration;
 use async_tiff::{TIFF, TypedArray};
 use extendr_api::prelude::*;
 use futures::stream::{self, StreamExt, TryStreamExt};
-use object_store::ObjectStore;
-use object_store::path::Path as ObjPath;
+use crate::store::{parse_src, parse_store_opts, StoreOpts};
 use proj4rs::Proj;
 use proj4rs::transform::transform as proj_transform;
 
@@ -484,49 +483,13 @@ impl CellAcc {
 // ---------------------------------------------------------------------------
 // src parsing
 
-pub(crate) fn parse_src_pub(src: &str) -> Result<(Arc<dyn ObjectStore>, ObjPath)> {
-    parse_src(src)
-}
+
+// ---------------------------------------------------------------------------
+// pixel sampling helpers — band-major access into the decoded tile
 
 pub(crate) fn read_pixel_chunky_pub(data: &TypedArray, idx: usize) -> f64 {
     read_pixel_chunky(data, idx)
 }
-
-fn parse_src(src: &str) -> Result<(Arc<dyn ObjectStore>, ObjPath)> {
-    // url::Url::parse only succeeds when src has a scheme; treat anything
-    // that parses as a URL as remote and let object_store::parse_url decide
-    // whether the scheme is supported. Anything that doesn't parse falls
-    // through to the local-path branch. Skip single-letter "schemes" so
-    // Windows drive-letter paths (e.g. `d:/foo/bar.tif`) take the local path.
-    if let Ok(url) = url::Url::parse(src) {
-        if url.scheme().len() > 1 {
-            let (store, path) = object_store::parse_url(&url)
-                .map_err(|e| A5CogError::Invalid(format!("parse_url: {e}")))?;
-            return Ok((Arc::from(store), path));
-        }
-    }
-    let p = std::path::Path::new(src);
-    if !p.exists() {
-        return Err(A5CogError::Invalid(format!("file not found: {src}")));
-    }
-    let abs = p.canonicalize()?;
-    let parent = abs
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("/"))
-        .to_path_buf();
-    let fname = abs
-        .file_name()
-        .ok_or_else(|| A5CogError::Invalid("path has no file name".into()))?
-        .to_string_lossy()
-        .to_string();
-    let lfs = object_store::local::LocalFileSystem::new_with_prefix(parent)?;
-    let store: Arc<dyn ObjectStore> = Arc::new(lfs);
-    let path = ObjPath::from(fname.as_str());
-    Ok((store, path))
-}
-
-// ---------------------------------------------------------------------------
-// pixel sampling helpers — band-major access into the decoded tile
 
 fn read_pixel_chunky(data: &TypedArray, idx: usize) -> f64 {
     match data {
@@ -1178,6 +1141,7 @@ pub(crate) enum TilePayload {
 #[allow(clippy::too_many_arguments)]
 async fn read_raster_async(
     src: &str,
+    store_opts: StoreOpts,
     resolution: i32,
     stats: Vec<Stat>,
     bands_idx: Vec<i32>,
@@ -1192,7 +1156,7 @@ async fn read_raster_async(
     fractions: bool,
 ) -> Result<Output> {
     let cfg = AccCfg::from_stats(&stats, fractions);
-    let (store, path) = parse_src(src)?;
+    let (store, path) = parse_src(src, &store_opts)?;
     let reader = ObjectReader::new(store, path);
     let cache = ReadaheadMetadataCache::new(reader.clone());
     let mut meta = TiffMetadataReader::try_open(&cache).await?;
@@ -1989,7 +1953,10 @@ fn a5_read_raster_rs(
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
 ) -> Result<Robj> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
             "resolution must be 0..=30, got {resolution}"
@@ -2019,6 +1986,7 @@ fn a5_read_raster_rs(
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
+        store_opts,
         resolution,
         stats_e,
         bands_idx,
@@ -2132,7 +2100,10 @@ fn a5_read_raster_flat_rs(
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
 ) -> Result<Robj> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
             "resolution must be 0..=30, got {resolution}"
@@ -2167,6 +2138,7 @@ fn a5_read_raster_flat_rs(
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
+        store_opts,
         resolution,
         stats_e,
         bands_idx,
@@ -2257,7 +2229,10 @@ fn a5_raster_to_parquet_rs(
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
 ) -> Result<String> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
             "resolution must be 0..=30, got {resolution}"
@@ -2294,6 +2269,7 @@ fn a5_raster_to_parquet_rs(
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
+        store_opts,
         resolution,
         stats_e,
         bands_idx,
@@ -2344,6 +2320,7 @@ fn a5_raster_to_parquet_rs(
 #[allow(clippy::too_many_arguments)]
 fn run_sample_at_cells(
     src: &str,
+    store_opts: StoreOpts,
     cells_raw: List,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
@@ -2370,6 +2347,7 @@ fn run_sample_at_cells(
 
     runtime.block_on(crate::sample::sample_at_cells_async(
         src,
+        store_opts,
         cells_in,
         bands_idx,
         bands_names,
@@ -2393,9 +2371,13 @@ fn a5_sample_at_cells_rs(
     dequant_lut: Vec<f64>,
     dequant_min: f64,
     interp: &str,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
 ) -> Result<Robj> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
     let out = run_sample_at_cells(
         src,
+        store_opts,
         cells_raw,
         bands_idx,
         bands_names,
@@ -2441,9 +2423,13 @@ fn a5_sample_at_cells_flat_rs(
     dequant_lut: Vec<f64>,
     dequant_min: f64,
     interp: &str,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
 ) -> Result<Robj> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
     let out = run_sample_at_cells(
         src,
+        store_opts,
         cells_raw,
         bands_idx,
         bands_names,
@@ -2493,11 +2479,15 @@ fn a5_sample_to_parquet_rs(
     dequant_lut: Vec<f64>,
     dequant_min: f64,
     interp: &str,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
 ) -> Result<String> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
     let value_type_e = crate::parquet_write::ValueType::parse(value_type)?;
     let compression_e = crate::parquet_write::CompressionChoice::parse(compression)?;
     let out = run_sample_at_cells(
         src,
+        store_opts,
         cells_raw,
         bands_idx,
         bands_names,
@@ -2532,10 +2522,15 @@ fn a5_sample_to_parquet_rs(
 /// @noRd
 /// @keywords internal
 #[extendr]
-fn a5_raster_bbox_lonlat_rs(src: &str) -> Result<Vec<f64>> {
+fn a5_raster_bbox_lonlat_rs(
+    src: &str,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
+) -> Result<Vec<f64>> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
     let runtime = crate::runtime::shared_runtime()?;
     runtime.block_on(async move {
-        let (store, path) = parse_src(src)?;
+        let (store, path) = parse_src(src, &store_opts)?;
         let reader = ObjectReader::new(store, path);
         let cache = ReadaheadMetadataCache::new(reader.clone());
         let mut meta = TiffMetadataReader::try_open(&cache).await?;
@@ -2610,10 +2605,16 @@ fn a5_raster_bbox_lonlat_rs(src: &str) -> Result<Vec<f64>> {
 /// @noRd
 /// @keywords internal
 #[extendr]
-fn a5_select_overview_level_rs(src: &str, overview_target_m: f64) -> Result<i32> {
+fn a5_select_overview_level_rs(
+    src: &str,
+    overview_target_m: f64,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
+) -> Result<i32> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
     let runtime = crate::runtime::shared_runtime()?;
     runtime.block_on(async move {
-        let (store, path) = parse_src(src)?;
+        let (store, path) = parse_src(src, &store_opts)?;
         let reader = ObjectReader::new(store, path);
         let cache = ReadaheadMetadataCache::new(reader.clone());
         let mut meta = TiffMetadataReader::try_open(&cache).await?;
@@ -2646,8 +2647,30 @@ fn a5_select_overview_level_rs(src: &str, overview_target_m: f64) -> Result<i32>
     })
 }
 
+/// Diagnostic: the object store configuration `src` resolves to after
+/// environment defaults and `store_opts` are applied. Never returns
+/// credential values. Building the store validates the configuration
+/// offline.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_store_config_rs(
+    src: &str,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
+) -> Result<Robj> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
+    let pairs = crate::store::describe(src, &store_opts)?;
+    let pairs: Vec<(String, Robj)> = pairs
+        .into_iter()
+        .map(|(k, v)| (k, Robj::from(v)))
+        .collect();
+    Ok(List::from_pairs(pairs).into())
+}
+
 extendr_module! {
     mod read;
+    fn a5_store_config_rs;
     fn a5_read_raster_rs;
     fn a5_read_raster_flat_rs;
     fn a5_raster_to_parquet_rs;

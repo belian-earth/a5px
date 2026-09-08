@@ -69,7 +69,8 @@ All readers accept the same core arguments:
 \itemize{
 \item \code{src} --- path or URL. Schemes: local path, \verb{file://}, \verb{http(s)://},
 \verb{s3://}, \verb{gs://}, \verb{az://}. Cloud reads stream byte ranges; the full file
-is never materialised.
+is never materialised. See "Remote sources" for client configuration
+and the \code{store_opts} argument.
 \item \code{resolution} --- A5 cell resolution (0--30); see \code{\link[a5R:a5_cell_area]{a5R::a5_cell_area()}}.
 \item \code{stat} --- one or more of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"}, \code{"max"},
 \code{"var"}, \code{"sd"}. A character vector emits one column per (band, stat)
@@ -80,6 +81,41 @@ matched against the GDAL \code{DESCRIPTION} tag. For planar-layout TIFFs the
 reader fetches only the byte ranges of the selected bands.
 \item \code{cpu_workers}, \code{io_concurrency} --- tile-level concurrency knobs; see
 \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.
+}
+}
+
+\section{Remote sources}{
+
+\code{src} may be an \verb{s3://}, \verb{gs://}, \verb{az://} or \verb{http(s)://} URL; reads are
+byte-range requests and the file is never downloaded whole. Cloud
+clients are configured from the environment first and from the readers'
+\code{store_opts} argument second, so an explicit option always wins.
+\code{\link[=a5_store_config]{a5_store_config()}} shows the resolved configuration without making a
+request.
+\itemize{
+\item S3: every \verb{AWS_*} variable \code{object_store} understands, including
+\code{AWS_REGION} / \code{AWS_DEFAULT_REGION}, \code{AWS_ACCESS_KEY_ID},
+\code{AWS_SECRET_ACCESS_KEY}, \code{AWS_SESSION_TOKEN}, \code{AWS_ENDPOINT} /
+\code{AWS_ENDPOINT_URL_S3}, \code{AWS_CONTAINER_CREDENTIALS_RELATIVE_URI} and
+\code{AWS_WEB_IDENTITY_TOKEN_FILE}, plus GDAL's \code{AWS_NO_SIGN_REQUEST=YES}
+for public buckets (mapped to \code{aws_skip_signature}). Without static,
+container or web-identity credentials the client falls back to
+instance metadata, which off-AWS costs a long timeout before failing,
+so set \code{AWS_NO_SIGN_REQUEST} or \code{store_opts = c(aws_skip_signature = "true")} for public data. The shared credentials file
+(\verb{~/.aws/credentials}) and \code{AWS_PROFILE} are not read. With no region
+the client assumes \code{us-east-1} and a bucket elsewhere fails, so set
+\code{AWS_REGION} or \code{aws_region}. Path-style
+\verb{https://s3.<region>.amazonaws.com/<bucket>/...} and virtual-hosted
+\verb{https://<bucket>.s3.<region>.amazonaws.com/...} URLs are treated as
+S3 rather than plain HTTP and take the same configuration.
+\item GCS: the \verb{GOOGLE_*} variables (\code{GOOGLE_SERVICE_ACCOUNT},
+\code{GOOGLE_SERVICE_ACCOUNT_KEY}, \code{GOOGLE_APPLICATION_CREDENTIALS});
+\code{google_skip_signature} for public buckets.
+\item Azure: the \verb{AZURE_*} variables (\code{AZURE_STORAGE_ACCOUNT_NAME},
+\code{AZURE_STORAGE_ACCESS_KEY}, \code{AZURE_STORAGE_SAS_KEY}, ...);
+\code{azure_skip_signature} for public containers.
+\item Plain HTTP(S): no authentication. \code{store_opts} accepts client keys
+such as \code{timeout}, \code{connect_timeout} and \code{allow_http}.
 }
 }
 

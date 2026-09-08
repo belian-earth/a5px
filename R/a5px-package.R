@@ -47,7 +47,8 @@
 #' All readers accept the same core arguments:
 #' - `src` --- path or URL. Schemes: local path, `file://`, `http(s)://`,
 #'   `s3://`, `gs://`, `az://`. Cloud reads stream byte ranges; the full file
-#'   is never materialised.
+#'   is never materialised. See "Remote sources" for client configuration
+#'   and the `store_opts` argument.
 #' - `resolution` --- A5 cell resolution (0--30); see [a5R::a5_cell_area()].
 #' - `stat` --- one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`,
 #'   `"var"`, `"sd"`. A character vector emits one column per (band, stat)
@@ -58,6 +59,39 @@
 #'   reader fetches only the byte ranges of the selected bands.
 #' - `cpu_workers`, `io_concurrency` --- tile-level concurrency knobs; see
 #'   [a5px_set_concurrency()].
+#'
+#' @section Remote sources:
+#' `src` may be an `s3://`, `gs://`, `az://` or `http(s)://` URL; reads are
+#' byte-range requests and the file is never downloaded whole. Cloud
+#' clients are configured from the environment first and from the readers'
+#' `store_opts` argument second, so an explicit option always wins.
+#' [a5_store_config()] shows the resolved configuration without making a
+#' request.
+#'
+#' - S3: every `AWS_*` variable `object_store` understands, including
+#'   `AWS_REGION` / `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`,
+#'   `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ENDPOINT` /
+#'   `AWS_ENDPOINT_URL_S3`, `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` and
+#'   `AWS_WEB_IDENTITY_TOKEN_FILE`, plus GDAL's `AWS_NO_SIGN_REQUEST=YES`
+#'   for public buckets (mapped to `aws_skip_signature`). Without static,
+#'   container or web-identity credentials the client falls back to
+#'   instance metadata, which off-AWS costs a long timeout before failing,
+#'   so set `AWS_NO_SIGN_REQUEST` or `store_opts = c(aws_skip_signature =
+#'   "true")` for public data. The shared credentials file
+#'   (`~/.aws/credentials`) and `AWS_PROFILE` are not read. With no region
+#'   the client assumes `us-east-1` and a bucket elsewhere fails, so set
+#'   `AWS_REGION` or `aws_region`. Path-style
+#'   `https://s3.<region>.amazonaws.com/<bucket>/...` and virtual-hosted
+#'   `https://<bucket>.s3.<region>.amazonaws.com/...` URLs are treated as
+#'   S3 rather than plain HTTP and take the same configuration.
+#' - GCS: the `GOOGLE_*` variables (`GOOGLE_SERVICE_ACCOUNT`,
+#'   `GOOGLE_SERVICE_ACCOUNT_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`);
+#'   `google_skip_signature` for public buckets.
+#' - Azure: the `AZURE_*` variables (`AZURE_STORAGE_ACCOUNT_NAME`,
+#'   `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_SAS_KEY`, ...);
+#'   `azure_skip_signature` for public containers.
+#' - Plain HTTP(S): no authentication. `store_opts` accepts client keys
+#'   such as `timeout`, `connect_timeout` and `allow_http`.
 #'
 #' @section Supported formats and CRSes:
 #' - Tiled GeoTIFF / Cloud-Optimised GeoTIFF (`async-tiff` 0.3, supports

@@ -18,12 +18,15 @@ a5_read_raster(
   io_concurrency = NULL,
   dequant = NULL,
   as_vector = FALSE,
-  use_overviews = is.null(dequant)
+  use_overviews = is.null(dequant),
+  store_opts = NULL
 )
 }
 \arguments{
 \item{src}{Path or URL to a GeoTIFF / COG. Supported schemes: local path
-(no scheme), \verb{file://}, \verb{http(s)://}, \verb{s3://}, \verb{gs://}, \verb{az://}.}
+(no scheme), \verb{file://}, \verb{http(s)://}, \verb{s3://}, \verb{gs://}, \verb{az://}. See
+the "Remote sources" section of \link{a5px-package} for how cloud clients
+are configured.}
 
 \item{resolution}{Integer scalar A5 resolution (0--30).}
 
@@ -133,6 +136,16 @@ full-resolution image is read regardless. The default is \code{TRUE} unless
 overview pixel that is a mean of quantized codes decodes incorrectly.
 Explicitly passing \code{TRUE} together with \code{dequant} warns and proceeds,
 for sources whose overviews were built with nearest or mode resampling.}
+
+\item{store_opts}{Named character vector or named list of object store
+options for a remote \code{src}, applied after the environment defaults so
+an explicit option always wins. Keys are the \code{object_store} config
+keys for the provider, e.g. \code{aws_region}, \code{aws_skip_signature},
+\code{aws_access_key_id}, \code{aws_secret_access_key}, \code{aws_session_token},
+\code{aws_endpoint}, \code{aws_virtual_hosted_style_request}, the \verb{google_*} /
+\verb{azure_*} equivalents, and for plain HTTP(S) the client keys such as
+\code{timeout} or \code{allow_http}. Unknown keys, and any key given with a
+local path, are errors. Inspect the result with \code{\link[=a5_store_config]{a5_store_config()}}.}
 }
 \value{
 A \code{\link[tibble:tibble]{tibble::tibble()}} with columns:

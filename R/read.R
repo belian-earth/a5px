@@ -38,7 +38,18 @@
 #'   because each pixel only contributes to one cell.
 #'
 #' @param src Path or URL to a GeoTIFF / COG. Supported schemes: local path
-#'   (no scheme), `file://`, `http(s)://`, `s3://`, `gs://`, `az://`.
+#'   (no scheme), `file://`, `http(s)://`, `s3://`, `gs://`, `az://`. See
+#'   the "Remote sources" section of [a5px-package] for how cloud clients
+#'   are configured.
+#' @param store_opts Named character vector or named list of object store
+#'   options for a remote `src`, applied after the environment defaults so
+#'   an explicit option always wins. Keys are the `object_store` config
+#'   keys for the provider, e.g. `aws_region`, `aws_skip_signature`,
+#'   `aws_access_key_id`, `aws_secret_access_key`, `aws_session_token`,
+#'   `aws_endpoint`, `aws_virtual_hosted_style_request`, the `google_*` /
+#'   `azure_*` equivalents, and for plain HTTP(S) the client keys such as
+#'   `timeout` or `allow_http`. Unknown keys, and any key given with a
+#'   local path, are errors. Inspect the result with [a5_store_config()].
 #' @param resolution Integer scalar A5 resolution (0--30).
 #' @param stat Aggregation. One of `"mean"`, `"sum"`, `"count"`, `"min"`,
 #'   `"max"`, `"var"`, `"sd"`, `"majority"`, `"fractions"`, or any
@@ -171,8 +182,10 @@ a5_read_raster <- function(src,
                            io_concurrency = NULL,
                            dequant = NULL,
                            as_vector = FALSE,
-                           use_overviews = is.null(dequant)) {
+                           use_overviews = is.null(dequant),
+                           store_opts = NULL) {
   check_scalar_string(src, "src")
+  store <- check_store_opts(store_opts)
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
@@ -213,12 +226,15 @@ a5_read_raster <- function(src,
       as_vector = as_vector,
       stats = stats,
       dequant_v = dequant_v,
-      interp = interp
+      interp = interp,
+      store = store
     ))
   }
 
   out <- a5_read_raster_rs(
     src = src,
+    store_keys = store$keys,
+    store_values = store$values,
     resolution = resolution,
     stats = stats,
     bands_idx = band_sel$idx,
@@ -296,11 +312,14 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
                                  bbox, src_nodata, cpu_workers,
                                  io_concurrency, as_vector, stats,
                                  dequant_v = list(lut = numeric(0), min = 0),
-                                 interp = "nearest") {
+                                 interp = "nearest",
+                                 store = check_store_opts(NULL)) {
   warn_centroid_stat(stats)
-  cells <- centroid_cells(src, resolution, bbox)
+  cells <- centroid_cells(src, resolution, bbox, store)
   out <- a5_sample_at_cells_rs(
     src = src,
+    store_keys = store$keys,
+    store_values = store$values,
     cells_raw = vctrs::vec_data(cells),
     bands_idx = bands_idx,
     bands_names = bands_names,
@@ -330,9 +349,10 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
 #' Enumerate the uniform grid of A5 cells sampled in centroid mode. `bbox`
 #' defaults to the raster's WGS 84 envelope when NULL.
 #' @noRd
-centroid_cells <- function(src, resolution, bbox, call = rlang::caller_env()) {
+centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL),
+                           call = rlang::caller_env()) {
   if (is.null(bbox)) {
-    bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src))
+    bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src, store$keys, store$values))
   }
   # a5R >= 0.4.0 replaced a5_grid() with a5_polygon_to_cells() (centre-in-polygon
   # semantics, returns compacted cells). Uncompact to a uniform grid at the
