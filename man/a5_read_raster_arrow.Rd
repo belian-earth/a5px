@@ -10,6 +10,7 @@ a5_read_raster_arrow(
   stat = "mean",
   bands = NULL,
   bbox = NULL,
+  bbox_align = c("pixel", "block"),
   src_nodata = NULL,
   mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
@@ -24,7 +25,7 @@ a5_read_raster_arrow(
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, interp, as_vector, use_overviews, store_opts}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, interp, as_vector, use_overviews, store_opts, bbox_align}{See \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{mode}{Sampling mode: \code{"forward"} (default), \code{"overlay"}, or
 \code{"centroid"}. See \code{\link[=a5_read_raster]{a5_read_raster()}}. Under \code{"centroid"} the \code{stat}

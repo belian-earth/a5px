@@ -11,6 +11,7 @@ a5_raster_to_parquet(
   stat = "mean",
   bands = NULL,
   bbox = NULL,
+  bbox_align = c("pixel", "block"),
   src_nodata = NULL,
   mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
@@ -26,7 +27,7 @@ a5_raster_to_parquet(
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, interp, as_vector, use_overviews, store_opts}{See
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, dequant, subsamples, interp, as_vector, use_overviews, store_opts, bbox_align}{See
 \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{dest}{Output Parquet path.}

@@ -54,6 +54,27 @@ a schema tailored to A5 cell + value lists
 }
 }
 
+\section{Inspecting sources}{
+
+\itemize{
+\item \code{\link[=a5_raster_info]{a5_raster_info()}} --- dimensions, data type, block grid, overview
+levels, CRS and WGS 84 envelope without reading pixels
+\item \code{\link[=a5_store_config]{a5_store_config()}} --- the resolved object store configuration for a
+remote \code{src}
+}
+}
+
+\section{Chunked reads}{
+
+Accumulators hold every touched cell in memory (roughly 4.5 GB per
+million cells with 64 bands and \code{stat = c("mean", "count")}), so very
+large reads are chunked by \code{bbox}. Pass \code{bbox_align = "block"} so each
+chunk takes whole COG blocks and no block is fetched twice; read
+\code{stat = c("sum", "count")} so per-cell partials from adjacent chunks add
+exactly, and derive means afterwards. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the
+block grid and envelope to build the chunk grid from.
+}
+
 \section{Configuration}{
 
 \itemize{

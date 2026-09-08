@@ -30,12 +30,18 @@ const EPSG_USER_DEFINED: u16 = 32767;
 ///    citation) such as a centered LAEA produced via
 ///    `+proj=laea +lon_0=... +lat_0=...`.
 pub(crate) fn build_src_proj(geo: &GeoKeyDirectory) -> Result<Proj> {
+    build_src_proj_described(geo).map(|(p, _)| p)
+}
+
+/// Like [`build_src_proj`] but also returns a human-readable description
+/// of how the CRS was resolved: `EPSG:<code>` or the proj string used.
+pub(crate) fn build_src_proj_described(geo: &GeoKeyDirectory) -> Result<(Proj, String)> {
     let mut last_err: Option<A5CogError> = None;
 
     if let Some(epsg) = geo.epsg_code() {
         if epsg != EPSG_USER_DEFINED && epsg != 0 {
             match Proj::from_epsg_code(epsg) {
-                Ok(p) => return Ok(p),
+                Ok(p) => return Ok((p, format!("EPSG:{epsg}"))),
                 Err(e) => last_err = Some(e.into()),
             }
         }
@@ -44,7 +50,7 @@ pub(crate) fn build_src_proj(geo: &GeoKeyDirectory) -> Result<Proj> {
     if let Some(wkt) = first_wkt_citation(geo) {
         match proj4wkt::wkt_to_projstring(wkt) {
             Ok(proj_str) => match Proj::from_proj_string(&proj_str) {
-                Ok(p) => return Ok(p),
+                Ok(p) => return Ok((p, proj_str)),
                 Err(e) => last_err = Some(e.into()),
             },
             Err(e) => last_err = Some(A5CogError::Invalid(format!("WKT parse: {e:?}"))),
@@ -53,7 +59,7 @@ pub(crate) fn build_src_proj(geo: &GeoKeyDirectory) -> Result<Proj> {
 
     if let Some(proj_str) = build_proj_string_from_geokeys(geo) {
         match Proj::from_proj_string(&proj_str) {
-            Ok(p) => return Ok(p),
+            Ok(p) => return Ok((p, proj_str)),
             Err(e) => last_err = Some(e.into()),
         }
     }

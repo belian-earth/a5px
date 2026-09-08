@@ -1,5 +1,19 @@
 # a5px 0.0.0.9000
 
+* New `bbox_align = c("pixel", "block")` on `a5_read_raster()`,
+  `a5_read_raster_arrow()` and `a5_raster_to_parquet()`. Under `"block"`
+  a COG block is read whole when its origin pixel centre lies in `bbox`
+  (half-open on the max edges) and the per-pixel bbox test is skipped, so
+  every block belongs to exactly one member of any bbox partition. Callers
+  that chunk large reads to bound memory no longer re-fetch the blocks
+  straddling chunk edges (the second observation in #4: a 3x3 chunking
+  cost 4x the bytes of a single read) and per-cell partial sums and counts
+  add exactly across chunks.
+
+* New `a5_raster_info()` returns a raster's dimensions, data type, nodata,
+  band names, interleave, compression, block grid, usable overview levels,
+  CRS and WGS 84 envelope without reading pixels.
+
 * Remote sources are now configured from the environment and from a new
   `store_opts` argument on `a5_read_raster()`, `a5_read_raster_arrow()`
   and `a5_raster_to_parquet()` (#4). Previously `s3://`, `gs://` and

@@ -1154,6 +1154,7 @@ async fn read_raster_async(
     dequant: Option<Arc<DequantLut>>,
     overlay: Option<OverlayParams>,
     fractions: bool,
+    bbox_align_block: bool,
 ) -> Result<Output> {
     let cfg = AccCfg::from_stats(&stats, fractions);
     let (store, path) = parse_src(src, &store_opts)?;
@@ -1325,12 +1326,28 @@ async fn read_raster_async(
                 v.push((tx, ty));
             }
         }
+        if bbox_align_block {
+            // Block alignment: keep a tile iff its origin pixel centre lies in
+            // the bbox (half-open on the max edges). The envelope range above
+            // is a superset of those tiles, so filtering it is exact. Every
+            // tile of the level then belongs to exactly one bbox of any
+            // partition, so chunked callers never fetch a tile twice.
+            v = filter_tiles_by_origin(
+                &v, b, &src_proj, &dst_proj, &gt, tile_w, tile_h,
+            )?;
+            if v.is_empty() {
+                return Ok(empty_output(band_names, n_out, &stats, fractions));
+            }
+        }
         v
     } else {
         (0..n_tiles_y)
             .flat_map(|y| (0..n_tiles_x).map(move |x| (x, y)))
             .collect()
     };
+    // Under block alignment the whole tile is in, so the per-pixel bbox
+    // test is skipped.
+    let bbox_pixel_filter: Option<[f64; 4]> = if bbox_align_block { None } else { bbox_lonlat };
 
     // decide once whether the band-aware fetch path applies
     let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
@@ -1374,7 +1391,7 @@ async fn read_raster_async(
         let identity_offsets = Arc::clone(&identity_offsets_arc);
         let registry = Arc::clone(&registry_arc);
         let gt_c = gt;
-        let bbox_lonlat_c = bbox_lonlat;
+        let bbox_lonlat_c = bbox_pixel_filter;
         let dequant_c = dequant.clone();
         consumer_handles.push(tokio::task::spawn_blocking(move || {
             let mut local: AHashMap<u64, CellAcc> = AHashMap::new();
@@ -1807,6 +1824,54 @@ fn derive_level_geotransform(
     ])
 }
 
+/// Keep the tiles whose origin pixel centre (top-left pixel of the tile)
+/// projects into `bbox_lonlat`, half-open on the max edges so a partition of
+/// bboxes sharing edges assigns each tile to exactly one member.
+fn filter_tiles_by_origin(
+    tiles: &[(usize, usize)],
+    bbox_lonlat: [f64; 4],
+    src_proj: &Proj,
+    dst_proj: &Proj,
+    gt: &GeoTransform,
+    tile_w: usize,
+    tile_h: usize,
+) -> Result<Vec<(usize, usize)>> {
+    let mut points: Vec<(f64, f64, f64)> = tiles
+        .iter()
+        .map(|&(tx, ty)| {
+            let c = (tx * tile_w) as f64 + 0.5;
+            let r = (ty * tile_h) as f64 + 0.5;
+            let x = gt.0[0] + c * gt.0[1] + r * gt.0[2];
+            let y = gt.0[3] + c * gt.0[4] + r * gt.0[5];
+            (x, y, 0.0)
+        })
+        .collect();
+    if src_proj.is_latlong() {
+        for p in &mut points {
+            p.0 = p.0.to_radians();
+            p.1 = p.1.to_radians();
+        }
+    }
+    proj_transform(src_proj, dst_proj, &mut points[..])?;
+    let dst_is_latlong = dst_proj.is_latlong();
+    let [xmin, ymin, xmax, ymax] = bbox_lonlat;
+    Ok(tiles
+        .iter()
+        .zip(points.iter())
+        .filter_map(|(&t, &(x, y, _))| {
+            let lon = if dst_is_latlong { x.to_degrees() } else { x };
+            let lat = if dst_is_latlong { y.to_degrees() } else { y };
+            let inside = lon.is_finite()
+                && lat.is_finite()
+                && lon >= xmin
+                && lon < xmax
+                && lat >= ymin
+                && lat < ymax;
+            if inside { Some(t) } else { None }
+        })
+        .collect())
+}
+
 /// Reproject a WGS84 lon/lat bbox into the raster CRS, take the axis-aligned
 /// bounding box of the resulting points, clamp to the raster, and return the
 /// inclusive tile-index range that covers it. Returns `Ok(None)` if the bbox
@@ -1953,6 +2018,7 @@ fn a5_read_raster_rs(
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
+    bbox_align_block: bool,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -1999,6 +2065,7 @@ fn a5_read_raster_rs(
         dequant,
         overlay_opt,
         fractions,
+        bbox_align_block,
     ))?;
 
     if prof {
@@ -2100,6 +2167,7 @@ fn a5_read_raster_flat_rs(
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
+    bbox_align_block: bool,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -2151,6 +2219,7 @@ fn a5_read_raster_flat_rs(
         dequant,
         overlay_opt,
         false,
+        bbox_align_block,
     ))?;
 
     if prof {
@@ -2229,6 +2298,7 @@ fn a5_raster_to_parquet_rs(
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
+    bbox_align_block: bool,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<String> {
@@ -2282,6 +2352,7 @@ fn a5_raster_to_parquet_rs(
         dequant,
         overlay_opt,
         false,
+        bbox_align_block,
     ))?;
 
     if prof {
@@ -2515,10 +2586,75 @@ fn a5_sample_to_parquet_rs(
     Ok(dest.to_string())
 }
 
-/// Compute the WGS84 lon/lat bbox of the raster at `src`, by projecting the
-/// 4 corners + 4 edge midpoints of the raster's projected extent into
-/// WGS84 and taking the axis-aligned envelope.
-/// @returns `c(xmin, ymin, xmax, ymax)`.
+/// WGS 84 envelope of a raster footprint: project the 4 corners + 4 edge
+/// midpoints of the projected extent and take the axis-aligned envelope.
+fn footprint_lonlat(
+    src_proj: &Proj,
+    dst_proj: &Proj,
+    gt: &GeoTransform,
+    w: usize,
+    h: usize,
+) -> Result<[f64; 4]> {
+    let w = w as f64;
+    let h = h as f64;
+    let pts_px = [
+        (0.0, 0.0), (w, 0.0), (0.0, h), (w, h),
+        (w * 0.5, 0.0), (w * 0.5, h), (0.0, h * 0.5), (w, h * 0.5),
+    ];
+    let mut points: Vec<(f64, f64, f64)> = pts_px
+        .iter()
+        .map(|&(c, r)| {
+            let x = gt.0[0] + c * gt.0[1] + r * gt.0[2];
+            let y = gt.0[3] + c * gt.0[4] + r * gt.0[5];
+            (x, y, 0.0)
+        })
+        .collect();
+    if src_proj.is_latlong() {
+        for p in &mut points {
+            p.0 = p.0.to_radians();
+            p.1 = p.1.to_radians();
+        }
+    }
+    proj_transform(src_proj, dst_proj, &mut points[..])?;
+    if dst_proj.is_latlong() {
+        for p in &mut points {
+            p.0 = p.0.to_degrees();
+            p.1 = p.1.to_degrees();
+        }
+    }
+    let mut xmin = f64::INFINITY;
+    let mut ymin = f64::INFINITY;
+    let mut xmax = f64::NEG_INFINITY;
+    let mut ymax = f64::NEG_INFINITY;
+    for &(x, y, _) in &points {
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        if x < xmin { xmin = x; }
+        if x > xmax { xmax = x; }
+        if y < ymin { ymin = y; }
+        if y > ymax { ymax = y; }
+    }
+    if !xmin.is_finite() {
+        return Err(A5CogError::Invalid(
+            "could not project raster footprint into WGS84".into(),
+        ));
+    }
+    Ok([xmin, ymin, xmax, ymax])
+}
+
+/// Open `src` and read all IFDs.
+async fn open_tiff(src: &str, store_opts: &StoreOpts) -> Result<TIFF> {
+    let (store, path) = parse_src(src, store_opts)?;
+    let reader = ObjectReader::new(store, path);
+    let cache = ReadaheadMetadataCache::new(reader.clone());
+    let mut meta = TiffMetadataReader::try_open(&cache).await?;
+    let ifds = meta.read_all_ifds(&cache).await?;
+    let endianness = meta.endianness();
+    Ok(TIFF::new(ifds, endianness))
+}
+
+/// Compute the WGS84 lon/lat bbox of the raster at `src`.
 /// @noRd
 /// @keywords internal
 #[extendr]
@@ -2530,72 +2666,129 @@ fn a5_raster_bbox_lonlat_rs(
     let store_opts = parse_store_opts(store_keys, store_values)?;
     let runtime = crate::runtime::shared_runtime()?;
     runtime.block_on(async move {
-        let (store, path) = parse_src(src, &store_opts)?;
-        let reader = ObjectReader::new(store, path);
-        let cache = ReadaheadMetadataCache::new(reader.clone());
-        let mut meta = TiffMetadataReader::try_open(&cache).await?;
-        let ifds = meta.read_all_ifds(&cache).await?;
-        let endianness = meta.endianness();
-        let tiff = TIFF::new(ifds, endianness);
+        let tiff = open_tiff(src, &store_opts).await?;
         let ifd = tiff
             .ifds()
             .first()
-            .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?
-            .clone();
+            .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?;
         let geo = ifd
             .geo_key_directory()
             .ok_or(A5CogError::MissingGeoKey("GeoKeyDirectory"))?;
         let src_proj = crate::geo::build_src_proj(geo)?;
         let dst_proj = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
-        let gt = crate::geo::extract_geotransform(&ifd)?;
-        let w = ifd.image_width() as f64;
-        let h = ifd.image_height() as f64;
+        let gt = crate::geo::extract_geotransform(ifd)?;
+        let b = footprint_lonlat(
+            &src_proj, &dst_proj, &gt,
+            ifd.image_width() as usize, ifd.image_height() as usize,
+        )?;
+        Ok(b.to_vec())
+    })
+}
 
-        // 8 sample points around the raster footprint
-        let pts_px = [
-            (0.0, 0.0), (w, 0.0), (0.0, h), (w, h),
-            (w * 0.5, 0.0), (w * 0.5, h), (0.0, h * 0.5), (w, h * 0.5),
-        ];
-        let mut points: Vec<(f64, f64, f64)> = pts_px
-            .iter()
-            .map(|&(c, r)| {
-                let x = gt.0[0] + c * gt.0[1] + r * gt.0[2];
-                let y = gt.0[3] + c * gt.0[4] + r * gt.0[5];
-                (x, y, 0.0)
-            })
-            .collect();
-        if src_proj.is_latlong() {
-            for p in &mut points {
-                p.0 = p.0.to_radians();
-                p.1 = p.1.to_radians();
+/// Structural metadata of the raster at `src`: dimensions, block grid,
+/// overview levels, data type, nodata, band names, CRS and WGS 84 envelope.
+/// Overview rows list every reduced-resolution IFD that a5px would consider
+/// (same filter as `select_overview_level`), in IFD order.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5_raster_info_rs(
+    src: &str,
+    store_keys: Vec<String>,
+    store_values: Vec<String>,
+) -> Result<Robj> {
+    let store_opts = parse_store_opts(store_keys, store_values)?;
+    let runtime = crate::runtime::shared_runtime()?;
+    runtime.block_on(async move {
+        let tiff = open_tiff(src, &store_opts).await?;
+        let ifd0 = tiff
+            .ifds()
+            .first()
+            .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?;
+        let geo = ifd0
+            .geo_key_directory()
+            .ok_or(A5CogError::MissingGeoKey("GeoKeyDirectory"))?;
+        let (src_proj, crs) = crate::geo::build_src_proj_described(geo)?;
+        let dst_proj = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
+        let gt = crate::geo::extract_geotransform(ifd0)?;
+        let full_w = ifd0.image_width() as usize;
+        let full_h = ifd0.image_height() as usize;
+        let n_bands = ifd0.samples_per_pixel() as usize;
+        let bbox = footprint_lonlat(&src_proj, &dst_proj, &gt, full_w, full_h)?;
+        let (block_w, block_h) = match (ifd0.tile_width(), ifd0.tile_height()) {
+            (Some(w), Some(h)) => (w as i32, h as i32),
+            _ => (0, 0),
+        };
+        let (n_blocks_x, n_blocks_y) = ifd0.tile_count().unwrap_or((0, 0));
+        let dtype = crate::band_fetch::derive_data_type(ifd0)
+            .map(|d| format!("{d:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "mixed".to_string());
+        let nodata = parse_nodata(ifd0).unwrap_or(f64::NAN);
+        let band_names_v = parse_band_descriptions(ifd0, n_bands);
+        let band_names: Vec<String> = if band_names_v.is_empty() {
+            (0..n_bands).map(|i| format!("band_{:02}", i + 1)).collect()
+        } else {
+            band_names_v
+        };
+        let interleave = match ifd0.planar_configuration() {
+            PlanarConfiguration::Chunky => "pixel",
+            PlanarConfiguration::Planar => "band",
+            _ => "unknown",
+        };
+        let compression = format!("{:?}", ifd0.compression()).to_ascii_lowercase();
+
+        let mut ov_level: Vec<i32> = Vec::new();
+        let mut ov_w: Vec<i32> = Vec::new();
+        let mut ov_h: Vec<i32> = Vec::new();
+        let mut ov_bw: Vec<i32> = Vec::new();
+        let mut ov_bh: Vec<i32> = Vec::new();
+        for (i, ifd) in tiff.ifds().iter().enumerate().skip(1) {
+            if let Some(st) = ifd.new_subfile_type() {
+                if st & 0x1 == 0 || st & 0x4 != 0 {
+                    continue;
+                }
             }
-        }
-        proj_transform(&src_proj, &dst_proj, &mut points[..])?;
-        if dst_proj.is_latlong() {
-            for p in &mut points {
-                p.0 = p.0.to_degrees();
-                p.1 = p.1.to_degrees();
-            }
-        }
-        let mut xmin = f64::INFINITY;
-        let mut ymin = f64::INFINITY;
-        let mut xmax = f64::NEG_INFINITY;
-        let mut ymax = f64::NEG_INFINITY;
-        for &(x, y, _) in &points {
-            if !x.is_finite() || !y.is_finite() {
+            let w = ifd.image_width() as usize;
+            let h = ifd.image_height() as usize;
+            if w == 0 || h == 0 || w >= full_w || h >= full_h {
                 continue;
             }
-            if x < xmin { xmin = x; }
-            if x > xmax { xmax = x; }
-            if y < ymin { ymin = y; }
-            if y > ymax { ymax = y; }
+            if ifd.samples_per_pixel() as usize != n_bands {
+                continue;
+            }
+            let (Some(tw), Some(th)) = (ifd.tile_width(), ifd.tile_height()) else {
+                continue;
+            };
+            ov_level.push(i as i32);
+            ov_w.push(w as i32);
+            ov_h.push(h as i32);
+            ov_bw.push(tw as i32);
+            ov_bh.push(th as i32);
         }
-        if !xmin.is_finite() {
-            return Err(A5CogError::Invalid(
-                "could not project raster footprint into WGS84".into(),
-            ));
-        }
-        Ok(vec![xmin, ymin, xmax, ymax])
+
+        Ok(list!(
+            width = full_w as i32,
+            height = full_h as i32,
+            n_bands = n_bands as i32,
+            dtype = dtype,
+            nodata = nodata,
+            band_names = band_names,
+            interleave = interleave,
+            compression = compression,
+            block_width = block_w,
+            block_height = block_h,
+            n_blocks_x = n_blocks_x as i32,
+            n_blocks_y = n_blocks_y as i32,
+            overview_level = ov_level,
+            overview_width = ov_w,
+            overview_height = ov_h,
+            overview_block_width = ov_bw,
+            overview_block_height = ov_bh,
+            crs = crs,
+            geotransform = gt.0.to_vec(),
+            bbox = bbox.to_vec()
+        )
+        .into())
     })
 }
 
@@ -2678,5 +2871,6 @@ extendr_module! {
     fn a5_sample_at_cells_flat_rs;
     fn a5_sample_to_parquet_rs;
     fn a5_raster_bbox_lonlat_rs;
+    fn a5_raster_info_rs;
     fn a5_select_overview_level_rs;
 }

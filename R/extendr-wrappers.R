@@ -36,7 +36,7 @@ a5_store_config_rs <- function(src, store_keys, store_values) .Call(wrap__a5_sto
 #'   for length>1), `band_names`, and `stats` (character).
 #' @noRd
 #' @keywords internal
-a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, store_keys, store_values) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, store_keys, store_values)
+a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, bbox_align_block, store_keys, store_values) .Call(wrap__a5_read_raster_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, bbox_align_block, store_keys, store_values)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells, returning a
 #' flat cell-major numeric buffer suitable for direct construction of an
@@ -60,7 +60,7 @@ a5_read_raster_rs <- function(src, resolution, stats, bands_idx, bands_names, bb
 #'   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
 #' @noRd
 #' @keywords internal
-a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, store_keys, store_values) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, store_keys, store_values)
+a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, bbox_align_block, store_keys, store_values) .Call(wrap__a5_read_raster_flat_rs, src, resolution, stats, bands_idx, bands_names, bbox, src_nodata, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, bbox_align_block, store_keys, store_values)
 
 #' Forward-aggregate a (Cloud-Optimised) GeoTIFF straight into a Parquet
 #' file. RecordBatch construction and Parquet write happen in Rust without
@@ -83,7 +83,7 @@ a5_read_raster_flat_rs <- function(src, resolution, stats, bands_idx, bands_name
 #' @returns The destination path (character scalar) on success.
 #' @noRd
 #' @keywords internal
-a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, store_keys, store_values) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, store_keys, store_values)
+a5_raster_to_parquet_rs <- function(src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, bbox_align_block, store_keys, store_values) .Call(wrap__a5_raster_to_parquet_rs, src, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, overlay, subsamples, cell_edge_m, bbox_align_block, store_keys, store_values)
 
 a5_sample_at_cells_rs <- function(src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp, store_keys, store_values) .Call(wrap__a5_sample_at_cells_rs, src, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp, store_keys, store_values)
 
@@ -104,13 +104,18 @@ a5_sample_at_cells_flat_rs <- function(src, cells_raw, bands_idx, bands_names, s
 #' @keywords internal
 a5_sample_to_parquet_rs <- function(src, dest, resolution, cells_raw, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp, store_keys, store_values) .Call(wrap__a5_sample_to_parquet_rs, src, dest, resolution, cells_raw, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, interp, store_keys, store_values)
 
-#' Compute the WGS84 lon/lat bbox of the raster at `src`, by projecting the
-#' 4 corners + 4 edge midpoints of the raster's projected extent into
-#' WGS84 and taking the axis-aligned envelope.
-#' @returns `c(xmin, ymin, xmax, ymax)`.
+#' Compute the WGS84 lon/lat bbox of the raster at `src`.
 #' @noRd
 #' @keywords internal
 a5_raster_bbox_lonlat_rs <- function(src, store_keys, store_values) .Call(wrap__a5_raster_bbox_lonlat_rs, src, store_keys, store_values)
+
+#' Structural metadata of the raster at `src`: dimensions, block grid,
+#' overview levels, data type, nodata, band names, CRS and WGS 84 envelope.
+#' Overview rows list every reduced-resolution IFD that a5px would consider
+#' (same filter as `select_overview_level`), in IFD order.
+#' @noRd
+#' @keywords internal
+a5_raster_info_rs <- function(src, store_keys, store_values) .Call(wrap__a5_raster_info_rs, src, store_keys, store_values)
 
 #' Diagnostic: the IFD index `a5_read_raster_rs` would read for the given
 #' `overview_target_m` (the A5 cell edge in metres; 0 = overviews disabled).

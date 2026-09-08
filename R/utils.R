@@ -70,6 +70,29 @@ check_bbox <- function(bbox, call = rlang::caller_env()) {
   v
 }
 
+#' Resolve `bbox_align` to the logical Rust flag. `"block"` needs a bbox to
+#' align and only applies to the pixel-driven modes.
+#' @noRd
+check_bbox_align <- function(bbox_align, bbox_v, mode, call = rlang::caller_env()) {
+  bbox_align <- rlang::arg_match(bbox_align, c("pixel", "block"), error_call = call)
+  if (bbox_align == "pixel") {
+    return(FALSE)
+  }
+  if (!length(bbox_v)) {
+    cli::cli_abort(
+      "{.code bbox_align = \"block\"} requires {.arg bbox}.",
+      call = call
+    )
+  }
+  if (identical(mode, "centroid")) {
+    cli::cli_abort(
+      "{.code bbox_align = \"block\"} does not apply to {.code mode = \"centroid\"}, which is cell-driven.",
+      call = call
+    )
+  }
+  TRUE
+}
+
 #' Validate a user-supplied src_nodata override.
 #' @noRd
 check_src_nodata <- function(src_nodata, call = rlang::caller_env()) {

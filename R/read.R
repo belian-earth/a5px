@@ -79,6 +79,19 @@
 #'   supplied, only tiles overlapping the bbox (in raster CRS) are fetched
 #'   from the COG, and pixels outside the bbox are skipped. `NULL` (default)
 #'   reads the whole raster.
+#' @param bbox_align How `bbox` selects pixels. `"pixel"` (default) keeps
+#'   every pixel whose centre lies in the bbox. `"block"` keeps every
+#'   internal COG block (tile) whose origin pixel centre lies in the bbox,
+#'   whole, and skips the per-pixel test; the bbox is half-open on its
+#'   `xmax` / `ymax` edges. Under `"block"` each block of the raster belongs
+#'   to exactly one member of any partition of bboxes, so a caller that
+#'   chunks a large read to bound memory fetches every block once instead
+#'   of re-fetching the blocks straddling chunk edges, and per-cell partial
+#'   sums and counts from the chunks add up exactly. The trade is
+#'   block-granular chunk edges. When overviews are in use the block grid is
+#'   that of the overview level read, which is the same for every chunk of
+#'   a given `resolution` and `stat`. Requires `bbox`; not applicable to
+#'   `mode = "centroid"`. See [a5_raster_info()] for the block grid.
 #' @param src_nodata Optional numeric scalar overriding the source nodata.
 #'   Use this when the file's `TIFFTAG_GDAL_NODATA` tag is missing or wrong;
 #'   it takes precedence over the metadata value when set. `NULL` (default)
@@ -174,6 +187,7 @@ a5_read_raster <- function(src,
                            stat = "mean",
                            bands = NULL,
                            bbox = NULL,
+                           bbox_align = c("pixel", "block"),
                            src_nodata = NULL,
                            mode = c("forward", "overlay", "centroid"),
                            subsamples = NULL,
@@ -207,6 +221,7 @@ a5_read_raster <- function(src,
   }
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
+  bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
   src_nodata_v <- check_src_nodata(src_nodata)
   dequant_v <- check_dequant(dequant)
   check_stat_context(stats, dequant, as_vector, fractions_ok = TRUE)
@@ -248,7 +263,8 @@ a5_read_raster <- function(src,
     dequant_min = dequant_v$min,
     overlay = identical(mode, "overlay"),
     subsamples = subsamples_v,
-    cell_edge_m = cell_edge_metres(mode, resolution)
+    cell_edge_m = cell_edge_metres(mode, resolution),
+    bbox_align_block = bbox_align_block
   )
 
   cells <- new_a5_cell_from_rs(out$cell)

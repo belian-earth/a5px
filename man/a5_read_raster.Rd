@@ -10,6 +10,7 @@ a5_read_raster(
   stat = "mean",
   bands = NULL,
   bbox = NULL,
+  bbox_align = c("pixel", "block"),
   src_nodata = NULL,
   mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
@@ -61,6 +62,20 @@ tag (falling back to \code{band_NN} when descriptions are absent).
 supplied, only tiles overlapping the bbox (in raster CRS) are fetched
 from the COG, and pixels outside the bbox are skipped. \code{NULL} (default)
 reads the whole raster.}
+
+\item{bbox_align}{How \code{bbox} selects pixels. \code{"pixel"} (default) keeps
+every pixel whose centre lies in the bbox. \code{"block"} keeps every
+internal COG block (tile) whose origin pixel centre lies in the bbox,
+whole, and skips the per-pixel test; the bbox is half-open on its
+\code{xmax} / \code{ymax} edges. Under \code{"block"} each block of the raster belongs
+to exactly one member of any partition of bboxes, so a caller that
+chunks a large read to bound memory fetches every block once instead
+of re-fetching the blocks straddling chunk edges, and per-cell partial
+sums and counts from the chunks add up exactly. The trade is
+block-granular chunk edges. When overviews are in use the block grid is
+that of the overview level read, which is the same for every chunk of
+a given \code{resolution} and \code{stat}. Requires \code{bbox}; not applicable to
+\code{mode = "centroid"}. See \code{\link[=a5_raster_info]{a5_raster_info()}} for the block grid.}
 
 \item{src_nodata}{Optional numeric scalar overriding the source nodata.
 Use this when the file's \code{TIFFTAG_GDAL_NODATA} tag is missing or wrong;

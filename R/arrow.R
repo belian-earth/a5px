@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews,store_opts See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align See [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
 #'   argument is ignored (one sample per cell) and the table metadata
@@ -36,6 +36,7 @@ a5_read_raster_arrow <- function(src,
                                  stat = "mean",
                                  bands = NULL,
                                  bbox = NULL,
+                                 bbox_align = c("pixel", "block"),
                                  src_nodata = NULL,
                                  mode = c("forward", "overlay", "centroid"),
                                  subsamples = NULL,
@@ -72,6 +73,7 @@ a5_read_raster_arrow <- function(src,
   }
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
+  bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
   src_nodata_v <- check_src_nodata(src_nodata)
   dequant_v <- check_dequant(dequant)
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
@@ -114,7 +116,8 @@ a5_read_raster_arrow <- function(src,
       dequant_min = dequant_v$min,
       overlay = identical(mode, "overlay"),
       subsamples = subsamples_v,
-      cell_edge_m = cell_edge_metres(mode, resolution)
+      cell_edge_m = cell_edge_metres(mode, resolution),
+      bbox_align_block = bbox_align_block
     )
   }
 
@@ -180,7 +183,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews,store_opts See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align See
 #'   [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
@@ -208,6 +211,7 @@ a5_raster_to_parquet <- function(src,
                                  stat = "mean",
                                  bands = NULL,
                                  bbox = NULL,
+                                 bbox_align = c("pixel", "block"),
                                  src_nodata = NULL,
                                  mode = c("forward", "overlay", "centroid"),
                                  subsamples = NULL,
@@ -246,6 +250,7 @@ a5_raster_to_parquet <- function(src,
   }
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
+  bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
   src_nodata_v <- check_src_nodata(src_nodata)
   dequant_v <- check_dequant(dequant)
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
@@ -298,7 +303,8 @@ a5_raster_to_parquet <- function(src,
     dequant_min = dequant_v$min,
     overlay = identical(mode, "overlay"),
     subsamples = subsamples_v,
-    cell_edge_m = cell_edge_metres(mode, resolution)
+    cell_edge_m = cell_edge_metres(mode, resolution),
+    bbox_align_block = bbox_align_block
   ))
 }
 
