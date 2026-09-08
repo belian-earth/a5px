@@ -1,4 +1,6 @@
-# a5px 0.0.0.9000
+# a5px 0.1.0
+
+First minor release.
 
 * New `aoi` and `containment` arguments on `a5_read_raster()`,
   `a5_read_raster_arrow()` and `a5_raster_to_parquet()`. `aoi` is a

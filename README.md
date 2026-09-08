@@ -102,33 +102,42 @@ a5view::a5_view(aef,
 
 ``` r
 # 1. tibble path: one numeric column per band, easy R interactivity
-tbl <- a5_read_raster(src, resolution, stat, bands, threads, io_concurrency,
-                      as_vector = FALSE)
+tbl <- a5_read_raster(src, resolution, stat, bands, as_vector = FALSE)
 
 # 2. arrow Table path: cell + FixedSizeList<float, n_bands> value column
-arr <- a5_read_raster_arrow(src, resolution, stat, bands, threads,
-                            io_concurrency, value_type = "float64")
+arr <- a5_read_raster_arrow(src, resolution, stat, bands, value_type = "float64")
 
 # 3. Rust-direct Parquet path: skips the R-side Arrow round-trip entirely
-a5_raster_to_parquet(src, dest, resolution, stat, bands, value_type,
-                     compression, threads, io_concurrency)
+a5_raster_to_parquet(src, dest, resolution, stat, bands, value_type, compression)
 
 # Convenience writer for either (1) or (2)
 a5_write_parquet(x, dest, compression = "zstd", ...)
+
+# Metadata without pixel reads
+a5_raster_info(src)          # dims, dtype, block grid, overviews, CRS, envelope
+a5_store_config(src)         # resolved object store config for a remote src
 ```
 
 All three readers share the same arguments:
 
-- `src` — path or URL. Schemes: local, `file://`, `http(s)://`, `s3://`,
-  `gs://`, `az://`. Cloud reads stream byte ranges; the full file is
-  never materialised.
-- `resolution` — A5 resolution (0–30); see `a5R::a5_cell_area()`.
+- `src` — path or URL. Schemes: local, `file://`, `http(s)://`,
+  `s3://`, `gs://`, `az://`. Cloud reads stream byte ranges; the full
+  file is never materialised.
+- `resolution` — A5 resolution (0--30); see `a5R::a5_cell_area()`.
 - `stat` — one or more of `"mean"`, `"sum"`, `"count"`, `"min"`,
-  `"max"`. A vector emits one column per (band, stat) pair on the tibble
-  path and one FixedSizeList per stat on the Arrow / Parquet paths.
-- `bands` — `NULL` (all), integer indices (1-based), or character band
-  names matched against the GDAL `DESCRIPTION` tag.
-- `threads`, `io_concurrency` — tile-level concurrency.
+  `"max"`, `"var"`, `"sd"`, `"majority"`, `"fractions"`. A vector emits
+  one column per (band, stat) pair on the tibble path and one
+  FixedSizeList per stat on the Arrow / Parquet paths.
+- `bands` — `NULL` (all), integer indices (1-based), or character
+  band names matched against the GDAL `DESCRIPTION` tag.
+- `bbox`, `bbox_align` — WGS 84 subset, per pixel or per whole COG
+  block (see Chunked reads).
+- `aoi`, `containment` — restrict output to the A5 cells of a polygon
+  (see Areas of interest).
+- `mode` — `"forward"`, `"overlay"` or `"centroid"` sampling.
+- `cpu_workers`, `io_concurrency` — tile-level concurrency.
+- `store_opts` — object store options for remote sources (see Remote
+  sources).
 
 ### Multi-stat in one pass
 
@@ -228,20 +237,74 @@ a5_raster_to_parquet(
 )
 ```
 
+### Remote sources
+
+Cloud clients are configured from the environment first (every `AWS_*`,
+`GOOGLE_*` and `AZURE_*` variable `object_store` understands, plus
+GDAL's `AWS_NO_SIGN_REQUEST=YES` for public buckets) and from
+`store_opts` second, so an explicit option always wins.
+
+``` r
+# public bucket outside us-east-1, no credentials
+Sys.setenv(AWS_NO_SIGN_REQUEST = "YES", AWS_REGION = "us-west-2")
+a5_read_raster("s3://us-west-2.opendata.source.coop/tge-labs/aef/.../tile.tiff", 14L)
+
+# the same without touching the environment
+a5_read_raster(src, 14L, store_opts = c(aws_region = "us-west-2",
+                                        aws_skip_signature = "true"))
+
+# check region, endpoint and signing before a long read
+a5_store_config(src, store_opts = c(aws_region = "us-west-2"))
+```
+
+The shared credentials file and `AWS_PROFILE` are not read; without
+credentials or `aws_skip_signature` the client falls back to instance
+metadata, which off-AWS costs a long timeout before failing.
+
+### Areas of interest
+
+`aoi` restricts a read to the A5 cells of a polygon, selected as in
+`a5R::a5_polygon_to_cells()`: `containment = "centre"` keeps cells whose
+centre is inside, `"overlapping"` every cell the polygon touches.
+Selection is cell-level: an included cell gets the statistics of all its
+valid pixels, including any outside the polygon.
+
+``` r
+a5_read_raster(src, 14L, aoi = sf::st_geometry(catchment), containment = "overlapping")
+
+# centroid mode samples the AOI cells directly: gap-free polygon coverage
+a5_read_raster(dem, 18L, mode = "centroid", aoi = catchment, containment = "overlapping")
+```
+
+### Chunked reads
+
+Accumulators hold every touched cell in memory, so very large reads are
+chunked by `bbox`. `bbox_align = "block"` takes whole COG blocks whose
+origin lies in the bbox, so every block is fetched exactly once across a
+partition and per-cell `sum` / `count` partials add exactly.
+
+``` r
+info <- a5_raster_info(src)          # block grid + WGS 84 envelope
+chunks <- split_bbox(info$bbox, 4, 4) # your own grid over info$bbox
+parts <- lapply(chunks, function(b) {
+  a5_read_raster(src, 18L, bbox = b, bbox_align = "block",
+                 stat = c("sum", "count"), use_overviews = FALSE)
+})
+```
+
 ### Configuration
 
 ``` r
-a5px_set_threads(8)                  # global default
-a5px_get_threads()                   # current
-options(a5px.threads = 8)            # picked up at .onLoad
-Sys.setenv(A5PX_NUM_THREADS = "8")   # ditto
+a5px_set_concurrency(cpu_workers = 8, io_concurrency = 16)   # global default
+a5px_get_concurrency()                                       # current
 Sys.setenv(A5PX_PROFILE = "1")       # dump stage timings to stderr
 ```
 
 ## What’s supported
 
 - **Formats** — tiled GeoTIFF and Cloud-Optimised GeoTIFF, ZSTD /
-  Deflate / LZW / JPEG / uncompressed.
+  Deflate / LZW / JPEG / uncompressed, from local files or S3 / GCS /
+  Azure / HTTP(S) object stores.
 - **CRS resolution** — EPSG codes, WKT in citation fields, and
   reconstruction from explicit GeoKey parameters. Custom centered
   projections written by GDAL (`+proj=laea +lon_0=... +lat_0=...`,
