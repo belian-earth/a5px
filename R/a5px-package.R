@@ -44,6 +44,17 @@
 #' - [a5_store_config()] --- the resolved object store configuration for a
 #'   remote `src`
 #'
+#' @section Areas of interest:
+#' `aoi` restricts a read to the A5 cells selected from a polygon by
+#' [a5R::a5_polygon_to_cells()], with `containment = "centre"` (cells whose
+#' centre is inside) or `"overlapping"` (every cell the polygon touches).
+#' Selection is at the cell level: an included cell gets the statistics of
+#' all its valid pixels, including any outside the polygon. This is the
+#' DGGS-native reading of zonal extraction, distinct from tools such as
+#' exactextract that clip pixels to the polygon; if you need clipped-pixel
+#' semantics, aggregate the cells afterwards with the polygon coverage
+#' fractions of your choice.
+#'
 #' @section Chunked reads:
 #' Accumulators hold every touched cell in memory (roughly 4.5 GB per
 #' million cells with 64 bands and `stat = c("mean", "count")`), so very

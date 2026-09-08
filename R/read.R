@@ -92,6 +92,22 @@
 #'   that of the overview level read, which is the same for every chunk of
 #'   a given `resolution` and `stat`. Requires `bbox`; not applicable to
 #'   `mode = "centroid"`. See [a5_raster_info()] for the block grid.
+#' @param aoi Optional area of interest: a polygon or multipolygon in WGS 84
+#'   as anything [a5R::a5_polygon_to_cells()] accepts (a `wk` geometry,
+#'   `sf` / `sfc`, WKT, a terra `SpatVector`, or a lon/lat matrix). The AOI
+#'   is converted to the set of A5 cells at `resolution` selected by
+#'   `containment`, and only those cells appear in the output. Selection is
+#'   cell-level: an included cell receives the statistics of **all** its
+#'   valid pixels, including any outside the polygon, and an excluded cell
+#'   receives nothing. Hole interiors are excluded. Combine with `bbox` to
+#'   chunk a large AOI; without `bbox`, tiles are selected by the envelope
+#'   of the AOI cells, so a very irregular AOI still reads its whole
+#'   envelope. In `mode = "centroid"` the AOI cells are sampled directly.
+#' @param containment How `aoi` selects cells, as in
+#'   [a5R::a5_polygon_to_cells()]: `"centre"` (default) keeps cells whose
+#'   centre lies inside the polygon; `"overlapping"` also keeps every cell
+#'   the polygon boundary touches, for gap-free coverage. Only used with
+#'   `aoi`.
 #' @param src_nodata Optional numeric scalar overriding the source nodata.
 #'   Use this when the file's `TIFFTAG_GDAL_NODATA` tag is missing or wrong;
 #'   it takes precedence over the metadata value when set. `NULL` (default)
@@ -188,6 +204,8 @@ a5_read_raster <- function(src,
                            bands = NULL,
                            bbox = NULL,
                            bbox_align = c("pixel", "block"),
+                           aoi = NULL,
+                           containment = c("centre", "overlapping"),
                            src_nodata = NULL,
                            mode = c("forward", "overlay", "centroid"),
                            subsamples = NULL,
@@ -222,6 +240,7 @@ a5_read_raster <- function(src,
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
   bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
+  aoi_v <- check_aoi(aoi, resolution, containment)
   src_nodata_v <- check_src_nodata(src_nodata)
   dequant_v <- check_dequant(dequant)
   check_stat_context(stats, dequant, as_vector, fractions_ok = TRUE)
@@ -242,7 +261,8 @@ a5_read_raster <- function(src,
       stats = stats,
       dequant_v = dequant_v,
       interp = interp,
-      store = store
+      store = store,
+      aoi_cells = aoi_v$cells
     ))
   }
 
@@ -264,7 +284,9 @@ a5_read_raster <- function(src,
     overlay = identical(mode, "overlay"),
     subsamples = subsamples_v,
     cell_edge_m = cell_edge_metres(mode, resolution),
-    bbox_align_block = bbox_align_block
+    bbox_align_block = bbox_align_block,
+    tile_bbox = aoi_v$tile_bbox,
+    aoi_cells_raw = aoi_v$cells_raw
   )
 
   cells <- new_a5_cell_from_rs(out$cell)
@@ -329,9 +351,10 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
                                  io_concurrency, as_vector, stats,
                                  dequant_v = list(lut = numeric(0), min = 0),
                                  interp = "nearest",
-                                 store = check_store_opts(NULL)) {
+                                 store = check_store_opts(NULL),
+                                 aoi_cells = NULL) {
   warn_centroid_stat(stats)
-  cells <- centroid_cells(src, resolution, bbox, store)
+  cells <- centroid_cells(src, resolution, bbox, store, aoi_cells)
   out <- a5_sample_at_cells_rs(
     src = src,
     store_keys = store$keys,
@@ -366,7 +389,24 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
 #' defaults to the raster's WGS 84 envelope when NULL.
 #' @noRd
 centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL),
-                           call = rlang::caller_env()) {
+                           aoi_cells = NULL, call = rlang::caller_env()) {
+  if (!is.null(aoi_cells)) {
+    # AOI cells are the sample set; a bbox further restricts by centroid.
+    cells <- a5R::a5_uncompact(aoi_cells, resolution = resolution)
+    if (!is.null(bbox)) {
+      ll <- a5R::a5_cell_to_lonlat(cells, as_dataframe = TRUE)
+      keep <- ll$lon >= bbox[1] & ll$lon <= bbox[3] &
+        ll$lat >= bbox[2] & ll$lat <= bbox[4]
+      cells <- cells[keep]
+    }
+    if (length(cells) == 0L) {
+      cli::cli_abort(
+        "No AOI cells have centroids within the requested bbox at resolution {resolution}.",
+        call = call
+      )
+    }
+    return(cells)
+  }
   if (is.null(bbox)) {
     bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src, store$keys, store$values))
   }

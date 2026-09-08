@@ -11,6 +11,8 @@ a5_read_raster(
   bands = NULL,
   bbox = NULL,
   bbox_align = c("pixel", "block"),
+  aoi = NULL,
+  containment = c("centre", "overlapping"),
   src_nodata = NULL,
   mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
@@ -76,6 +78,24 @@ block-granular chunk edges. When overviews are in use the block grid is
 that of the overview level read, which is the same for every chunk of
 a given \code{resolution} and \code{stat}. Requires \code{bbox}; not applicable to
 \code{mode = "centroid"}. See \code{\link[=a5_raster_info]{a5_raster_info()}} for the block grid.}
+
+\item{aoi}{Optional area of interest: a polygon or multipolygon in WGS 84
+as anything \code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}} accepts (a \code{wk} geometry,
+\code{sf} / \code{sfc}, WKT, a terra \code{SpatVector}, or a lon/lat matrix). The AOI
+is converted to the set of A5 cells at \code{resolution} selected by
+\code{containment}, and only those cells appear in the output. Selection is
+cell-level: an included cell receives the statistics of \strong{all} its
+valid pixels, including any outside the polygon, and an excluded cell
+receives nothing. Hole interiors are excluded. Combine with \code{bbox} to
+chunk a large AOI; without \code{bbox}, tiles are selected by the envelope
+of the AOI cells, so a very irregular AOI still reads its whole
+envelope. In \code{mode = "centroid"} the AOI cells are sampled directly.}
+
+\item{containment}{How \code{aoi} selects cells, as in
+\code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}}: \code{"centre"} (default) keeps cells whose
+centre lies inside the polygon; \code{"overlapping"} also keeps every cell
+the polygon boundary touches, for gap-free coverage. Only used with
+\code{aoi}.}
 
 \item{src_nodata}{Optional numeric scalar overriding the source nodata.
 Use this when the file's \code{TIFFTAG_GDAL_NODATA} tag is missing or wrong;

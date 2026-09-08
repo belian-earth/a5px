@@ -1,5 +1,18 @@
 # a5px 0.0.0.9000
 
+* New `aoi` and `containment` arguments on `a5_read_raster()`,
+  `a5_read_raster_arrow()` and `a5_raster_to_parquet()`. `aoi` is a
+  polygon in WGS 84 (anything `a5R::a5_polygon_to_cells()` accepts); it is
+  converted to the compacted A5 cell set selected by `containment`
+  (`"centre"` or `"overlapping"`, a5R >= 0.6.0) and only those cells appear
+  in the output. Selection is cell-level: an included cell receives the
+  statistics of all its valid pixels. Rust tests membership per cell
+  change by walking ancestors against the compacted set, so large AOIs at
+  fine resolutions cost little memory. Works in all three modes and
+  combines with `bbox` for chunking; in `mode = "centroid"` the AOI cells
+  are sampled directly, giving gap-free polygon coverage under
+  `"overlapping"`.
+
 * New `bbox_align = c("pixel", "block")` on `a5_read_raster()`,
   `a5_read_raster_arrow()` and `a5_raster_to_parquet()`. Under `"block"`
   a COG block is read whole when its origin pixel centre lies in `bbox`

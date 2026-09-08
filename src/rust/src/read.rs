@@ -18,7 +18,8 @@ use proj4rs::transform::transform as proj_transform;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::cell_raw::u64s_to_raw8_list;
+use crate::cell_mask::{CellMask, MaskCache};
+use crate::cell_raw::{raw8_list_to_u64s, u64s_to_raw8_list};
 use crate::error::{A5CogError, Result};
 use crate::geo::{
     GeoTransform, build_src_proj, extract_geotransform, is_nodata, parse_band_descriptions,
@@ -536,6 +537,7 @@ fn process_tile(
     nodata: Option<f64>,
     bbox_lonlat: Option<[f64; 4]>,
     dequant: Option<&DequantLut>,
+    mask: Option<&CellMask>,
     cfg: AccCfg,
 ) -> Result<AHashMap<u64, CellAcc>> {
     let n_out = data_band_offsets.len();
@@ -549,6 +551,7 @@ fn process_tile(
     let dst_is_latlong = dst_proj.is_latlong();
 
     let prof = profile_enabled();
+    let mut mask_cache = MaskCache::new();
 
     // build per-pixel projected coords, transform en-masse
     let n = actual_w * actual_h;
@@ -609,6 +612,10 @@ fn process_tile(
     // falling back to the full search-based `a5::lonlat_to_cell` (~26 estimates).
     let mut last_cell: Option<u64> = None;
     let mut last_a5cell: Option<a5::A5Cell> = None;
+    // accumulator entry cache, kept separate from the a5 lookup cache above:
+    // a pixel can pass the lookup yet be dropped by the AOI mask, and the
+    // lookup cache must still advance to its cell.
+    let mut last_entry_cell: u64 = NO_CELL;
     let mut last_entry_ptr: *mut CellAcc = std::ptr::null_mut();
     // hoist nodata branch out of the per-pixel loop
     let nodata_v = nodata;
@@ -696,20 +703,24 @@ fn process_tile(
             }
         };
         if let Some(t0) = t { sub_a5 += t0.elapsed().as_nanos() as u64; }
+        last_cell = Some(cell);
+        if !mask_cache.allows(mask, cell, resolution) {
+            continue;
+        }
 
         let t = if prof { Some(Instant::now()) } else { None };
-        // SAFETY: `last_entry_ptr` is only dereferenced when `last_cell == Some(cell)`,
+        // SAFETY: `last_entry_ptr` is only dereferenced when `last_entry_cell == cell`,
         // and the CellAcc it points at lives in `local` (this function's local
         // map). Every path that touches the map resets the pointer, so it is
         // only reused across consecutive same-cell hits with no interleaved
         // mutation, and the address stays valid.
-        let entry: &mut CellAcc = if last_cell == Some(cell) && !last_entry_ptr.is_null() {
+        let entry: &mut CellAcc = if last_entry_cell == cell && !last_entry_ptr.is_null() {
             unsafe { &mut *last_entry_ptr }
         } else {
             let v = local
                 .entry(cell)
                 .or_insert_with(|| CellAcc::new(n_out, cfg));
-            last_cell = Some(cell);
+            last_entry_cell = cell;
             last_entry_ptr = v as *mut CellAcc;
             v
         };
@@ -879,9 +890,11 @@ fn process_tile_overlay(
     nodata: Option<f64>,
     bbox_lonlat: Option<[f64; 4]>,
     dequant: Option<&DequantLut>,
+    mask: Option<&CellMask>,
     k: usize,
     cfg: AccCfg,
 ) -> Result<AHashMap<u64, CellAcc>> {
+    let mut mask_cache = MaskCache::new();
     let n_out = data_band_offsets.len();
     let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
     let actual_h = tile_h.min(height.saturating_sub(ty * tile_h));
@@ -995,6 +1008,9 @@ fn process_tile_overlay(
             if one_cell && corners_in_bbox {
                 n_interior += 1;
                 let cell = ids[0];
+                if !mask_cache.allows(mask, cell, resolution) {
+                    continue;
+                }
                 let entry: &mut CellAcc = if last_entry_cell == cell
                     && !last_entry_ptr.is_null()
                 {
@@ -1083,6 +1099,9 @@ fn process_tile_overlay(
                 }
             }
             for &(cell, cnt) in &touched {
+                if !mask_cache.allows(mask, cell, resolution) {
+                    continue;
+                }
                 let wgt = cnt as f64 * w_sub;
                 let entry: &mut CellAcc = if last_entry_cell == cell
                     && !last_entry_ptr.is_null()
@@ -1155,6 +1174,8 @@ async fn read_raster_async(
     overlay: Option<OverlayParams>,
     fractions: bool,
     bbox_align_block: bool,
+    tile_bbox: Option<[f64; 4]>,
+    mask: Option<Arc<CellMask>>,
 ) -> Result<Output> {
     let cfg = AccCfg::from_stats(&stats, fractions);
     let (store, path) = parse_src(src, &store_opts)?;
@@ -1313,7 +1334,10 @@ async fn read_raster_async(
     // 4 edge midpoints (re-projected to the raster CRS) is a sufficient
     // axis-aligned envelope to pick the candidate tiles. The per-pixel
     // lon/lat check inside process_tile then exact-filters at the boundary.
-    let tiles: Vec<(usize, usize)> = if let Some(b) = bbox_lonlat {
+    // `bbox_lonlat` (user bbox) drives both tile selection and the per-pixel
+    // filter; `tile_bbox` (the AOI cells' envelope) only drives tile
+    // selection when no user bbox is given, so AOI cells keep every pixel.
+    let tiles: Vec<(usize, usize)> = if let Some(b) = bbox_lonlat.or(tile_bbox) {
         let (tx_lo, ty_lo, tx_hi, ty_hi) = match projected_tile_range(
             b, &src_proj, &dst_proj, &gt, width, height, tile_w, tile_h,
         )? {
@@ -1393,6 +1417,7 @@ async fn read_raster_async(
         let gt_c = gt;
         let bbox_lonlat_c = bbox_pixel_filter;
         let dequant_c = dequant.clone();
+        let mask_c = mask.clone();
         consumer_handles.push(tokio::task::spawn_blocking(move || {
             let mut local: AHashMap<u64, CellAcc> = AHashMap::new();
             let prof = profile_enabled();
@@ -1444,6 +1469,7 @@ async fn read_raster_async(
                         nodata,
                         bbox_lonlat_c,
                         dequant_c.as_deref(),
+                        mask_c.as_deref(),
                         k,
                         cfg,
                     )?
@@ -1467,6 +1493,7 @@ async fn read_raster_async(
                         nodata,
                         bbox_lonlat_c,
                         dequant_c.as_deref(),
+                        mask_c.as_deref(),
                         cfg,
                     )?
                 };
@@ -2019,6 +2046,8 @@ fn a5_read_raster_rs(
     subsamples: i32,
     cell_edge_m: f64,
     bbox_align_block: bool,
+    tile_bbox: Vec<f64>,
+    aoi_cells_raw: List,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -2049,6 +2078,8 @@ fn a5_read_raster_rs(
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
+    let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
+    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_cells_raw)).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -2066,6 +2097,8 @@ fn a5_read_raster_rs(
         overlay_opt,
         fractions,
         bbox_align_block,
+        tile_bbox_opt,
+        mask,
     ))?;
 
     if prof {
@@ -2168,6 +2201,8 @@ fn a5_read_raster_flat_rs(
     subsamples: i32,
     cell_edge_m: f64,
     bbox_align_block: bool,
+    tile_bbox: Vec<f64>,
+    aoi_cells_raw: List,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -2203,6 +2238,8 @@ fn a5_read_raster_flat_rs(
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
+    let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
+    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_cells_raw)).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -2220,6 +2257,8 @@ fn a5_read_raster_flat_rs(
         overlay_opt,
         false,
         bbox_align_block,
+        tile_bbox_opt,
+        mask,
     ))?;
 
     if prof {
@@ -2299,6 +2338,8 @@ fn a5_raster_to_parquet_rs(
     subsamples: i32,
     cell_edge_m: f64,
     bbox_align_block: bool,
+    tile_bbox: Vec<f64>,
+    aoi_cells_raw: List,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<String> {
@@ -2336,6 +2377,8 @@ fn a5_raster_to_parquet_rs(
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
+    let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
+    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_cells_raw)).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(
         src,
@@ -2353,6 +2396,8 @@ fn a5_raster_to_parquet_rs(
         overlay_opt,
         false,
         bbox_align_block,
+        tile_bbox_opt,
+        mask,
     ))?;
 
     if prof {
