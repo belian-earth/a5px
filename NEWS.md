@@ -1,4 +1,102 @@
-# a5px 0.0.0.9000
+# a5px 0.1.0
+
+First minor release.
+
+* Fixed: band subsets of big-endian (`MM`) planar TIFFs were decoded
+  without byte swapping and returned garbage; such files now take the
+  full-tile fetch path.
+
+* Fixed: a float32 nodata value not exactly representable in single
+  precision (for example a literal `-9999.9` tag) never matched, so nodata
+  pixels were counted as valid. The sentinel is now rounded through f32
+  when the source is float32, for tag values and `src_nodata` alike.
+
+* Fixed: any coordinate that failed to project aborted the whole read
+  (`bbox = c(-180, -90, 180, 90)` on a LAEA raster errored with a
+  tolerance message). Points are now projected individually and
+  unprojectable ones dropped, in the bbox and tile filters, the pixel
+  loops and the footprint envelope. Envelopes also sample 32 points per
+  rectangle edge instead of corners and midpoints, so curved projected
+  edges no longer clip the reported `bbox` or the tile selection.
+
+* Fixed: bicubic and lanczos centroid sampling renormalised partial
+  stencils over kernels with negative lobes, which could push values
+  outside the data range next to nodata or the raster edge. Cells whose
+  4x4 / 6x6 stencil is incomplete now fall back to bilinear over the
+  valid pixels; complete stencils are unchanged.
+
+* Memory: the per-cell accumulator now has three layouts chosen from the
+  requested stats. `mean` / `sum` / `count` use 16 bytes per band per cell
+  instead of 48, so a 64-band embedding read holds three times as many
+  cells in the same memory. `min` / `max` add the extremes and `var` /
+  `sd` the full Welford state. Results are unchanged.
+
+* Memory: centroid mode no longer allocates a dense cells x bands buffer
+  per CPU worker (16 bytes per cell-band per worker, so 6.6 GB for 0.8 M
+  cells x 64 bands on 8 workers). Workers now return sparse per-tile
+  partials merged into one buffer.
+
+* Performance: forward reads with a nodata sentinel project only pixels
+  with at least one valid band; all-nodata pixels are skipped before the
+  CRS transform. Centroid setup projects cell centroids in parallel. The
+  per-tile accumulator map is no longer pre-sized to a quarter of the
+  tile's pixels.
+
+* New `aoi` and `containment` arguments on `a5_read_raster()`,
+  `a5_read_raster_arrow()` and `a5_raster_to_parquet()`. `aoi` is a
+  polygon in WGS 84 (anything `a5R::a5_polygon_to_cells()` accepts); it is
+  converted to the compacted A5 cell set selected by `containment`
+  (`"centre"` or `"overlapping"`, a5R >= 0.6.0) and only those cells appear
+  in the output. Selection is cell-level: an included cell receives the
+  statistics of all its valid pixels. Rust tests membership per cell
+  change by walking ancestors against the compacted set, so large AOIs at
+  fine resolutions cost little memory. Works in all three modes and
+  combines with `bbox` for chunking; in `mode = "centroid"` the AOI cells
+  are sampled directly, giving gap-free polygon coverage under
+  `"overlapping"`.
+
+* New `bbox_align = c("pixel", "block")` on `a5_read_raster()`,
+  `a5_read_raster_arrow()` and `a5_raster_to_parquet()`. Under `"block"`
+  a COG block is read whole when its origin pixel centre lies in `bbox`
+  (half-open on the max edges) and the per-pixel bbox test is skipped, so
+  every block belongs to exactly one member of any bbox partition. Callers
+  that chunk large reads to bound memory no longer re-fetch the blocks
+  straddling chunk edges (the second observation in #4: a 3x3 chunking
+  cost 4x the bytes of a single read) and per-cell partial sums and counts
+  add exactly across chunks.
+
+* New `a5_raster_info()` returns a raster's dimensions, data type, nodata,
+  band names, interleave, compression, block grid, usable overview levels,
+  CRS and WGS 84 envelope without reading pixels.
+
+* Remote sources are now configured from the environment and from a new
+  `store_opts` argument on `a5_read_raster()`, `a5_read_raster_arrow()`
+  and `a5_raster_to_parquet()` (#4). Previously `s3://`, `gs://` and
+  `az://` clients were built from the URL alone: `AWS_REGION` and
+  credential variables were ignored, the region defaulted to `us-east-1`,
+  and there was no unsigned mode, so public buckets outside us-east-1 were
+  unreadable (off-AWS the client spent 13 s timing out against instance
+  metadata). Clients now start from `object_store`'s `from_env()`
+  defaults, honour GDAL's `AWS_NO_SIGN_REQUEST=YES`, and apply
+  `store_opts` last so explicit keys win. Unknown keys, and any key passed
+  with a local path, are errors. New `a5_store_config()` reports the
+  resolved region, endpoint and signing mode without a request.
+
+* Updated the bundled `a5` Rust crate from 0.7.3 to 0.10.0 and the Arrow /
+  Parquet crates to 59. The a5 point-to-cell projection is faster and the
+  cell cache fast path now converts each pixel to A5's internal spherical
+  frame once, sharing it between the cached pentagon test and the search
+  fallback. On the 12-band Sentinel-2 test COG at resolution 16 the a5
+  indexing sub-stage fell by about 37% and single-worker wall time by
+  about 25%. Cell identifiers and values are unchanged.
+
+* Requires a5R >= 0.6.0. The overlay auto-`subsamples` rule and the
+  overview target now use the true average cell edge length
+  (`a5R::a5_cell_edge_length_avg()`) instead of `sqrt(cell_area)`, which
+  overstates the edge by about 22%. Auto-selected `subsamples` rises by one
+  step in some pixel/cell ratios and overview selection is marginally more
+  conservative; both heuristics now match their documentation literally.
+  Explicit `subsamples` values are unaffected.
 
 * `a5_read_raster_arrow()` and `a5_raster_to_parquet()` gain
   `mode = "centroid"` and the `interp` argument, closing the mode gap with

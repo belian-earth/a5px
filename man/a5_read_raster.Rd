@@ -10,6 +10,9 @@ a5_read_raster(
   stat = "mean",
   bands = NULL,
   bbox = NULL,
+  bbox_align = c("pixel", "block"),
+  aoi = NULL,
+  containment = c("centre", "overlapping"),
   src_nodata = NULL,
   mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
@@ -18,12 +21,15 @@ a5_read_raster(
   io_concurrency = NULL,
   dequant = NULL,
   as_vector = FALSE,
-  use_overviews = is.null(dequant)
+  use_overviews = is.null(dequant),
+  store_opts = NULL
 )
 }
 \arguments{
 \item{src}{Path or URL to a GeoTIFF / COG. Supported schemes: local path
-(no scheme), \verb{file://}, \verb{http(s)://}, \verb{s3://}, \verb{gs://}, \verb{az://}.}
+(no scheme), \verb{file://}, \verb{http(s)://}, \verb{s3://}, \verb{gs://}, \verb{az://}. See
+the "Remote sources" section of \link{a5px-package} for how cloud clients
+are configured.}
 
 \item{resolution}{Integer scalar A5 resolution (0--30).}
 
@@ -58,6 +64,38 @@ tag (falling back to \code{band_NN} when descriptions are absent).
 supplied, only tiles overlapping the bbox (in raster CRS) are fetched
 from the COG, and pixels outside the bbox are skipped. \code{NULL} (default)
 reads the whole raster.}
+
+\item{bbox_align}{How \code{bbox} selects pixels. \code{"pixel"} (default) keeps
+every pixel whose centre lies in the bbox. \code{"block"} keeps every
+internal COG block (tile) whose origin pixel centre lies in the bbox,
+whole, and skips the per-pixel test; the bbox is half-open on its
+\code{xmax} / \code{ymax} edges. Under \code{"block"} each block of the raster belongs
+to exactly one member of any partition of bboxes, so a caller that
+chunks a large read to bound memory fetches every block once instead
+of re-fetching the blocks straddling chunk edges, and per-cell partial
+sums and counts from the chunks add up exactly. The trade is
+block-granular chunk edges. When overviews are in use the block grid is
+that of the overview level read, which is the same for every chunk of
+a given \code{resolution} and \code{stat}. Requires \code{bbox}; not applicable to
+\code{mode = "centroid"}. See \code{\link[=a5_raster_info]{a5_raster_info()}} for the block grid.}
+
+\item{aoi}{Optional area of interest: a polygon or multipolygon in WGS 84
+as anything \code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}} accepts (a \code{wk} geometry,
+\code{sf} / \code{sfc}, WKT, a terra \code{SpatVector}, or a lon/lat matrix). The AOI
+is converted to the set of A5 cells at \code{resolution} selected by
+\code{containment}, and only those cells appear in the output. Selection is
+cell-level: an included cell receives the statistics of \strong{all} its
+valid pixels, including any outside the polygon, and an excluded cell
+receives nothing. Hole interiors are excluded. Combine with \code{bbox} to
+chunk a large AOI; without \code{bbox}, tiles are selected by the envelope
+of the AOI cells, so a very irregular AOI still reads its whole
+envelope. In \code{mode = "centroid"} the AOI cells are sampled directly.}
+
+\item{containment}{How \code{aoi} selects cells, as in
+\code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}}: \code{"centre"} (default) keeps cells whose
+centre lies inside the polygon; \code{"overlapping"} also keeps every cell
+the polygon boundary touches, for gap-free coverage. Only used with
+\code{aoi}.}
 
 \item{src_nodata}{Optional numeric scalar overriding the source nodata.
 Use this when the file's \code{TIFFTAG_GDAL_NODATA} tag is missing or wrong;
@@ -133,6 +171,16 @@ full-resolution image is read regardless. The default is \code{TRUE} unless
 overview pixel that is a mean of quantized codes decodes incorrectly.
 Explicitly passing \code{TRUE} together with \code{dequant} warns and proceeds,
 for sources whose overviews were built with nearest or mode resampling.}
+
+\item{store_opts}{Named character vector or named list of object store
+options for a remote \code{src}, applied after the environment defaults so
+an explicit option always wins. Keys are the \code{object_store} config
+keys for the provider, e.g. \code{aws_region}, \code{aws_skip_signature},
+\code{aws_access_key_id}, \code{aws_secret_access_key}, \code{aws_session_token},
+\code{aws_endpoint}, \code{aws_virtual_hosted_style_request}, the \verb{google_*} /
+\verb{azure_*} equivalents, and for plain HTTP(S) the client keys such as
+\code{timeout} or \code{allow_http}. Unknown keys, and any key given with a
+local path, are errors. Inspect the result with \code{\link[=a5_store_config]{a5_store_config()}}.}
 }
 \value{
 A \code{\link[tibble:tibble]{tibble::tibble()}} with columns:

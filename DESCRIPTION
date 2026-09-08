@@ -1,6 +1,6 @@
 Package: a5px
 Title: Read GeoTIFF and Cloud-Optimised GeoTIFF Rasters as A5 Cells
-Version: 0.0.0.9000
+Version: 0.1.0
 Authors@R: c(
     person("Hugh", "Graham", role = c("aut", "cre"),
            email = "hugh@belian.earth"),
@@ -8,16 +8,19 @@ Authors@R: c(
     )
 Description: Rust-backed reader that aggregates raster pixels directly into
     A5 pentagonal discrete-global-grid cells. Streams GeoTIFF / Cloud-Optimised
-    GeoTIFF data via async-tiff and object_store, projects pixel centres to
-    WGS 84 with proj4rs, and accumulates per-cell statistics (mean, sum, count,
-    min, max). Designed to keep large rasters out of memory and skip the vector
-    polygonisation step in classical zonal-statistics pipelines.
+    GeoTIFF data from local files or S3, GCS, Azure and HTTP sources via
+    async-tiff and object_store, projects pixel centres to WGS 84 with
+    proj4rs, and accumulates per-cell statistics (mean, sum, count, min, max,
+    var, sd, majority, class fractions) under forward, area-weighted overlay
+    or centroid sampling, optionally restricted to a polygon area of
+    interest. Designed to keep large rasters out of memory and skip the
+    vector polygonisation step in classical zonal-statistics pipelines.
 License: Apache License (>= 2)
 URL: https://github.com/belian-earth/a5px, https://belian-earth.github.io/a5px/
 BugReports: https://github.com/belian-earth/a5px/issues
 Depends:
     R (>= 4.2),
-    a5R (>= 0.4.0)
+    a5R (>= 0.6.0)
 Imports:
     cli,
     rlang (>= 1.1.0),

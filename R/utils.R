@@ -70,6 +70,29 @@ check_bbox <- function(bbox, call = rlang::caller_env()) {
   v
 }
 
+#' Resolve `bbox_align` to the logical Rust flag. `"block"` needs a bbox to
+#' align and only applies to the pixel-driven modes.
+#' @noRd
+check_bbox_align <- function(bbox_align, bbox_v, mode, call = rlang::caller_env()) {
+  bbox_align <- rlang::arg_match(bbox_align, c("pixel", "block"), error_call = call)
+  if (bbox_align == "pixel") {
+    return(FALSE)
+  }
+  if (!length(bbox_v)) {
+    cli::cli_abort(
+      "{.code bbox_align = \"block\"} requires {.arg bbox}.",
+      call = call
+    )
+  }
+  if (identical(mode, "centroid")) {
+    cli::cli_abort(
+      "{.code bbox_align = \"block\"} does not apply to {.code mode = \"centroid\"}, which is cell-driven.",
+      call = call
+    )
+  }
+  TRUE
+}
+
 #' Validate a user-supplied src_nodata override.
 #' @noRd
 check_src_nodata <- function(src_nodata, call = rlang::caller_env()) {
@@ -171,6 +194,14 @@ check_subsamples <- function(subsamples, mode, call = rlang::caller_env()) {
   s
 }
 
+#' Average A5 cell edge length in metres at `resolution` (a5R >= 0.6.0;
+#' individual edges vary by roughly +/-10%). Shared by the overlay auto-k
+#' rule and the overview target so both mean "cell edge" literally.
+#' @noRd
+a5_edge_metres <- function(resolution) {
+  as.numeric(a5R::a5_cell_edge_length_avg(resolution, units = "m"))
+}
+
 #' A5 cell edge length in metres, passed to Rust for overlay auto-k.
 #' 0 when overlay is off (the value is unused there).
 #' @noRd
@@ -178,7 +209,7 @@ cell_edge_metres <- function(mode, resolution) {
   if (!identical(mode, "overlay")) {
     return(0)
   }
-  sqrt(as.numeric(a5R::a5_cell_area(resolution, units = "m^2")))
+  a5_edge_metres(resolution)
 }
 
 #' Resolve the overview target passed to Rust.
@@ -200,7 +231,7 @@ overview_target_metres <- function(use_overviews, stats, resolution,
   if (!isTRUE(use_overviews) || !identical(stats, "mean")) {
     return(0)
   }
-  sqrt(as.numeric(a5R::a5_cell_area(resolution, units = "m^2")))
+  a5_edge_metres(resolution)
 }
 
 #' Normalise the user-facing `bands` arg into integer indices or character names.

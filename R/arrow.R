@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment See [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
 #'   argument is ignored (one sample per cell) and the table metadata
@@ -36,6 +36,9 @@ a5_read_raster_arrow <- function(src,
                                  stat = "mean",
                                  bands = NULL,
                                  bbox = NULL,
+                                 bbox_align = c("pixel", "block"),
+                                 aoi = NULL,
+                                 containment = c("centre", "overlapping"),
                                  src_nodata = NULL,
                                  mode = c("forward", "overlay", "centroid"),
                                  subsamples = NULL,
@@ -45,9 +48,11 @@ a5_read_raster_arrow <- function(src,
                                  dequant = NULL,
                                  as_vector = FALSE,
                                  value_type = c("float64", "float32"),
-                                 use_overviews = is.null(dequant)) {
+                                 use_overviews = is.null(dequant),
+                                 store_opts = NULL) {
   rlang::check_installed("arrow", reason = "to construct Arrow tables")
   check_scalar_string(src, "src")
+  store <- check_store_opts(store_opts)
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
@@ -70,6 +75,8 @@ a5_read_raster_arrow <- function(src,
   }
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
+  bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
+  aoi_v <- check_aoi(aoi, resolution, containment)
   src_nodata_v <- check_src_nodata(src_nodata)
   dequant_v <- check_dequant(dequant)
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
@@ -79,9 +86,12 @@ a5_read_raster_arrow <- function(src,
   out <- if (mode == "centroid") {
     warn_centroid_stat(stats)
     cells_in <- centroid_cells(src, resolution,
-                               if (length(bbox_v)) bbox_v else NULL)
+                               if (length(bbox_v)) bbox_v else NULL, store,
+                               aoi_v$cells)
     a5_sample_at_cells_flat_rs(
       src = src,
+      store_keys = store$keys,
+      store_values = store$values,
       cells_raw = vctrs::vec_data(cells_in),
       bands_idx = band_sel$idx,
       bands_names = band_sel$names,
@@ -95,6 +105,8 @@ a5_read_raster_arrow <- function(src,
   } else {
     a5_read_raster_flat_rs(
       src = src,
+      store_keys = store$keys,
+      store_values = store$values,
       resolution = resolution,
       stats = stats,
       bands_idx = band_sel$idx,
@@ -108,7 +120,10 @@ a5_read_raster_arrow <- function(src,
       dequant_min = dequant_v$min,
       overlay = identical(mode, "overlay"),
       subsamples = subsamples_v,
-      cell_edge_m = cell_edge_metres(mode, resolution)
+      cell_edge_m = cell_edge_metres(mode, resolution),
+      bbox_align_block = bbox_align_block,
+      tile_bbox = aoi_v$tile_bbox,
+      aoi_cells_raw = aoi_v$cells_raw
     )
   }
 
@@ -174,7 +189,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment See
 #'   [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
@@ -202,6 +217,9 @@ a5_raster_to_parquet <- function(src,
                                  stat = "mean",
                                  bands = NULL,
                                  bbox = NULL,
+                                 bbox_align = c("pixel", "block"),
+                                 aoi = NULL,
+                                 containment = c("centre", "overlapping"),
                                  src_nodata = NULL,
                                  mode = c("forward", "overlay", "centroid"),
                                  subsamples = NULL,
@@ -212,8 +230,10 @@ a5_raster_to_parquet <- function(src,
                                  cpu_workers = NULL,
                                  io_concurrency = NULL,
                                  dequant = NULL,
-                                 use_overviews = is.null(dequant)) {
+                                 use_overviews = is.null(dequant),
+                                 store_opts = NULL) {
   check_scalar_string(src, "src")
+  store <- check_store_opts(store_opts)
   check_scalar_string(dest, "dest")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
@@ -238,6 +258,8 @@ a5_raster_to_parquet <- function(src,
   }
   band_sel <- parse_bands_arg(bands)
   bbox_v <- check_bbox(bbox)
+  bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
+  aoi_v <- check_aoi(aoi, resolution, containment)
   src_nodata_v <- check_src_nodata(src_nodata)
   dequant_v <- check_dequant(dequant)
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
@@ -247,9 +269,12 @@ a5_raster_to_parquet <- function(src,
   if (mode == "centroid") {
     warn_centroid_stat(stats)
     cells_in <- centroid_cells(src, resolution,
-                               if (length(bbox_v)) bbox_v else NULL)
+                               if (length(bbox_v)) bbox_v else NULL, store,
+                               aoi_v$cells)
     return(invisible(a5_sample_to_parquet_rs(
       src = src,
+      store_keys = store$keys,
+      store_values = store$values,
       dest = dest,
       resolution = resolution,
       cells_raw = vctrs::vec_data(cells_in),
@@ -269,6 +294,8 @@ a5_raster_to_parquet <- function(src,
 
   invisible(a5_raster_to_parquet_rs(
     src = src,
+    store_keys = store$keys,
+    store_values = store$values,
     dest = dest,
     resolution = resolution,
     stats = stats,
@@ -286,7 +313,10 @@ a5_raster_to_parquet <- function(src,
     dequant_min = dequant_v$min,
     overlay = identical(mode, "overlay"),
     subsamples = subsamples_v,
-    cell_edge_m = cell_edge_metres(mode, resolution)
+    cell_edge_m = cell_edge_metres(mode, resolution),
+    bbox_align_block = bbox_align_block,
+    tile_bbox = aoi_v$tile_bbox,
+    aoi_cells_raw = aoi_v$cells_raw
   ))
 }
 

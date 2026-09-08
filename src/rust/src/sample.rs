@@ -183,6 +183,7 @@ struct TileWork {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sample_at_cells_async(
     src: &str,
+    store_opts: crate::store::StoreOpts,
     cells_in: Vec<u64>,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
@@ -192,7 +193,7 @@ pub(crate) async fn sample_at_cells_async(
     dequant: Option<Arc<crate::read::DequantLut>>,
     interp: Interp,
 ) -> Result<CentroidOutput> {
-    let (store, path) = crate::read::parse_src_pub(src)?;
+    let (store, path) = crate::store::parse_src(src, &store_opts)?;
     let reader = ObjectReader::new(store, path);
     let cache = ReadaheadMetadataCache::new(reader.clone());
     let mut meta = TiffMetadataReader::try_open(&cache).await?;
@@ -235,7 +236,10 @@ pub(crate) async fn sample_at_cells_async(
         }
     };
 
-    let nodata = src_nodata_override.or(parse_nodata(&ifd_owned));
+    let nodata = crate::read::nodata_in_source_precision(
+        &ifd_owned,
+        src_nodata_override.or(parse_nodata(&ifd_owned)),
+    );
     let band_names_v = parse_band_descriptions(&ifd_owned, n_bands);
     let all_band_names: Vec<String> = if band_names_v.is_empty() {
         (0..n_bands).map(|i| format!("band_{:02}", i + 1)).collect()
@@ -287,51 +291,60 @@ pub(crate) async fn sample_at_cells_async(
     let inv_gt1 = 1.0 / gt.0[1];
     let inv_gt5 = 1.0 / gt.0[5];
 
-    for (i, &cell) in cells_in.iter().enumerate() {
-        let ll = match a5::cell_to_lonlat(cell) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let mut p = (ll.longitude(), ll.latitude(), 0.0);
-        // dst_proj is +longlat → convert deg → rad for the inverse
-        if dst_is_latlong {
-            p.0 = p.0.to_radians();
-            p.1 = p.1.to_radians();
-        }
-        // forward direction here: WGS84 (dst) → raster CRS (src)
-        if proj_transform(&dst_proj, &src_proj, &mut p).is_err() {
-            continue;
-        }
-        if src_is_latlong {
-            p.0 = p.0.to_degrees();
-            p.1 = p.1.to_degrees();
-        }
-        let (x, y) = (p.0, p.1);
-        if !x.is_finite() || !y.is_finite() {
-            continue;
-        }
-        let col = (x - gt.0[0]) * inv_gt1;
-        let row = (y - gt.0[3]) * inv_gt5;
-        // the centroid itself must lie inside the raster (as for nearest);
-        // stencil pixels beyond the edge are skipped and renormalised away
-        if col < 0.0 || row < 0.0 || col >= width as f64 || row >= height as f64 {
-            continue;
-        }
-        let (sx, nx) = stencil_start(interp, col);
-        let (sy, ny) = stencil_start(interp, row);
-        let cx_lo = sx.max(0) as usize;
-        let cx_hi = (sx + nx as i64 - 1).min(width as i64 - 1) as usize;
-        let cy_lo = sy.max(0) as usize;
-        let cy_hi = (sy + ny as i64 - 1).min(height as i64 - 1) as usize;
-        if cx_lo > cx_hi || cy_lo > cy_hi {
-            continue;
-        }
+    // Per-cell centroid -> fractional pixel coordinate and stencil extent,
+    // computed in parallel (the projection dominates for millions of cells);
+    // the bucket build below is a cheap serial pass over the results.
+    let placed: Vec<Option<(f64, f64, usize, usize, usize, usize)>> = {
+        use rayon::prelude::*;
+        cells_in
+            .par_iter()
+            .map(|&cell| {
+                let ll = a5::cell_to_lonlat(cell).ok()?;
+                let mut p = (ll.longitude(), ll.latitude(), 0.0);
+                // dst_proj is +longlat -> convert deg -> rad for the inverse
+                if dst_is_latlong {
+                    p.0 = p.0.to_radians();
+                    p.1 = p.1.to_radians();
+                }
+                // forward direction here: WGS84 (dst) -> raster CRS (src)
+                proj_transform(&dst_proj, &src_proj, &mut p).ok()?;
+                if src_is_latlong {
+                    p.0 = p.0.to_degrees();
+                    p.1 = p.1.to_degrees();
+                }
+                let (x, y) = (p.0, p.1);
+                if !x.is_finite() || !y.is_finite() {
+                    return None;
+                }
+                let col = (x - gt.0[0]) * inv_gt1;
+                let row = (y - gt.0[3]) * inv_gt5;
+                // the centroid itself must lie inside the raster (as for
+                // nearest); stencil pixels beyond the edge are skipped
+                if col < 0.0 || row < 0.0 || col >= width as f64 || row >= height as f64 {
+                    return None;
+                }
+                let (sx, nx) = stencil_start(interp, col);
+                let (sy, ny) = stencil_start(interp, row);
+                let cx_lo = sx.max(0) as usize;
+                let cx_hi = (sx + nx as i64 - 1).min(width as i64 - 1) as usize;
+                let cy_lo = sy.max(0) as usize;
+                let cy_hi = (sy + ny as i64 - 1).min(height as i64 - 1) as usize;
+                if cx_lo > cx_hi || cy_lo > cy_hi {
+                    return None;
+                }
+                Some((col, row, cx_lo, cx_hi, cy_lo, cy_hi))
+            })
+            .collect()
+    };
+    for (i, pl) in placed.iter().enumerate() {
+        let Some((col, row, cx_lo, cx_hi, cy_lo, cy_hi)) = *pl else { continue };
         for ty in (cy_lo / tile_h)..=(cy_hi / tile_h) {
             for tx in (cx_lo / tile_w)..=(cx_hi / tile_w) {
                 buckets.entry((tx, ty)).or_default().push((i, col, row));
             }
         }
     }
+    drop(placed);
 
     if buckets.is_empty() {
         return Ok(CentroidOutput {
@@ -346,6 +359,7 @@ pub(crate) async fn sample_at_cells_async(
 
     let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
         && n_out < n_bands
+        && endianness.is_native()
         && matches!(
             ifd_owned.predictor(),
             None | Some(async_tiff::tags::Predictor::None)
@@ -366,9 +380,36 @@ pub(crate) async fn sample_at_cells_async(
     let channel_depth = (cpu_workers * 2).max(4);
     let (tx_chan_outer, rx_chan) = async_channel::bounded::<TileWork>(channel_depth);
 
-    let mut consumer_handles: Vec<
-        tokio::task::JoinHandle<Result<(Vec<f64>, Vec<f64>)>>,
-    > = Vec::with_capacity(cpu_workers);
+    // Kernels with negative lobes (bicubic, lanczos) must not be
+    // renormalised over a partial stencil: dropping a pixel from a kernel
+    // whose weights sum to 1 through cancellation can amplify the survivors
+    // and push the result outside the data range. Those kernels therefore
+    // also accumulate the bilinear stencil, and any (cell, band) whose
+    // full stencil was not entirely valid falls back to the bilinear
+    // estimate over its valid 2x2 pixels (positive weights, safe to
+    // renormalise). nearest / bilinear renormalise directly.
+    let needs_fallback = matches!(interp, Interp::Bicubic | Interp::Lanczos);
+
+    // Per-worker partials are sparse: one record per (cell, tile) pair
+    // handled by this worker, merged additively into the global buffers
+    // afterwards. Dense per-worker buffers of n_cells x n_bands were the
+    // previous design and scaled with the worker count.
+    struct Partials {
+        idx: Vec<u32>,
+        n_valid: Vec<u32>,
+        k_sum: Vec<f64>,
+        k_w: Vec<f64>,
+        // bilinear partials, recorded only for records whose stencil is
+        // incomplete within this tile or crosses a tile edge (the only
+        // records that can end up needing the fallback); `b_rec` indexes
+        // into `idx`
+        b_rec: Vec<u32>,
+        b_sum: Vec<f64>,
+        b_w: Vec<f64>,
+    }
+
+    let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<Partials>>> =
+        Vec::with_capacity(cpu_workers);
     for _ in 0..cpu_workers {
         let rx = rx_chan.clone();
         let ifd = Arc::clone(&ifd_arc);
@@ -377,12 +418,23 @@ pub(crate) async fn sample_at_cells_async(
         let selected_bands = Arc::clone(&selected_bands_arc);
         let dequant_c = dequant.clone();
         consumer_handles.push(tokio::task::spawn_blocking(move || {
-            // partial weighted sums and weight totals per (cell, band);
-            // the cross-worker merge is a plain elementwise addition
-            let mut sums = vec![0.0f64; n_in * n_out];
-            let mut wsums = vec![0.0f64; n_in * n_out];
+            let mut part = Partials {
+                idx: Vec::new(),
+                n_valid: Vec::new(),
+                k_sum: Vec::new(),
+                k_w: Vec::new(),
+                b_rec: Vec::new(),
+                b_sum: Vec::new(),
+                b_w: Vec::new(),
+            };
             let mut wx = [0.0f64; 6];
             let mut wy = [0.0f64; 6];
+            let mut bx = [0.0f64; 6];
+            let mut by = [0.0f64; 6];
+            let mut ks = vec![0.0f64; n_out];
+            let mut kw = vec![0.0f64; n_out];
+            let mut bs = vec![0.0f64; n_out];
+            let mut bw = vec![0.0f64; n_out];
             while let Ok(work) = rx.recv_blocking() {
                 let (data, _shape, data_n_bands_eff, offsets_arc): (
                     TypedArray,
@@ -417,10 +469,30 @@ pub(crate) async fn sample_at_cells_async(
                 let tile_y0 = work.ty * tile_h;
                 let actual_w = tile_w.min(width.saturating_sub(tile_x0));
                 let actual_h = tile_h.min(height.saturating_sub(tile_y0));
+                part.idx.reserve(work.entries.len());
                 for (i, col, row) in work.entries {
                     let (sx, nx) = kernel_1d(interp, col, &mut wx);
                     let (sy, ny) = kernel_1d(interp, row, &mut wy);
-                    let base = i * n_out;
+                    let (fsx, fnx) = if needs_fallback {
+                        kernel_1d(Interp::Bilinear, col, &mut bx)
+                    } else {
+                        (0, 0)
+                    };
+                    let (fsy, fny) = if needs_fallback {
+                        kernel_1d(Interp::Bilinear, row, &mut by)
+                    } else {
+                        (0, 0)
+                    };
+                    for b in 0..n_out {
+                        ks[b] = 0.0;
+                        kw[b] = 0.0;
+                        bs[b] = 0.0;
+                        bw[b] = 0.0;
+                    }
+                    // stencil pixels of this tile that are valid for every
+                    // band, counted once per pixel (the fallback decision is
+                    // per cell: any nodata or off-raster pixel triggers it)
+                    let mut n_valid: u32 = 0;
                     for jy in 0..ny {
                         let gy = sy + jy as i64;
                         if gy < tile_y0 as i64 || gy >= (tile_y0 + actual_h) as i64 {
@@ -434,10 +506,20 @@ pub(crate) async fn sample_at_cells_async(
                             }
                             let c = gx as usize - tile_x0;
                             let wgt = wx[jx] * wy[jy];
-                            if wgt == 0.0 {
-                                continue;
-                            }
+                            // bilinear weight of the same pixel, if inside
+                            // the 2x2 fallback stencil
+                            let fw = if needs_fallback
+                                && gx >= fsx
+                                && gx < fsx + fnx as i64
+                                && gy >= fsy
+                                && gy < fsy + fny as i64
+                            {
+                                bx[(gx - fsx) as usize] * by[(gy - fsy) as usize]
+                            } else {
+                                0.0
+                            };
                             let pixel_base = r * h_stride + c * w_stride;
+                            let mut all_valid = true;
                             for (out_b, &src_b) in offsets_arc.iter().enumerate() {
                                 let off = pixel_base + src_b * b_stride;
                                 let raw = crate::read::read_pixel_chunky_pub(&data, off);
@@ -454,15 +536,38 @@ pub(crate) async fn sample_at_cells_async(
                                         Some(d) => d.apply(raw),
                                         None => raw,
                                     };
-                                    sums[base + out_b] += wgt * v;
-                                    wsums[base + out_b] += wgt;
+                                    ks[out_b] += wgt * v;
+                                    kw[out_b] += wgt;
+                                    if fw != 0.0 {
+                                        bs[out_b] += fw * v;
+                                        bw[out_b] += fw;
+                                    }
+                                } else {
+                                    all_valid = false;
                                 }
+                            }
+                            if all_valid {
+                                n_valid += 1;
                             }
                         }
                     }
+                    let inside_tile = sx >= tile_x0 as i64
+                        && sx + nx as i64 <= (tile_x0 + actual_w) as i64
+                        && sy >= tile_y0 as i64
+                        && sy + ny as i64 <= (tile_y0 + actual_h) as i64;
+                    let complete_here = inside_tile && n_valid as usize == nx * ny;
+                    if needs_fallback && !complete_here {
+                        part.b_rec.push(part.idx.len() as u32);
+                        part.b_sum.extend_from_slice(&bs);
+                        part.b_w.extend_from_slice(&bw);
+                    }
+                    part.idx.push(i as u32);
+                    part.n_valid.push(n_valid);
+                    part.k_sum.extend_from_slice(&ks);
+                    part.k_w.extend_from_slice(&kw);
                 }
             }
-            Ok::<(Vec<f64>, Vec<f64>), A5CogError>((sums, wsums))
+            Ok::<Partials, A5CogError>(part)
         }));
     }
     drop(rx_chan);
@@ -520,8 +625,7 @@ pub(crate) async fn sample_at_cells_async(
     // (and therefore across workers) sums back to the full kernel. Collect
     // all worker results before short-circuiting so a single failure
     // doesn't detach the remaining workers.
-    let mut consumer_results: Vec<Result<(Vec<f64>, Vec<f64>)>> =
-        Vec::with_capacity(cpu_workers);
+    let mut consumer_results: Vec<Result<Partials>> = Vec::with_capacity(cpu_workers);
     for h in consumer_handles {
         match h.await {
             Ok(inner) => consumer_results.push(inner),
@@ -530,37 +634,58 @@ pub(crate) async fn sample_at_cells_async(
             )))),
         }
     }
-    let mut sums = vec![0.0f64; n_in * n_out];
-    let mut wsums = vec![0.0f64; n_in * n_out];
+    let mut k_sum = vec![0.0f64; n_in * n_out];
+    let mut k_w = vec![0.0f64; n_in * n_out];
+    let mut b_sum: Vec<f64> = if needs_fallback { vec![0.0; n_in * n_out] } else { Vec::new() };
+    let mut b_w: Vec<f64> = if needs_fallback { vec![0.0; n_in * n_out] } else { Vec::new() };
+    let mut n_valid = vec![0u32; n_in];
     for r in consumer_results {
-        let (s, w) = r?;
-        for (acc, v) in sums.iter_mut().zip(s) {
-            *acc += v;
+        let part = r?;
+        for (k, &i) in part.idx.iter().enumerate() {
+            let i = i as usize;
+            n_valid[i] += part.n_valid[k];
+            let src = k * n_out;
+            let dst = i * n_out;
+            for b in 0..n_out {
+                k_sum[dst + b] += part.k_sum[src + b];
+                k_w[dst + b] += part.k_w[src + b];
+            }
         }
-        for (acc, v) in wsums.iter_mut().zip(w) {
-            *acc += v;
+        for (m, &k) in part.b_rec.iter().enumerate() {
+            let dst = part.idx[k as usize] as usize * n_out;
+            let src = m * n_out;
+            for b in 0..n_out {
+                b_sum[dst + b] += part.b_sum[src + b];
+                b_w[dst + b] += part.b_w[src + b];
+            }
         }
     }
 
     // Per-band weight renormalisation: nodata or off-raster stencil pixels
-    // contribute nothing, and the remaining weights rescale to 1. A band
-    // whose total weight is ~0 (all stencil pixels invalid) is NA; cells
-    // with no valid band are dropped, matching the nearest-only behaviour.
+    // contribute nothing and the remaining weights rescale to 1 (nearest,
+    // bilinear), or the cell falls back to bilinear over its valid 2x2
+    // (bicubic, lanczos with an incomplete stencil). A band whose total
+    // weight is ~0 is NA; cells with no valid band are dropped, matching
+    // the nearest-only behaviour.
     const MIN_W: f64 = 1e-9;
+    let (_, sn) = interp.footprint();
+    let full_stencil = (sn * sn) as u32;
     let mut cells_out = Vec::new();
     let mut flat_out: Vec<f64> = Vec::new();
     for i in 0..n_in {
         let base = i * n_out;
-        if !(0..n_out).any(|b| wsums[base + b] > MIN_W) {
+        let complete = !needs_fallback || n_valid[i] >= full_stencil;
+        let (sums, ws): (&[f64], &[f64]) = if complete {
+            (&k_sum[base..base + n_out], &k_w[base..base + n_out])
+        } else {
+            (&b_sum[base..base + n_out], &b_w[base..base + n_out])
+        };
+        if !(0..n_out).any(|b| ws[b] > MIN_W) {
             continue;
         }
         cells_out.push(cells_in[i]);
         for b in 0..n_out {
-            flat_out.push(if wsums[base + b] > MIN_W {
-                sums[base + b] / wsums[base + b]
-            } else {
-                f64::NAN
-            });
+            flat_out.push(if ws[b] > MIN_W { sums[b] / ws[b] } else { f64::NAN });
         }
     }
 
