@@ -49,40 +49,19 @@ impl ValueType {
         }
     }
 
-    /// Array of `n` values produced by `f(i)`, filled in parallel chunks
-    /// of `per_row * 4096` elements on `pool` when there is one.
-    fn array_par(
-        self,
-        pool: Option<&rayon::ThreadPool>,
-        n: usize,
-        per_row: usize,
-        f: impl Fn(usize) -> f64 + Sync,
-    ) -> ArrayRef {
-        let chunk = (per_row * 4096).max(1);
-        macro_rules! fill {
-            ($t:ty, $arr:ident) => {{
-                let mut v: Vec<$t> = vec![0 as $t; n];
-                match pool {
-                    Some(p) if n > chunk => p.install(|| {
-                        use rayon::prelude::*;
-                        v.par_chunks_mut(chunk).enumerate().for_each(|(k, out)| {
-                            for (j, o) in out.iter_mut().enumerate() {
-                                *o = f(k * chunk + j) as $t;
-                            }
-                        })
-                    }),
-                    _ => {
-                        for (j, o) in v.iter_mut().enumerate() {
-                            *o = f(j) as $t;
-                        }
-                    }
-                }
-                Arc::new($arr::new(Buffer::from_vec(v).into(), None)) as ArrayRef
-            }};
-        }
+    /// Array of `n` values drawn from `it`.
+    fn array_from_iter(self, n: usize, it: impl Iterator<Item = f64>) -> ArrayRef {
         match self {
-            Self::Float64 => fill!(f64, Float64Array),
-            Self::Float32 => fill!(f32, Float32Array),
+            Self::Float64 => {
+                let mut v: Vec<f64> = Vec::with_capacity(n);
+                v.extend(it);
+                Arc::new(Float64Array::new(Buffer::from_vec(v).into(), None))
+            }
+            Self::Float32 => {
+                let mut v: Vec<f32> = Vec::with_capacity(n);
+                v.extend(it.map(|x| x as f32));
+                Arc::new(Float32Array::new(Buffer::from_vec(v).into(), None))
+            }
         }
     }
 
@@ -193,19 +172,18 @@ pub(crate) fn write_aggregate_parquet<L: AccLayout>(
 
     let mut columns: Vec<ArrayRef> = vec![Arc::new(UInt64Array::from(agg.cells().to_vec()))];
     if as_vector {
-        // one FixedSizeList per stat; the inner array is cell-major, filled
-        // in cell chunks
+        // one FixedSizeList per stat; the inner array is cell-major
         for &stat in &agg.stats {
-            let inner = value_type.array_par(pool, n * n_bands, n_bands, |j| {
-                agg.value(stat, j / n_bands, j % n_bands)
-            });
+            let mut flat = vec![0.0f64; n * n_bands];
+            agg.flat_into(stat, &mut flat);
+            let inner = value_type.array(flat.len(), |j| flat[j]);
             columns.push(fsl_column(value_type, n_bands, inner));
         }
     } else {
         let cols: Vec<ArrayRef> = par_map(pool, agg.stats.len() * n_bands, |k| {
             let stat = agg.stats[k / n_bands];
             let b = k % n_bands;
-            value_type.array(n, |i| agg.value(stat, i, b))
+            value_type.array_from_iter(n, agg.column_iter(stat, b))
         });
         columns.extend(cols);
     }

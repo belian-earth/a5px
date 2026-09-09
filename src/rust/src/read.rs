@@ -33,7 +33,6 @@ static T_FETCH_NS: AtomicU64 = AtomicU64::new(0);
 static T_DECODE_NS: AtomicU64 = AtomicU64::new(0);
 static T_PROJ_NS: AtomicU64 = AtomicU64::new(0);
 static T_INDEX_NS: AtomicU64 = AtomicU64::new(0);
-static T_MERGE_NS: AtomicU64 = AtomicU64::new(0);
 static T_STRIPE_MERGE_NS: AtomicU64 = AtomicU64::new(0);
 // serial tail after the consumers finish
 static T_REDUCE_NS: AtomicU64 = AtomicU64::new(0);
@@ -57,7 +56,7 @@ fn profile_enabled() -> bool {
 fn reset_timers() {
     for t in [
         &T_FETCH_NS, &T_DECODE_NS, &T_PROJ_NS,
-        &T_INDEX_NS, &T_MERGE_NS, &T_STRIPE_MERGE_NS, &T_REDUCE_NS, &T_FLATTEN_NS,
+        &T_INDEX_NS, &T_STRIPE_MERGE_NS, &T_REDUCE_NS, &T_FLATTEN_NS,
         &T_PIX_READ_NS, &T_A5_CELL_NS, &T_HM_NS, &T_PUSH_NS,
         &N_OVERLAY_INTERIOR, &N_OVERLAY_BOUNDARY, &N_WINDOWS, &N_WINDOWS_EXACT,
     ] {
@@ -83,10 +82,9 @@ fn print_timers(total: f64) {
     one("  a5 lonlat->cell", T_A5_CELL_NS.load(Ordering::Relaxed));
     one("  run build", T_HM_NS.load(Ordering::Relaxed));
     one("  read + push runs", T_PUSH_NS.load(Ordering::Relaxed));
-    one("stripe merge", T_STRIPE_MERGE_NS.load(Ordering::Relaxed));
-    one("merge into global", T_MERGE_NS.load(Ordering::Relaxed));
+    one("partition merge", T_STRIPE_MERGE_NS.load(Ordering::Relaxed));
     eprintln!("  serial tail (wall):");
-    one("  reduce workers", T_REDUCE_NS.load(Ordering::Relaxed));
+    one("  assemble output", T_REDUCE_NS.load(Ordering::Relaxed));
     one("  flatten output", T_FLATTEN_NS.load(Ordering::Relaxed));
     let n_win = N_WINDOWS.load(Ordering::Relaxed);
     if n_win > 0 {
@@ -646,26 +644,116 @@ impl<L: AccLayout> CellStore<L> {
         &mut self.cat[slot as usize * self.n_out + b]
     }
 
-    /// Merge `other` into `self`, cells in `other`'s order (`self` first in
-    /// every cell's sum order, so results depend only on merge order).
-    fn merge_from(&mut self, other: CellStore<L>) -> Result<()> {
+    /// Merge cell `i` of `other` into `self` (`self` first in the sum order).
+    #[inline]
+    fn merge_cell_from(&mut self, other: &CellStore<L>, i: usize) -> Result<()> {
         let n_out = self.n_out;
-        for (i, &cell) in other.cells.iter().enumerate() {
-            let s = self.slot(cell) as usize;
-            if self.cfg.has_cont {
-                for b in 0..n_out {
-                    self.cont[s * n_out + b].merge(&other.cont[i * n_out + b]);
-                }
+        let s = self.slot(other.cells[i]) as usize;
+        if self.cfg.has_cont {
+            for b in 0..n_out {
+                self.cont[s * n_out + b].merge(&other.cont[i * n_out + b]);
             }
-            if self.cfg.has_cat {
-                for b in 0..n_out {
-                    for &(c, w) in &other.cat[i * n_out + b] {
-                        cat_push(&mut self.cat[s * n_out + b], c, w)?;
-                    }
+        }
+        if self.cfg.has_cat {
+            for b in 0..n_out {
+                for &(c, w) in &other.cat[i * n_out + b] {
+                    cat_push(&mut self.cat[s * n_out + b], c, w)?;
                 }
             }
         }
         Ok(())
+    }
+}
+
+impl<L: AccLayout> CellStore<L> {
+    /// Finalised value of `stat` for local cell `i`, band `b`.
+    #[inline]
+    fn value(&self, stat: Stat, i: usize, b: usize) -> f64 {
+        let idx = i * self.n_out + b;
+        match stat {
+            Stat::Majority => finalise_majority(&self.cat[idx]),
+            _ => self.cont[idx].finalise(stat),
+        }
+    }
+}
+
+#[inline]
+fn partition_of(cell: u64, log2p: u32) -> usize {
+    if log2p == 0 {
+        return 0;
+    }
+    (cell.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - log2p)) as usize
+}
+
+/// The read's accumulators, spread over `2^log2p` disjoint stores by cell
+/// id hash, each behind a mutex. Stripes accumulate locally, then merge
+/// into the partitions (one lock per partition touched, held for one
+/// group), so cells are copied once per stripe that touches them, the
+/// merge work runs on the stripe threads, and nothing is left to reduce
+/// when the workers finish. Peak memory is the final stores plus one
+/// stripe store per thread.
+///
+/// Merge order into a partition follows stripe completion, so sums can
+/// differ between runs in the last bit; counts, min and max are exact.
+pub(crate) struct PartitionedStore<L: AccLayout> {
+    parts: Vec<std::sync::Mutex<CellStore<L>>>,
+    log2p: u32,
+}
+
+impl<L: AccLayout> PartitionedStore<L> {
+    /// `expected_cells` sizes the partitions up front so their slabs and
+    /// maps do not grow (and copy) while other threads are indexing.
+    fn new(log2p: u32, n_out: usize, cfg: AccCfg, expected_cells: usize) -> Self {
+        let np = 1usize << log2p;
+        let per_part = (expected_cells / np + expected_cells / (np * 8) + 64).min(1 << 26);
+        let parts = (0..np)
+            .map(|_| std::sync::Mutex::new(CellStore::new(n_out, cfg, per_part)))
+            .collect();
+        Self { parts, log2p }
+    }
+
+    /// Merge a stripe's store into the partitions: cells are grouped by
+    /// partition (counting sort) and each group merged under one lock.
+    fn absorb(&self, delta: &CellStore<L>) -> Result<()> {
+        let n = delta.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let np = 1usize << self.log2p;
+        let part: Vec<u8> = delta.cells.iter().map(|&c| partition_of(c, self.log2p) as u8).collect();
+        let mut start = vec![0usize; np + 1];
+        for &p in &part {
+            start[p as usize + 1] += 1;
+        }
+        for p in 0..np {
+            start[p + 1] += start[p];
+        }
+        let mut order: Vec<u32> = vec![0; n];
+        let mut fill = start.clone();
+        for (i, &p) in part.iter().enumerate() {
+            order[fill[p as usize]] = i as u32;
+            fill[p as usize] += 1;
+        }
+        for p in 0..np {
+            let idxs = &order[start[p]..start[p + 1]];
+            if idxs.is_empty() {
+                continue;
+            }
+            let mut guard = self.parts[p]
+                .lock()
+                .map_err(|_| A5CogError::Internal("partition store poisoned".into()))?;
+            for &i in idxs {
+                guard.merge_cell_from(delta, i as usize)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn into_parts(self) -> Result<Vec<CellStore<L>>> {
+        self.parts
+            .into_iter()
+            .map(|m| m.into_inner().map_err(|_| A5CogError::Internal("partition store poisoned".into())))
+            .collect()
     }
 }
 
@@ -891,77 +979,31 @@ struct TileData<'a> {
 /// of blocks; each stripe pays one cold locator start and one store merge.
 const STRIPE_ROWS: usize = 64;
 
-/// Merge stores pairwise in rounds, (0,1), (2,3), ... until one remains.
-/// The pairing is fixed by the input order, so the result does not depend
-/// on scheduling; the rounds run on the pool when there is one.
-fn merge_tree<L: AccLayout>(
-    pool: Option<&rayon::ThreadPool>,
-    mut stores: Vec<CellStore<L>>,
-    n_out: usize,
-    cfg: AccCfg,
-) -> Result<CellStore<L>> {
-    while stores.len() > 1 {
-        let mut pairs: Vec<(CellStore<L>, Option<CellStore<L>>)> = Vec::with_capacity(stores.len() / 2 + 1);
-        let mut it = stores.into_iter();
-        while let Some(a) = it.next() {
-            pairs.push((a, it.next()));
-        }
-        let step = |(mut a, b): (CellStore<L>, Option<CellStore<L>>)| -> Result<CellStore<L>> {
-            if let Some(b) = b {
-                if a.len() == 0 {
-                    return Ok(b);
-                }
-                a.merge_from(b)?;
-            }
-            Ok(a)
-        };
-        stores = match pool {
-            Some(p) if pairs.len() > 1 => p.install(|| {
-                use rayon::prelude::*;
-                pairs.into_par_iter().map(step).collect::<Result<Vec<_>>>()
-            })?,
-            _ => pairs.into_iter().map(step).collect::<Result<Vec<_>>>()?,
-        };
-    }
-    Ok(stores.pop().unwrap_or_else(|| CellStore::new(n_out, cfg, 0)))
-}
-
-/// Process one tile as row stripes on the index pool, or whole on the
-/// calling thread when there is no pool (`cpu_workers == 1`) or the tile
-/// is a single stripe.
+/// Process one tile as row stripes into the partitioned store, on the
+/// index pool when there is one, else one stripe at a time on the
+/// calling thread (stripes also bound the per-stripe delta size).
 fn process_tile_striped<L: AccLayout>(
     pool: Option<&rayon::ThreadPool>,
     ctx: &TileCtx,
     tile: &TileData,
-) -> Result<CellStore<L>> {
+    parts: &PartitionedStore<L>,
+) -> Result<()> {
     let (_, actual_h) = ctx.actual_dims(tile.tx, tile.ty);
     let run = |rows: std::ops::Range<usize>| match ctx.overlay_k {
-        Some(k) => process_tile_overlay::<L>(ctx, tile, rows, k),
-        None => process_tile::<L>(ctx, tile, rows),
-    };
-    let Some(pool) = pool else {
-        return run(0..actual_h);
+        Some(k) => process_tile_overlay::<L>(ctx, tile, rows, k, parts),
+        None => process_tile::<L>(ctx, tile, rows, parts),
     };
     let stripes: Vec<std::ops::Range<usize>> = (0..actual_h)
         .step_by(STRIPE_ROWS)
         .map(|r0| r0..(r0 + STRIPE_ROWS).min(actual_h))
         .collect();
-    if stripes.len() <= 1 {
-        return run(0..actual_h);
+    match pool {
+        Some(pool) if stripes.len() > 1 => pool.install(|| {
+            use rayon::prelude::*;
+            stripes.into_par_iter().try_for_each(run)
+        }),
+        _ => stripes.into_iter().try_for_each(run),
     }
-    // Stripes run in parallel but merge in stripe order, so a tile's result
-    // does not depend on thread scheduling (floating-point sums are
-    // order-sensitive at the last bit).
-    let stores: Vec<CellStore<L>> = pool.install(|| {
-        use rayon::prelude::*;
-        stripes.into_par_iter().map(run).collect::<Result<Vec<_>>>()
-    })?;
-    let t_merge = Instant::now();
-    let acc = merge_tree(Some(pool), stores, tile.band_offsets.len(), ctx.cfg)?;
-    if profile_enabled() {
-        T_STRIPE_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
-    Ok(acc)
 }
 
 /// Row-above hints for column `c`: the cells of the pixels above at
@@ -1000,12 +1042,13 @@ fn process_tile<L: AccLayout>(
     ctx: &TileCtx,
     tile: &TileData,
     rows: std::ops::Range<usize>,
-) -> Result<CellStore<L>> {
+    parts: &PartitionedStore<L>,
+) -> Result<()> {
     let n_out = tile.band_offsets.len();
     let (actual_w, actual_h) = ctx.actual_dims(tile.tx, tile.ty);
     let rows = rows.start.min(actual_h)..rows.end.min(actual_h);
     if actual_w == 0 || rows.is_empty() {
-        return Ok(CellStore::new(n_out, ctx.cfg, 0));
+        return Ok(());
     }
     let data = tile.data;
     let (tx, ty) = (tile.tx, tile.ty);
@@ -1176,7 +1219,12 @@ fn process_tile<L: AccLayout>(
         T_PUSH_NS.fetch_add(sub_push, Ordering::Relaxed);
     }
 
-    Ok(store)
+    let t_merge = Instant::now();
+    parts.absorb(&store)?;
+    if prof {
+        T_STRIPE_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,13 +1335,14 @@ fn process_tile_overlay<L: AccLayout>(
     tile: &TileData,
     rows: std::ops::Range<usize>,
     k: usize,
-) -> Result<CellStore<L>> {
+    parts: &PartitionedStore<L>,
+) -> Result<()> {
     let mut mask_cache = MaskCache::new();
     let n_out = tile.band_offsets.len();
     let (actual_w, actual_h) = ctx.actual_dims(tile.tx, tile.ty);
     let rows = rows.start.min(actual_h)..rows.end.min(actual_h);
     if actual_w == 0 || rows.is_empty() {
-        return Ok(CellStore::new(n_out, ctx.cfg, 0));
+        return Ok(());
     }
     let data = tile.data;
     let (tx, ty) = (tile.tx, tile.ty);
@@ -1491,7 +1540,12 @@ fn process_tile_overlay<L: AccLayout>(
     N_OVERLAY_INTERIOR.fetch_add(n_interior, Ordering::Relaxed);
     N_OVERLAY_BOUNDARY.fetch_add(boundary.len() as u64, Ordering::Relaxed);
 
-    Ok(store)
+    let t_merge = Instant::now();
+    parts.absorb(&store)?;
+    if prof {
+        T_STRIPE_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1830,7 +1884,17 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
     } else {
         None
     };
-    let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<CellStore<L>>>> =
+    // 4 partitions per worker keeps lock contention negligible; capped so
+    // small reads do not pay for empty stores.
+    let log2p: u32 = ((cpu_workers * 4).next_power_of_two().trailing_zeros()).clamp(2, 6);
+    // cells expected from the tiles selected, for pre-sizing the partitions
+    let expected_cells: usize = {
+        let px = (tiles.len() as f64) * (tile_w as f64) * (tile_h as f64);
+        let cells = px / px_per_cell.max(1e-9);
+        cells.min(px).max(0.0) as usize
+    };
+    let parts: Arc<PartitionedStore<L>> = Arc::new(PartitionedStore::new(log2p, n_out, cfg, expected_cells));
+    let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<()>>> =
         Vec::with_capacity(cpu_workers);
     for _ in 0..cpu_workers {
         let rx = rx_chan.clone();
@@ -1845,6 +1909,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
         let dequant_c = dequant.clone();
         let mask_c = mask.clone();
         let pool = index_pool.clone();
+        let parts = Arc::clone(&parts);
         consumer_handles.push(tokio::task::spawn_blocking(move || {
             let ctx = TileCtx {
                 planar,
@@ -1864,7 +1929,6 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
                 cfg,
                 overlay_k,
             };
-            let mut local: CellStore<L> = CellStore::new(n_out, cfg, 0);
             let prof = profile_enabled();
             while let Ok(item) = rx.recv_blocking() {
                 let (data, _shape, data_n_bands_eff, offsets_arc): (
@@ -1902,18 +1966,9 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
                     data_n_bands: data_n_bands_eff,
                     band_offsets: &offsets_arc,
                 };
-                let tile_local = process_tile_striped::<L>(pool.as_deref(), &ctx, &td)?;
-                let t_merge = Instant::now();
-                if local.len() == 0 {
-                    local = tile_local;
-                } else {
-                    local.merge_from(tile_local)?;
-                }
-                if prof {
-                    T_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                }
+                process_tile_striped::<L>(pool.as_deref(), &ctx, &td, &parts)?;
             }
-            Ok::<CellStore<L>, A5CogError>(local)
+            Ok::<(), A5CogError>(())
         }));
     }
     // Consumers each hold their own rx clone; drop the outer one so the
@@ -1983,11 +2038,10 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
         }
     }
 
-    // Drain consumers and tree-reduce. Collect all results first (rather
-    // than short-circuit on the first Err) so a panic / error in worker N
-    // doesn't detach workers N+1.. while they're still running.
-    let mut consumer_results: Vec<Result<CellStore<L>>> =
-        Vec::with_capacity(cpu_workers);
+    // Drain consumers. Collect all results first (rather than short-circuit
+    // on the first Err) so a panic / error in worker N doesn't detach
+    // workers N+1.. while they're still running.
+    let mut consumer_results: Vec<Result<()>> = Vec::with_capacity(cpu_workers);
     for h in consumer_handles {
         match h.await {
             Ok(inner) => consumer_results.push(inner),
@@ -1996,26 +2050,26 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
             )))),
         }
     }
+    for r in consumer_results {
+        r?;
+    }
     let t_reduce = Instant::now();
-    let stores: Vec<CellStore<L>> = consumer_results.into_iter().collect::<Result<Vec<_>>>()?;
-    let store = merge_tree(index_pool.as_deref(), stores, n_out, cfg)?;
+    let parts = Arc::try_unwrap(parts)
+        .map_err(|_| A5CogError::Internal("partition store still shared after workers joined".into()))?
+        .into_parts()?;
+    let agg = Aggregate::from_parts(parts, n_out, band_names, stats, fractions, index_pool);
     if profile_enabled() {
         T_REDUCE_NS.fetch_add(t_reduce.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
-
-    Ok(Aggregate {
-        store,
-        n_out,
-        band_names,
-        stats,
-        fractions,
-        pool: index_pool,
-    })
+    Ok(agg)
 }
 
-/// A finished read before flattening: the cell slab plus output metadata.
+/// A finished read before flattening: the partition slabs plus output
+/// metadata. Output cell order is partition order, then first-seen order
+/// within each partition (`cells` is that concatenation).
 pub(crate) struct Aggregate<L: AccLayout> {
-    pub(crate) store: CellStore<L>,
+    parts: Vec<CellStore<L>>,
+    cells: Vec<u64>,
     pub(crate) n_out: usize,
     pub(crate) band_names: Vec<String>,
     pub(crate) stats: Vec<Stat>,
@@ -2025,72 +2079,84 @@ pub(crate) struct Aggregate<L: AccLayout> {
 }
 
 impl<L: AccLayout> Aggregate<L> {
-    fn empty(band_names: Vec<String>, n_out: usize, stats: Vec<Stat>, fractions: bool, cfg: AccCfg) -> Self {
-        Self { store: CellStore::new(n_out, cfg, 0), n_out, band_names, stats, fractions, pool: None }
+    fn empty(band_names: Vec<String>, n_out: usize, stats: Vec<Stat>, fractions: bool, _cfg: AccCfg) -> Self {
+        Self::from_parts(Vec::new(), n_out, band_names, stats, fractions, None)
+    }
+
+    fn from_parts(
+        parts: Vec<CellStore<L>>,
+        n_out: usize,
+        band_names: Vec<String>,
+        stats: Vec<Stat>,
+        fractions: bool,
+        pool: Option<Arc<rayon::ThreadPool>>,
+    ) -> Self {
+        let mut cells = Vec::with_capacity(parts.iter().map(|p| p.len()).sum());
+        for p in &parts {
+            cells.extend_from_slice(&p.cells);
+        }
+        Self { parts, cells, n_out, band_names, stats, fractions, pool }
     }
 
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.store.len()
+        self.cells.len()
     }
 
     #[inline]
     pub(crate) fn cells(&self) -> &[u64] {
-        &self.store.cells
+        &self.cells
     }
 
-    /// Finalised value of `stat` for cell `i`, band `b`.
-    #[inline]
-    pub(crate) fn value(&self, stat: Stat, i: usize, b: usize) -> f64 {
-        let idx = i * self.n_out + b;
-        match stat {
-            Stat::Majority => finalise_majority(&self.store.cat[idx]),
-            _ => self.store.cont[idx].finalise(stat),
+    /// Values of `stat` for band `b` over all cells, in output order.
+    pub(crate) fn column_iter(&self, stat: Stat, b: usize) -> impl Iterator<Item = f64> + '_ {
+        self.parts
+            .iter()
+            .flat_map(move |p| (0..p.len()).map(move |i| p.value(stat, i, b)))
+    }
+
+    /// Fill `out` (length `len() * n_out`) cell-major with `stat`, one
+    /// partition per task on the pool.
+    pub(crate) fn flat_into(&self, stat: Stat, out: &mut [f64]) {
+        let n_out = self.n_out;
+        debug_assert_eq!(out.len(), self.len() * n_out);
+        let mut slices: Vec<&mut [f64]> = Vec::with_capacity(self.parts.len());
+        let mut rest = out;
+        for p in &self.parts {
+            let (a, b) = rest.split_at_mut(p.len() * n_out);
+            slices.push(a);
+            rest = b;
+        }
+        let fill = |(p, s): (&CellStore<L>, &mut [f64])| {
+            for i in 0..p.len() {
+                for b in 0..n_out {
+                    s[i * n_out + b] = p.value(stat, i, b);
+                }
+            }
+        };
+        match self.pool.as_deref() {
+            Some(pool) if self.parts.len() > 1 => pool.install(|| {
+                use rayon::prelude::*;
+                self.parts.par_iter().zip(slices.into_par_iter()).for_each(fill)
+            }),
+            _ => self.parts.iter().zip(slices).for_each(fill),
         }
     }
 
     /// Flatten into the cell-major per-stat layout the R paths consume.
     fn into_output(self) -> Output {
     let t_flatten = Instant::now();
-    let Aggregate { store, n_out, band_names, stats, fractions, pool: index_pool } = self;
-
-    let n_stats = stats.len();
-    let n = store.len();
-    let cells: Vec<u64> = store.cells.clone();
+    let n_out = self.n_out;
+    let n_stats = self.stats.len();
+    let n = self.len();
     // cell-major flat layout per stat: flat_values[s][i*n_out + b] is the s-th
     // stat of band b of cell i.
     let mut flat_per_stat: Vec<Vec<f64>> =
         (0..n_stats).map(|_| vec![0.0; n * n_out]).collect();
-    // Fill `out` (one stat, cells `i0..`) from the slab.
-    let fill = |s: Stat, i0: usize, out: &mut [f64]| {
-        for (j, o) in out.iter_mut().enumerate() {
-            let idx = i0 * n_out + j;
-            *o = match s {
-                Stat::Majority => finalise_majority(&store.cat[idx]),
-                _ => store.cont[idx].finalise(s),
-            };
-        }
-    };
-    // The flatten is the largest serial step after the workers finish
-    // (n_cells x n_bands x n_stats finalisations), so it runs on the index
-    // pool in cell chunks when there is one.
-    const FLATTEN_CHUNK: usize = 4096;
-    match index_pool.as_deref() {
-        Some(pool) if n > FLATTEN_CHUNK => pool.install(|| {
-            use rayon::prelude::*;
-            for (s_i, s) in stats.iter().enumerate() {
-                flat_per_stat[s_i]
-                    .par_chunks_mut(FLATTEN_CHUNK * n_out)
-                    .enumerate()
-                    .for_each(|(k, out)| fill(*s, k * FLATTEN_CHUNK, out));
-            }
-        }),
-        _ => {
-            for (s_i, s) in stats.iter().enumerate() {
-                fill(*s, 0, &mut flat_per_stat[s_i]);
-            }
-        }
+    for (s_i, s) in self.stats.iter().enumerate() {
+        self.flat_into(*s, &mut flat_per_stat[s_i]);
     }
+    let fractions = self.fractions;
     let mut frac_out: Option<FracOut> = if fractions {
         Some(FracOut {
             classes: vec![Vec::new(); n_out],
@@ -2101,11 +2167,11 @@ impl<L: AccLayout> Aggregate<L> {
         None
     };
     if let Some(fr) = frac_out.as_mut() {
-        for i in 0..n {
+        for (p, i) in self.parts.iter().flat_map(|p| (0..p.len()).map(move |i| (p, i))) {
             for b in 0..n_out {
                 // classes sorted ascending so output order is deterministic;
                 // shares are each class's fraction of the cell's valid weight
-                let mut sorted = store.cat[i * n_out + b].clone();
+                let mut sorted = p.cat[i * n_out + b].clone();
                 sorted.sort_unstable_by_key(|&(c, _)| c);
                 let tot: f64 = sorted.iter().map(|&(_, w)| w).sum();
                 if tot > 0.0 {
@@ -2118,11 +2184,10 @@ impl<L: AccLayout> Aggregate<L> {
             }
         }
     }
-    drop(store);
-
     if profile_enabled() {
         T_FLATTEN_NS.fetch_add(t_flatten.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
+    let Aggregate { cells, band_names, stats, .. } = self;
 
     Output {
         cells,
