@@ -114,7 +114,7 @@ check_src_nodata <- function(src_nodata, call = rlang::caller_env()) {
 #' @noRd
 check_stats <- function(stat, call = rlang::caller_env()) {
   valid <- c("mean", "sum", "count", "min", "max", "var", "sd",
-             "majority", "fractions")
+             "majority", "fractions", "npix")
   if (!is.character(stat) || length(stat) == 0L || anyNA(stat)) {
     cli::cli_abort(
       "{.arg stat} must be a non-empty character vector with no NAs.",
@@ -161,6 +161,9 @@ check_stat_context <- function(stats, dequant, as_vector = FALSE,
         call = call
       )
     }
+  }
+  if ("npix" %in% stats && has_frac) {
+    cli::cli_abort("{.val npix} cannot be combined with {.val fractions}.", call = call)
   }
   if (has_cat && !is.null(dequant)) {
     cli::cli_abort(

@@ -160,3 +160,94 @@ pub(crate) fn derive_data_type(ifd: &ImageFileDirectory) -> Option<async_tiff::D
         _ => None,
     }
 }
+
+/// Fetch the compressed bytes of several blocks in one request batch.
+/// Returns one entry per block: per selected band for planar layouts,
+/// a single buffer for chunky. Adjacent blocks of a band are contiguous
+/// in GDAL-written files (up to a few bytes of padding), so the object
+/// store's range coalescing turns a run of blocks into one request per
+/// band instead of one per block per band.
+pub(crate) async fn fetch_blocks_bytes(
+    reader: &dyn AsyncFileReader,
+    ifd: &ImageFileDirectory,
+    blocks: &[(usize, usize)],
+    selected_bands: &[usize],
+    chunky: bool,
+) -> Result<Vec<Vec<Bytes>>> {
+    let tile_offsets = ifd
+        .tile_offsets()
+        .ok_or_else(|| A5CogError::Unsupported("missing TileOffsets".into()))?;
+    let tile_byte_counts = ifd
+        .tile_byte_counts()
+        .ok_or_else(|| A5CogError::Unsupported("missing TileByteCounts".into()))?;
+    let (tiles_per_row, tiles_per_col) = ifd
+        .tile_count()
+        .ok_or_else(|| A5CogError::Unsupported("not a tiled TIFF".into()))?;
+    let tiles_per_band = tiles_per_row * tiles_per_col;
+    let n_bands_total = ifd.samples_per_pixel() as usize;
+    let per_block = if chunky { 1 } else { selected_bands.len() };
+    let mut ranges: Vec<std::ops::Range<u64>> = Vec::with_capacity(blocks.len() * per_block);
+    for &(tx, ty) in blocks {
+        let t = ty * tiles_per_row + tx;
+        if chunky {
+            let off = tile_offsets[t];
+            ranges.push(off..(off + tile_byte_counts[t]));
+        } else {
+            for &b in selected_bands {
+                if b >= n_bands_total {
+                    return Err(A5CogError::Invalid(format!(
+                        "selected band {b} >= total {n_bands_total}"
+                    )));
+                }
+                let i = b * tiles_per_band + t;
+                let off = tile_offsets[i];
+                ranges.push(off..(off + tile_byte_counts[i]));
+            }
+        }
+    }
+    let bufs = reader.get_byte_ranges(ranges).await?;
+    Ok(bufs.chunks(per_block).map(|c| c.to_vec()).collect())
+}
+
+/// Decode one block fetched by [`fetch_blocks_bytes`]: planar buffers
+/// (one per selected band) to shape `[n_selected, tile_h, tile_w]`, or a
+/// chunky buffer to `[tile_h, tile_w, n_bands]`. Requires `Predictor::None`
+/// and native byte order, which the caller checks once per read.
+pub(crate) fn decode_block_bytes(
+    bufs: Vec<Bytes>,
+    ifd: &ImageFileDirectory,
+    decoder_registry: &DecoderRegistry,
+    chunky: bool,
+) -> Result<(TypedArray, [usize; 3])> {
+    if !chunky {
+        return decode_planar_subset_bytes(bufs, ifd, decoder_registry);
+    }
+    let tile_w = ifd.tile_width().ok_or_else(|| A5CogError::Unsupported("not a tiled TIFF".into()))? as usize;
+    let tile_h = ifd.tile_height().ok_or_else(|| A5CogError::Unsupported("not a tiled TIFF".into()))? as usize;
+    let n_bands = ifd.samples_per_pixel() as usize;
+    let compression = ifd.compression();
+    let decoder = decoder_registry.as_ref().get(&compression).ok_or_else(|| {
+        A5CogError::Unsupported(format!("no decoder registered for {compression:?}"))
+    })?;
+    let bits_per_sample = ifd.bits_per_sample().first().copied().unwrap_or(0);
+    let bytes_per_sample = (bits_per_sample as usize).div_ceil(8);
+    let expected = tile_w * tile_h * n_bands * bytes_per_sample;
+    let buf = bufs.into_iter().next().ok_or_else(|| A5CogError::Invalid("empty block".into()))?;
+    let decoded = decoder.decode_tile(
+        buf,
+        ifd.photometric_interpretation(),
+        ifd.jpeg_tables(),
+        n_bands as u16,
+        bits_per_sample,
+        ifd.lerc_parameters(),
+    )?;
+    if decoded.len() != expected {
+        return Err(A5CogError::Unsupported(format!(
+            "decoded block size {} != expected {}",
+            decoded.len(),
+            expected
+        )));
+    }
+    let typed = TypedArray::try_new(decoded, derive_data_type(ifd))?;
+    Ok((typed, [tile_h, tile_w, n_bands]))
+}
