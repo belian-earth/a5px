@@ -26,8 +26,10 @@
     stores that stripes merge into as they finish, so no reduce step
     remains when the workers stop and peak memory is the final stores plus
     one stripe per thread (about 20% lower than 0.1.0 on a 64-band res-18
-    read). Merge order follows stripe completion, so sums can differ in
-    the last bit between runs; cells, counts, min and max are exact.
+    read). With more than one worker, merge order follows stripe
+    completion, so sums can differ in the last bit between runs; cells,
+    counts, min and max are exact, and single-worker reads stay
+    reproducible.
 
 # a5px 0.1.0
 

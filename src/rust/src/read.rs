@@ -693,8 +693,10 @@ fn partition_of(cell: u64, log2p: u32) -> usize {
 /// when the workers finish. Peak memory is the final stores plus one
 /// stripe store per thread.
 ///
-/// Merge order into a partition follows stripe completion, so sums can
-/// differ between runs in the last bit; counts, min and max are exact.
+/// Merge order into a partition follows stripe completion, so with more
+/// than one worker sums can differ between runs in the last bit; counts,
+/// min and max are exact. One worker uses one partition and merges its
+/// stripes in order, so its output is reproducible.
 pub(crate) struct PartitionedStore<L: AccLayout> {
     parts: Vec<std::sync::Mutex<CellStore<L>>>,
     log2p: u32,
@@ -717,6 +719,15 @@ impl<L: AccLayout> PartitionedStore<L> {
     fn absorb(&self, delta: &CellStore<L>) -> Result<()> {
         let n = delta.len();
         if n == 0 {
+            return Ok(());
+        }
+        if self.log2p == 0 {
+            let mut guard = self.parts[0]
+                .lock()
+                .map_err(|_| A5CogError::Internal("partition store poisoned".into()))?;
+            for i in 0..n {
+                guard.merge_cell_from(delta, i)?;
+            }
             return Ok(());
         }
         let np = 1usize << self.log2p;
@@ -1885,8 +1896,14 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
         None
     };
     // 4 partitions per worker keeps lock contention negligible; capped so
-    // small reads do not pay for empty stores.
-    let log2p: u32 = ((cpu_workers * 4).next_power_of_two().trailing_zeros()).clamp(2, 6);
+    // small reads do not pay for empty stores. One worker runs stripes in
+    // order, so a single partition costs nothing and keeps its sums
+    // deterministic.
+    let log2p: u32 = if cpu_workers <= 1 {
+        0
+    } else {
+        ((cpu_workers * 4).next_power_of_two().trailing_zeros()).clamp(2, 6)
+    };
     // cells expected from the tiles selected, for pre-sizing the partitions
     let expected_cells: usize = {
         let px = (tiles.len() as f64) * (tile_w as f64) * (tile_h as f64);
