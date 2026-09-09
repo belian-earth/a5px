@@ -33,6 +33,14 @@ use crate::read::proj_points;
 
 /// Window edge in grid points.
 pub(crate) const WIN: usize = 16;
+
+/// `A5PX_EXACT_PROJ=1` marks every window exact-only, so each pixel takes
+/// the exact projection path. For tests and diagnostics: results must be
+/// identical either way. Read per projector build (once per stripe) so
+/// tests can toggle it within a process.
+fn force_exact() -> bool {
+    std::env::var_os("A5PX_EXACT_PROJ").is_some_and(|v| !v.is_empty() && v != "0")
+}
 /// Safety factor applied to the largest probed interpolation error.
 const SAFETY: f64 = 4.0;
 /// Absolute floor on the margins (face units are O(1); degrees).
@@ -134,6 +142,18 @@ impl GridProjector {
     ) -> Result<Self> {
         let wx = nx.div_ceil(WIN).max(1);
         let wy = ny.div_ceil(WIN).max(1);
+        if force_exact() {
+            let off = Window {
+                ok: false,
+                ll_ok: false,
+                origin: 0,
+                face: [(0.0, 0.0); 4],
+                ll: [(0.0, 0.0); 4],
+                margin_face: 0.0,
+                margin_deg: 0.0,
+            };
+            return Ok(Self { nx, ny, wx, wy, wins: vec![off; wx * wy] });
+        }
         // exact samples: corner lattice (wx+1)(wy+1) plus 5 probes per window
         let n_corner = (wx + 1) * (wy + 1);
         let n_probe = 5 * wx * wy;
