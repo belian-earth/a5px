@@ -29,7 +29,8 @@
     read). With more than one worker, merge order follows stripe
     completion, so sums can differ in the last bit between runs; cells,
     counts, min and max are exact, and single-worker reads stay
-    reproducible.
+    reproducible. `A5PX_EXACT_PROJ=1` forces the exact per-pixel
+    projection (diagnostics; results are identical either way).
 
 # a5px 0.1.0
 
