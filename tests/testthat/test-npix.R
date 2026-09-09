@@ -59,9 +59,11 @@ test_that("npix reaches the Arrow and Parquet outputs", {
   pq <- as.data.frame(arrow::read_parquet(dest))
   expect_true("npix" %in% names(pq))
   expect_equal(sum(pq$npix), sum(ref$npix))
-  # single-stat naming plus npix
-  a5_raster_to_parquet(f, dest, 14L, stat = c("mean", "npix"))
-  expect_identical(tail(names(arrow::read_parquet(dest)), 2), c("A02", "npix"))
+  # single-stat naming plus npix (a fresh path: arrow memory-maps the file
+  # it just read, and Windows refuses to overwrite a mapped file)
+  dest2 <- withr::local_tempfile(fileext = ".parquet")
+  a5_raster_to_parquet(f, dest2, 14L, stat = c("mean", "npix"))
+  expect_identical(tail(names(arrow::read_parquet(dest2)), 2), c("A02", "npix"))
 })
 
 test_that("npix is rejected with fractions", {
