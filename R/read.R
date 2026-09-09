@@ -52,12 +52,20 @@
 #'   local path, are errors. Inspect the result with [a5_store_config()].
 #' @param resolution Integer scalar A5 resolution (0--30).
 #' @param stat Aggregation. One of `"mean"`, `"sum"`, `"count"`, `"min"`,
-#'   `"max"`, `"var"`, `"sd"`, `"majority"`, `"fractions"`, or any
+#'   `"max"`, `"var"`, `"sd"`, `"majority"`, `"fractions"`, `"npix"`, or any
 #'   non-duplicated subset of those (except `"fractions"`, which must be
 #'   alone) for a one-pass multi-stat read. Default `"mean"`. `"var"` /
 #'   `"sd"` use the sample formula (divisor n - 1) computed via Welford's
 #'   online algorithm in the streaming aggregator, matching [stats::var()] /
 #'   [stats::sd()]; cells covered by a single pixel return `NA`.
+#'
+#'   `"npix"` is per cell rather than per band: a single `npix` column with
+#'   the number of source pixels that had at least one valid band (under
+#'   `mode = "overlay"`, their summed pixel-area weight). When validity is
+#'   the same across bands, as with a dataset-wide nodata sentinel, it
+#'   equals every `<band>_count` column, so `stat = c("mean", "npix")`
+#'   carries the weights for a later merge in one column instead of one
+#'   per band. Not available in `mode = "centroid"`.
 #'
 #'   `"majority"` and `"fractions"` are categorical: they treat the raw
 #'   integer codes as class labels, and require an integer source of 16
@@ -314,10 +322,12 @@ a5_read_raster <- function(src,
   }
 
   bands <- out$bands
+  stats <- setdiff(stats, "npix")
+  npix <- out$npix
   # Rust returns names via the named list itself, but be explicit
   if (length(stats) == 1L) {
     names(bands) <- as.character(out$band_names)
-  } else {
+  } else if (length(stats) > 1L) {
     band_names <- as.character(out$band_names)
     # Rust iterates stat-major (outer = stat, inner = band), producing
     # [B0_s0, B1_s0, ..., B0_s1, B1_s1, ...]. outer(bands, stats) flattens
@@ -338,8 +348,10 @@ a5_read_raster <- function(src,
       col_name <- if (length(stats) == 1L) "value" else paste0("value_", s)
       cols[[col_name]] <- val
     }
+    if (!is.null(npix)) cols$npix <- as.numeric(npix)
     tibble::tibble(!!!cols)
   } else {
+    if (!is.null(npix)) bands$npix <- as.numeric(npix)
     tibble::tibble(cell = cells, !!!bands)
   }
 }

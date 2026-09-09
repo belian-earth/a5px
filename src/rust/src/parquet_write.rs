@@ -169,6 +169,8 @@ pub(crate) fn write_aggregate_parquet<L: AccLayout>(
     let n_bands = agg.n_out;
     let stats: Vec<String> = agg.stats.iter().map(|s| s.as_str().to_string()).collect();
     let pool = agg.pool.as_deref();
+    let prof = crate::read::profile_enabled();
+    let t_cols = std::time::Instant::now();
 
     let mut columns: Vec<ArrayRef> = vec![Arc::new(UInt64Array::from(agg.cells().to_vec()))];
     if as_vector {
@@ -187,9 +189,21 @@ pub(crate) fn write_aggregate_parquet<L: AccLayout>(
         });
         columns.extend(cols);
     }
-    let fields = fields_for(&agg.band_names, &stats, value_type, n_bands, as_vector);
+    let mut fields = fields_for(&agg.band_names, &stats, value_type, n_bands, as_vector);
+    if let Some(npix) = agg.npix() {
+        columns.push(value_type.array(n, |i| npix[i]));
+        fields.push(Field::new("npix", value_type.data_type(), false));
+    }
+    if prof {
+        crate::read::T_PQ_COLUMNS_NS.fetch_add(t_cols.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    let t_write = std::time::Instant::now();
     let metadata = file_metadata(&agg.band_names, resolution, &stats, as_vector);
-    write_columns_parquet(dest, fields, columns, metadata, compression, pool)
+    let r = write_columns_parquet(dest, fields, columns, metadata, compression, pool);
+    if prof {
+        crate::read::T_PQ_WRITE_NS.fetch_add(t_write.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    r
 }
 
 /// Legacy entry from flat per-stat values (the centroid sampler).
@@ -257,6 +271,9 @@ fn write_columns_parquet(
     let schema = Arc::new(Schema::new(fields).with_metadata(metadata.clone()));
     let n_rows = columns.first().map(|c| c.len()).unwrap_or(0);
     let kv: Vec<KeyValue> = metadata.into_iter().map(|(k, v)| KeyValue::new(k, v)).collect();
+    // Dictionary encoding (the default) stays on: dequantised int8 bands
+    // have at most 256 distinct values, and it makes those files ~25%
+    // smaller for ~0.6 s per 637k cells x 129 columns.
     let mut props = WriterProperties::builder()
         .set_compression(compression.to_parquet())
         .set_key_value_metadata(Some(kv))

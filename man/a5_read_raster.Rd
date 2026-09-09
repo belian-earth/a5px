@@ -34,12 +34,20 @@ are configured.}
 \item{resolution}{Integer scalar A5 resolution (0--30).}
 
 \item{stat}{Aggregation. One of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"},
-\code{"max"}, \code{"var"}, \code{"sd"}, \code{"majority"}, \code{"fractions"}, or any
+\code{"max"}, \code{"var"}, \code{"sd"}, \code{"majority"}, \code{"fractions"}, \code{"npix"}, or any
 non-duplicated subset of those (except \code{"fractions"}, which must be
 alone) for a one-pass multi-stat read. Default \code{"mean"}. \code{"var"} /
 \code{"sd"} use the sample formula (divisor n - 1) computed via Welford's
 online algorithm in the streaming aggregator, matching \code{\link[stats:var]{stats::var()}} /
 \code{\link[stats:sd]{stats::sd()}}; cells covered by a single pixel return \code{NA}.
+
+\code{"npix"} is per cell rather than per band: a single \code{npix} column with
+the number of source pixels that had at least one valid band (under
+\code{mode = "overlay"}, their summed pixel-area weight). When validity is
+the same across bands, as with a dataset-wide nodata sentinel, it
+equals every \verb{<band>_count} column, so \code{stat = c("mean", "npix")}
+carries the weights for a later merge in one column instead of one
+per band. Not available in \code{mode = "centroid"}.
 
 \code{"majority"} and \code{"fractions"} are categorical: they treat the raw
 integer codes as class labels, and require an integer source of 16

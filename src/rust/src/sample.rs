@@ -25,7 +25,6 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use async_tiff::decoder::DecoderRegistry;
 use async_tiff::metadata::TiffMetadataReader;
-use async_tiff::metadata::cache::ReadaheadMetadataCache;
 use async_tiff::reader::{AsyncFileReader, ObjectReader};
 use async_tiff::tags::PlanarConfiguration;
 use async_tiff::{TIFF, TypedArray};
@@ -195,7 +194,7 @@ pub(crate) async fn sample_at_cells_async(
 ) -> Result<CentroidOutput> {
     let (store, path) = crate::store::parse_src(src, &store_opts)?;
     let reader = ObjectReader::new(store, path);
-    let cache = ReadaheadMetadataCache::new(reader.clone());
+    let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
     let mut meta = TiffMetadataReader::try_open(&cache).await?;
     let ifds = meta.read_all_ifds(&cache).await?;
     let endianness = meta.endianness();
@@ -442,11 +441,15 @@ pub(crate) async fn sample_at_cells_async(
                     usize,
                     Arc<Vec<usize>>,
                 ) = match work.payload {
-                    crate::read::TilePayload::PlanarSubset(bytes) => {
-                        let (typed, sh) = crate::band_fetch::decode_planar_subset_bytes(
-                            bytes, &ifd, &registry,
+                    crate::read::TilePayload::Block { bufs, chunky } => {
+                        let (typed, sh) = crate::band_fetch::decode_block_bytes(
+                            bufs, &ifd, &registry, chunky,
                         )?;
-                        (typed, sh, n_out, Arc::clone(&identity_offsets))
+                        if chunky {
+                            (typed, sh, n_bands, Arc::clone(&selected_bands))
+                        } else {
+                            (typed, sh, n_out, Arc::clone(&identity_offsets))
+                        }
                     }
                     crate::read::TilePayload::Full(tile) => {
                         let arr = tile.decode(&registry)?;
@@ -593,7 +596,7 @@ pub(crate) async fn sample_at_cells_async(
                             &selected_bands,
                         )
                         .await?;
-                        crate::read::TilePayload::PlanarSubset(bytes)
+                        crate::read::TilePayload::Block { bufs: bytes, chunky: false }
                     } else {
                         let tile = ifd
                             .fetch_tile(tx, ty, &reader as &dyn AsyncFileReader)

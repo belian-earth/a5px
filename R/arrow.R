@@ -162,6 +162,7 @@ a5_read_raster_arrow <- function(src,
     }
   }
 
+  if (!is.null(out$npix)) cols$npix <- arrow::Array$create(as.numeric(out$npix), type = inner_type)
   tbl <- do.call(arrow::Table$create, cols)
   meta <- list(
     a5px_band_names = paste(band_names, collapse = "\n"),

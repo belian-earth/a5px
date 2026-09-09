@@ -7,6 +7,7 @@ mod error;
 mod geo;
 mod grid_proj;
 pub mod locator;
+mod meta_cache;
 mod parquet_write;
 mod read;
 mod runtime;

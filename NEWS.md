@@ -1,5 +1,26 @@
 # a5px (development version)
 
+* New `stat = "npix"`: a single per-cell column with the number of source
+  pixels that had at least one valid band (in overlay mode, their summed
+  pixel-area weight). When validity is uniform across bands it equals
+  every `<band>_count` column, so `stat = c("mean", "npix")` carries the
+  merge weights of a 64-band read in one column instead of 64.
+
+* Cloud reads fetch runs of up to four adjacent blocks per request batch
+  on files without a predictor (planar or chunky), so the object store
+  coalesces each band's contiguous blocks into one range request instead
+  of one per block per band. Files with a predictor or non-native byte
+  order keep the per-block path.
+
+* TIFF metadata is read through a chunked cache instead of an exponentially
+  growing prefix, so a file whose IFDs sit at the end (plain GDAL output,
+  not a COG) no longer reads the whole file to parse its header.
+
+* `A5PX_PROFILE=1` now covers the whole call: open and metadata, tile
+  planning, the read pipeline, output assembly, R output build, Parquet
+  column build and encode, plus the time consumers spend waiting for tiles
+  and producers spend blocked on a full channel.
+
 * Reads are 2-4x faster at fine resolutions (#6), with identical cell sets
   and counts; means and other sums can differ from 0.1.0 in the last bit
   because pixels are now summed per run and per stripe.

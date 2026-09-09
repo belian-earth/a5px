@@ -5,7 +5,6 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use async_tiff::decoder::DecoderRegistry;
 use async_tiff::metadata::TiffMetadataReader;
-use async_tiff::metadata::cache::ReadaheadMetadataCache;
 use async_tiff::reader::{AsyncFileReader, ObjectReader};
 use async_tiff::tags::PlanarConfiguration;
 use async_tiff::{TIFF, TypedArray};
@@ -48,8 +47,22 @@ static N_OVERLAY_BOUNDARY: AtomicU64 = AtomicU64::new(0);
 // grid projector: windows built / windows that fell back to exact projection
 static N_WINDOWS: AtomicU64 = AtomicU64::new(0);
 static N_WINDOWS_EXACT: AtomicU64 = AtomicU64::new(0);
+// whole-call phases (wall)
+static T_OPEN_NS: AtomicU64 = AtomicU64::new(0);
+static T_OPEN_STORE_NS: AtomicU64 = AtomicU64::new(0);
+static T_OPEN_HEADER_NS: AtomicU64 = AtomicU64::new(0);
+static T_OPEN_IFDS_NS: AtomicU64 = AtomicU64::new(0);
+static T_PLAN_NS: AtomicU64 = AtomicU64::new(0);
+static T_PIPELINE_NS: AtomicU64 = AtomicU64::new(0);
+static T_ROUT_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static T_PQ_COLUMNS_NS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static T_PQ_WRITE_NS: AtomicU64 = AtomicU64::new(0);
+// pipeline waits (summed over tasks): consumers blocked waiting for a tile,
+// producer tasks blocked on the full channel
+static T_RECV_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+static T_SEND_WAIT_NS: AtomicU64 = AtomicU64::new(0);
 
-fn profile_enabled() -> bool {
+pub(crate) fn profile_enabled() -> bool {
     std::env::var_os("A5PX_PROFILE").is_some()
 }
 
@@ -59,6 +72,8 @@ fn reset_timers() {
         &T_INDEX_NS, &T_STRIPE_MERGE_NS, &T_REDUCE_NS, &T_FLATTEN_NS,
         &T_PIX_READ_NS, &T_A5_CELL_NS, &T_HM_NS, &T_PUSH_NS,
         &N_OVERLAY_INTERIOR, &N_OVERLAY_BOUNDARY, &N_WINDOWS, &N_WINDOWS_EXACT,
+        &T_OPEN_NS, &T_OPEN_STORE_NS, &T_OPEN_HEADER_NS, &T_OPEN_IFDS_NS, &T_PLAN_NS, &T_PIPELINE_NS, &T_ROUT_NS, &T_PQ_COLUMNS_NS, &T_PQ_WRITE_NS,
+        &T_RECV_WAIT_NS, &T_SEND_WAIT_NS,
     ] {
         t.store(0, Ordering::Relaxed);
     }
@@ -72,7 +87,23 @@ fn print_timers(total: f64) {
             100.0 * s / total
         )
     };
-    eprintln!("[a5px profile, total {:.3} s, sum across tile workers]", total);
+    eprintln!("[a5px profile, total {:.3} s = whole call; stage lines sum across tile workers]", total);
+    eprintln!("  call phases (wall):");
+    one("  open + metadata", T_OPEN_NS.load(Ordering::Relaxed));
+    one("    store client", T_OPEN_STORE_NS.load(Ordering::Relaxed));
+    one("    tiff header", T_OPEN_HEADER_NS.load(Ordering::Relaxed));
+    one("    read all IFDs", T_OPEN_IFDS_NS.load(Ordering::Relaxed));
+    one("  tile planning", T_PLAN_NS.load(Ordering::Relaxed));
+    one("  read pipeline", T_PIPELINE_NS.load(Ordering::Relaxed));
+    one("  assemble output", T_REDUCE_NS.load(Ordering::Relaxed));
+    one("  flatten output", T_FLATTEN_NS.load(Ordering::Relaxed));
+    one("  R output build", T_ROUT_NS.load(Ordering::Relaxed));
+    one("  parquet columns", T_PQ_COLUMNS_NS.load(Ordering::Relaxed));
+    one("  parquet encode+write", T_PQ_WRITE_NS.load(Ordering::Relaxed));
+    eprintln!("  pipeline waits (summed over tasks):");
+    one("  consumer idle (no tile)", T_RECV_WAIT_NS.load(Ordering::Relaxed));
+    one("  producer blocked (full)", T_SEND_WAIT_NS.load(Ordering::Relaxed));
+    eprintln!("  stages:");
     one("io fetch", T_FETCH_NS.load(Ordering::Relaxed));
     one("decode", T_DECODE_NS.load(Ordering::Relaxed));
     one("proj transform", T_PROJ_NS.load(Ordering::Relaxed));
@@ -83,9 +114,6 @@ fn print_timers(total: f64) {
     one("  run build", T_HM_NS.load(Ordering::Relaxed));
     one("  read + push runs", T_PUSH_NS.load(Ordering::Relaxed));
     one("partition merge", T_STRIPE_MERGE_NS.load(Ordering::Relaxed));
-    eprintln!("  serial tail (wall):");
-    one("  assemble output", T_REDUCE_NS.load(Ordering::Relaxed));
-    one("  flatten output", T_FLATTEN_NS.load(Ordering::Relaxed));
     let n_win = N_WINDOWS.load(Ordering::Relaxed);
     if n_win > 0 {
         eprintln!(
@@ -159,7 +187,8 @@ impl Stat {
 /// Split the R-side stat vector into enum stats plus the `fractions` flag.
 /// "fractions" has a per-cell variable-length output (class -> weight share)
 /// so it is not a `Stat`; the R wrappers enforce that it arrives alone.
-fn parse_stats(stats: &[String]) -> Result<(Vec<Stat>, bool)> {
+/// Returns (per-band stats, fractions?, npix?).
+fn parse_stats(stats: &[String]) -> Result<(Vec<Stat>, bool, bool)> {
     if stats.is_empty() {
         return Err(A5CogError::Invalid("at least one stat is required".into()));
     }
@@ -169,12 +198,13 @@ fn parse_stats(stats: &[String]) -> Result<(Vec<Stat>, bool)> {
             "\"fractions\" must be the only requested stat".into(),
         ));
     }
+    let npix = stats.iter().any(|s| s == "npix");
     let parsed: Vec<Stat> = stats
         .iter()
-        .filter(|s| s.as_str() != "fractions")
+        .filter(|s| s.as_str() != "fractions" && s.as_str() != "npix")
         .map(|s| Stat::parse(s.as_str()))
         .collect::<Result<Vec<_>>>()?;
-    Ok((parsed, fractions))
+    Ok((parsed, fractions, npix))
 }
 
 /// Per-band accumulation config, derived once from the requested stats.
@@ -182,11 +212,14 @@ fn parse_stats(stats: &[String]) -> Result<(Vec<Stat>, bool)> {
 struct AccCfg {
     has_cont: bool,
     has_cat: bool,
+    /// One weight per cell: pixels (or pixel-area weight) with any valid band.
+    has_npix: bool,
 }
 
 impl AccCfg {
-    fn from_stats(stats: &[Stat], fractions: bool) -> Self {
+    fn from_stats(stats: &[Stat], fractions: bool, npix: bool) -> Self {
         Self {
+            has_npix: npix,
             has_cont: stats.iter().any(|s| s.needs_cont()),
             has_cat: fractions || stats.iter().any(|s| matches!(s, Stat::Majority)),
         }
@@ -597,6 +630,8 @@ pub(crate) struct CellStore<L: AccLayout> {
     cells: Vec<u64>,
     cont: Vec<L>,
     cat: Vec<ClassWeights>,
+    /// Per-cell weight (pixels with any valid band), when `cfg.has_npix`.
+    npix: Vec<f64>,
 }
 
 impl<L: AccLayout> CellStore<L> {
@@ -608,6 +643,7 @@ impl<L: AccLayout> CellStore<L> {
             cells: Vec::with_capacity(cap),
             cont: Vec::with_capacity(if cfg.has_cont { cap * n_out } else { 0 }),
             cat: Vec::with_capacity(if cfg.has_cat { cap * n_out } else { 0 }),
+            npix: Vec::with_capacity(if cfg.has_npix { cap } else { 0 }),
         }
     }
 
@@ -631,7 +667,17 @@ impl<L: AccLayout> CellStore<L> {
         if self.cfg.has_cat {
             self.cat.extend(std::iter::repeat_with(Vec::new).take(self.n_out));
         }
+        if self.cfg.has_npix {
+            self.npix.push(0.0);
+        }
         s
+    }
+
+    #[inline]
+    fn add_npix(&mut self, slot: u32, w: f64) {
+        if self.cfg.has_npix {
+            self.npix[slot as usize] += w;
+        }
     }
 
     #[inline]
@@ -660,6 +706,9 @@ impl<L: AccLayout> CellStore<L> {
                     cat_push(&mut self.cat[s * n_out + b], c, w)?;
                 }
             }
+        }
+        if self.cfg.has_npix {
+            self.npix[s] += other.npix[i];
         }
         Ok(())
     }
@@ -1201,6 +1250,11 @@ fn process_tile<L: AccLayout>(
             continue;
         }
         let t = if prof { Some(Instant::now()) } else { None };
+        if cfg.has_npix {
+            for &(slot, c0, c1) in &runs {
+                store.add_npix(slot, (c1 - c0) as f64);
+            }
+        }
         for (out_b, &src_b) in tile.band_offsets.iter().enumerate() {
             let band_base = row_base + src_b * b_stride;
             for &(slot, c0, c1) in &runs {
@@ -1315,6 +1369,7 @@ fn push_pixel<L: AccLayout>(
     band_valid: &[bool],
     w: f64,
 ) -> Result<()> {
+    store.add_npix(slot, w);
     for b in 0..band_vals.len() {
         if band_valid[b] {
             if cfg.has_cont {
@@ -1573,10 +1628,31 @@ pub(crate) struct TileItem {
 pub(crate) enum TilePayload {
     /// Output of `ImageFileDirectory::fetch_tile`. Decode happens on the consumer.
     Full(async_tiff::Tile),
-    /// Per-selected-band compressed bytes for planar layouts. Used when the
-    /// caller asked for a band subset of an INTERLEAVE=BAND TIFF with
-    /// predictor=None: only those bands' byte ranges were fetched.
-    PlanarSubset(Vec<bytes::Bytes>),
+    /// Compressed bytes of one block from a strip fetch: one buffer per
+    /// selected band (planar) or a single buffer (chunky). Used when the
+    /// file has no predictor and native byte order, so the bytes decode
+    /// straight into the accumulation layout.
+    Block { bufs: Vec<bytes::Bytes>, chunky: bool },
+}
+
+/// Blocks per fetch task under strip fetching. Runs of adjacent blocks in
+/// a tile row are contiguous per band in GDAL-written files, so one task
+/// fetching a run turns into one coalesced request per band.
+const STRIP_BLOCKS: usize = 4;
+
+/// Group the planned tiles into fetch units: runs of up to `max_len`
+/// consecutive `tx` within one tile row, in planning order.
+fn plan_strips(tiles: &[(usize, usize)], max_len: usize) -> Vec<Vec<(usize, usize)>> {
+    let mut out: Vec<Vec<(usize, usize)>> = Vec::new();
+    for &(tx, ty) in tiles {
+        match out.last_mut() {
+            Some(run) if run.len() < max_len && run.last().map(|&(x, y)| y == ty && x + 1 == tx).unwrap_or(false) => {
+                run.push((tx, ty));
+            }
+            _ => out.push(vec![(tx, ty)]),
+        }
+    }
+    out
 }
 
 /// Read-time arguments shared by the dispatchers below.
@@ -1596,6 +1672,7 @@ pub(crate) struct ReadArgs<'a> {
     pub dequant: Option<Arc<DequantLut>>,
     pub overlay: Option<OverlayParams>,
     pub fractions: bool,
+    pub npix: bool,
     pub bbox_align_block: bool,
     pub tile_bbox: Option<[f64; 4]>,
     pub mask: Option<Arc<CellMask>>,
@@ -1625,12 +1702,7 @@ async fn read_raster_to_parquet_async(
     compression: crate::parquet_write::CompressionChoice,
     as_vector: bool,
 ) -> Result<()> {
-    let prof = profile_enabled();
-    let t0 = Instant::now();
     dispatch_layout!(a, |agg: Aggregate<_>| {
-        if prof {
-            print_timers(t0.elapsed().as_secs_f64());
-        }
         crate::parquet_write::write_aggregate_parquet(&agg, dest, resolution, value_type, compression, as_vector)
     })
 }
@@ -1639,14 +1711,27 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
     let ReadArgs {
         src, store_opts, resolution, stats, bands_idx, bands_names, bbox_lonlat,
         src_nodata_override, cpu_workers, io_concurrency, overview_target_m, dequant,
-        overlay, fractions, bbox_align_block, tile_bbox, mask,
+        overlay, fractions, npix, bbox_align_block, tile_bbox, mask,
     } = a;
-    let cfg = AccCfg::from_stats(&stats, fractions);
+    let cfg = AccCfg::from_stats(&stats, fractions, npix);
+    let prof_call = profile_enabled();
+    let t_open = Instant::now();
     let (store, path) = parse_src(src, &store_opts)?;
     let reader = ObjectReader::new(store, path);
-    let cache = ReadaheadMetadataCache::new(reader.clone());
+    let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
+    if prof_call {
+        T_OPEN_STORE_NS.fetch_add(t_open.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_hdr = Instant::now();
     let mut meta = TiffMetadataReader::try_open(&cache).await?;
+    if prof_call {
+        T_OPEN_HEADER_NS.fetch_add(t_hdr.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_ifds = Instant::now();
     let ifds = meta.read_all_ifds(&cache).await?;
+    if prof_call {
+        T_OPEN_IFDS_NS.fetch_add(t_ifds.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
     let endianness = meta.endianness();
     let tiff = TIFF::new(ifds, endianness);
 
@@ -1808,6 +1893,10 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
     // `bbox_lonlat` (user bbox) drives both tile selection and the per-pixel
     // filter; `tile_bbox` (the AOI cells' envelope) only drives tile
     // selection when no user bbox is given, so AOI cells keep every pixel.
+    if prof_call {
+        T_OPEN_NS.fetch_add(t_open.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_plan = Instant::now();
     let tiles: Vec<(usize, usize)> = if let Some(b) = bbox_lonlat.or(tile_bbox) {
         let (tx_lo, ty_lo, tx_hi, ty_hi) = match projected_tile_range(
             b, &src_proj, &dst_proj, &gt, width, height, tile_w, tile_h,
@@ -1840,20 +1929,24 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
             .flat_map(|y| (0..n_tiles_x).map(move |x| (x, y)))
             .collect()
     };
+    if prof_call {
+        T_PLAN_NS.fetch_add(t_plan.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_pipe = Instant::now();
     // Under block alignment the whole tile is in, so the per-pixel bbox
     // test is skipped.
     let bbox_pixel_filter: Option<[f64; 4]> = if bbox_align_block { None } else { bbox_lonlat };
 
-    // decide once whether the band-aware fetch path applies
-    // The band-subset path concatenates raw tile bytes without byte
-    // swapping, so it is only valid when the file's byte order is native.
-    let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
-        && n_out < n_bands
-        && endianness.is_native()
+    // Strip fetching decodes raw block bytes without byte swapping or
+    // predictor reversal, so it applies only to native byte order and no
+    // predictor; other files take async-tiff's per-block `fetch_tile`.
+    let raw_ok = endianness.is_native()
         && matches!(
             ifd_owned.predictor(),
             None | Some(async_tiff::tags::Predictor::None)
         );
+    let is_chunky = matches!(planar, PlanarConfiguration::Chunky);
+    let use_strips = raw_ok && (is_chunky || matches!(planar, PlanarConfiguration::Planar));
     let identity_offsets: Vec<usize> = (0..n_out).collect();
 
     let ifd_arc = Arc::new(ifd_owned);
@@ -1947,7 +2040,12 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
                 overlay_k,
             };
             let prof = profile_enabled();
-            while let Ok(item) = rx.recv_blocking() {
+            loop {
+                let t_wait = Instant::now();
+                let Ok(item) = rx.recv_blocking() else { break };
+                if prof {
+                    T_RECV_WAIT_NS.fetch_add(t_wait.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
                 let (data, _shape, data_n_bands_eff, offsets_arc): (
                     TypedArray,
                     [usize; 3],
@@ -1964,16 +2062,20 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
                         let (data, sh, _) = arr.into_inner();
                         (data, sh, n_bands, Arc::clone(&selected_bands))
                     }
-                    TilePayload::PlanarSubset(bytes) => {
+                    TilePayload::Block { bufs, chunky } => {
                         let t_dec = Instant::now();
-                        let (typed, sh) = crate::band_fetch::decode_planar_subset_bytes(
-                            bytes, &ifd, &registry,
+                        let (typed, sh) = crate::band_fetch::decode_block_bytes(
+                            bufs, &ifd, &registry, chunky,
                         )?;
                         if prof {
                             T_DECODE_NS
                                 .fetch_add(t_dec.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         }
-                        (typed, sh, n_out, Arc::clone(&identity_offsets))
+                        if chunky {
+                            (typed, sh, n_bands, Arc::clone(&selected_bands))
+                        } else {
+                            (typed, sh, n_out, Arc::clone(&identity_offsets))
+                        }
                     }
                 };
                 let td = TileData {
@@ -1999,8 +2101,12 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
         let ifd = Arc::clone(&ifd_arc);
         let selected_bands = Arc::clone(&selected_bands_arc);
         let tx_chan = tx_chan_outer;
-        let producer = stream::iter(tiles)
-            .map(|(tx, ty)| {
+        let strips = if use_strips { plan_strips(&tiles, STRIP_BLOCKS) } else { tiles.iter().map(|&t| vec![t]).collect() };
+        // io_concurrency counts blocks in flight; a strip task carries up
+        // to STRIP_BLOCKS of them.
+        let task_conc = if use_strips { (io_concurrency / STRIP_BLOCKS).max(2) } else { io_concurrency.max(1) };
+        let producer = stream::iter(strips)
+            .map(|blocks| {
                 let reader = reader.clone();
                 let ifd = Arc::clone(&ifd);
                 let selected_bands = Arc::clone(&selected_bands);
@@ -2008,36 +2114,47 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
                 async move {
                     let prof = profile_enabled();
                     let t_fetch = Instant::now();
-                    let payload = if use_band_fetch {
-                        let bytes = crate::band_fetch::fetch_planar_subset_bytes(
+                    let items: Vec<TileItem> = if use_strips {
+                        let per_block = crate::band_fetch::fetch_blocks_bytes(
                             &reader as &dyn AsyncFileReader,
                             &ifd,
-                            tx,
-                            ty,
+                            &blocks,
                             &selected_bands,
+                            is_chunky,
                         )
                         .await?;
-                        TilePayload::PlanarSubset(bytes)
+                        blocks
+                            .iter()
+                            .zip(per_block)
+                            .map(|(&(tx, ty), bufs)| TileItem { tx, ty, payload: TilePayload::Block { bufs, chunky: is_chunky } })
+                            .collect()
                     } else {
+                        let (tx, ty) = blocks[0];
                         let tile = ifd
                             .fetch_tile(tx, ty, &reader as &dyn AsyncFileReader)
                             .await?;
-                        TilePayload::Full(tile)
+                        vec![TileItem { tx, ty, payload: TilePayload::Full(tile) }]
                     };
                     if prof {
                         T_FETCH_NS
                             .fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
-                    tx_chan
-                        .send(TileItem { tx, ty, payload })
-                        .await
-                        .map_err(|_| {
-                            A5CogError::Invalid("consumer pool dropped channel".into())
-                        })?;
+                    let t_send = Instant::now();
+                    for item in items {
+                        tx_chan
+                            .send(item)
+                            .await
+                            .map_err(|_| {
+                                A5CogError::Invalid("consumer pool dropped channel".into())
+                            })?;
+                    }
+                    if prof {
+                        T_SEND_WAIT_NS.fetch_add(t_send.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
                     Ok::<(), A5CogError>(())
                 }
             })
-            .buffer_unordered(io_concurrency.max(1))
+            .buffer_unordered(task_conc)
             .try_collect::<Vec<()>>();
         // tx_chan is moved into this block so end-of-scope drops it,
         // closing the channel once the producer finishes (the per-task
@@ -2069,6 +2186,9 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
     }
     for r in consumer_results {
         r?;
+    }
+    if prof_call {
+        T_PIPELINE_NS.fetch_add(t_pipe.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     let t_reduce = Instant::now();
     let parts = Arc::try_unwrap(parts)
@@ -2123,6 +2243,18 @@ impl<L: AccLayout> Aggregate<L> {
     #[inline]
     pub(crate) fn cells(&self) -> &[u64] {
         &self.cells
+    }
+
+    /// Per-cell pixel weights in output order, when requested.
+    pub(crate) fn npix(&self) -> Option<Vec<f64>> {
+        if !self.parts.iter().any(|p| p.cfg.has_npix) {
+            return None;
+        }
+        let mut v = Vec::with_capacity(self.len());
+        for p in &self.parts {
+            v.extend_from_slice(&p.npix);
+        }
+        Some(v)
     }
 
     /// Values of `stat` for band `b` over all cells, in output order.
@@ -2204,6 +2336,7 @@ impl<L: AccLayout> Aggregate<L> {
     if profile_enabled() {
         T_FLATTEN_NS.fetch_add(t_flatten.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
+    let npix = self.npix();
     let Aggregate { cells, band_names, stats, .. } = self;
 
     Output {
@@ -2213,6 +2346,7 @@ impl<L: AccLayout> Aggregate<L> {
         band_names,
         stats: stats.iter().map(|s| s.as_str().to_string()).collect(),
         fractions: frac_out,
+        npix,
     }
     }
 }
@@ -2227,6 +2361,8 @@ struct Output {
     stats: Vec<String>,
     /// Present only for a "fractions" read; ragged per-cell class shares.
     fractions: Option<FracOut>,
+    /// Per-cell pixel weight, for `stat = "npix"`.
+    npix: Option<Vec<f64>>,
 }
 
 /// Class-share output in CSR form, one entry per band: `offsets[b]` has
@@ -2617,7 +2753,7 @@ fn a5_read_raster_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let (stats_e, fractions) = parse_stats(&stats)?;
+    let (stats_e, fractions, npix) = parse_stats(&stats)?;
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
@@ -2651,15 +2787,13 @@ fn a5_read_raster_rs(
         dequant,
         overlay: overlay_opt,
         fractions: fractions,
+        npix,
         bbox_align_block,
         tile_bbox: tile_bbox_opt,
         mask,
     }))?;
 
-    if prof {
-        print_timers(t0.elapsed().as_secs_f64());
-    }
-
+    let t_rout = Instant::now();
     let cell_list = u64s_to_raw8_list(&out.cells);
 
     // de-interleave each per-stat flat buffer into one Vec<f64> per band per stat
@@ -2706,14 +2840,24 @@ fn a5_read_raster_rs(
         }
     };
 
-    Ok(list!(
+    let npix_robj: Robj = match out.npix {
+        None => ().into(),
+        Some(v) => Robj::from(v),
+    };
+    let result: Robj = list!(
         cell = cell_list,
         bands = bands,
         band_names = band_names,
         stats = stats_out,
-        fractions = fractions_robj
+        fractions = fractions_robj,
+        npix = npix_robj
     )
-    .into())
+    .into();
+    if prof {
+        T_ROUT_NS.fetch_add(t_rout.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        print_timers(t0.elapsed().as_secs_f64());
+    }
+    Ok(result)
 }
 
 /// Forward-aggregate a (Cloud-Optimised) GeoTIFF into A5 cells, returning a
@@ -2772,7 +2916,7 @@ fn a5_read_raster_flat_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let (stats_e, fractions) = parse_stats(&stats)?;
+    let (stats_e, fractions, npix) = parse_stats(&stats)?;
     if fractions {
         return Err(A5CogError::Unsupported(
             "\"fractions\" is only available via a5_read_raster()".into(),
@@ -2811,15 +2955,13 @@ fn a5_read_raster_flat_rs(
         dequant,
         overlay: overlay_opt,
         fractions: false,
+        npix,
         bbox_align_block,
         tile_bbox: tile_bbox_opt,
         mask,
     }))?;
 
-    if prof {
-        print_timers(t0.elapsed().as_secs_f64());
-    }
-
+    let t_rout = Instant::now();
     let cell_list = u64s_to_raw8_list(&out.cells);
     let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
     let n_bands = out.n_bands as i32;
@@ -2832,15 +2974,25 @@ fn a5_read_raster_flat_rs(
         .map(|(s, v)| (s.clone(), Robj::from(v)))
         .collect();
     let value_flat = List::from_pairs(value_pairs);
+    let npix_robj: Robj = match out.npix {
+        None => ().into(),
+        Some(v) => Robj::from(v),
+    };
 
-    Ok(list!(
+    let result: Robj = list!(
         cell = cell_list,
         value_flat = value_flat,
         band_names = band_names,
         stats = stats_out,
-        n_bands = n_bands
+        n_bands = n_bands,
+        npix = npix_robj
     )
-    .into())
+    .into();
+    if prof {
+        T_ROUT_NS.fetch_add(t_rout.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        print_timers(t0.elapsed().as_secs_f64());
+    }
+    Ok(result)
 }
 
 // adapt our error to extendr's
@@ -2909,7 +3061,7 @@ fn a5_raster_to_parquet_rs(
             "specify bands by index OR by name, not both".into(),
         ));
     }
-    let (stats_e, fractions) = parse_stats(&stats)?;
+    let (stats_e, fractions, npix) = parse_stats(&stats)?;
     if fractions {
         return Err(A5CogError::Unsupported(
             "\"fractions\" is only available via a5_read_raster()".into(),
@@ -2936,7 +3088,6 @@ fn a5_raster_to_parquet_rs(
     let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_cells_raw)).map(Arc::new);
 
 
-    let _ = t0;
     runtime.block_on(read_raster_to_parquet_async(
         ReadArgs {
         src,
@@ -2953,6 +3104,7 @@ fn a5_raster_to_parquet_rs(
         dequant,
         overlay: overlay_opt,
         fractions: false,
+        npix,
         bbox_align_block,
         tile_bbox: tile_bbox_opt,
         mask,
@@ -2964,6 +3116,9 @@ fn a5_raster_to_parquet_rs(
         as_vector,
     ))?;
 
+    if prof {
+        print_timers(t0.elapsed().as_secs_f64());
+    }
     Ok(dest.to_string())
 }
 
@@ -3235,7 +3390,7 @@ fn footprint_lonlat(
 async fn open_tiff(src: &str, store_opts: &StoreOpts) -> Result<TIFF> {
     let (store, path) = parse_src(src, store_opts)?;
     let reader = ObjectReader::new(store, path);
-    let cache = ReadaheadMetadataCache::new(reader.clone());
+    let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
     let mut meta = TiffMetadataReader::try_open(&cache).await?;
     let ifds = meta.read_all_ifds(&cache).await?;
     let endianness = meta.endianness();
@@ -3397,7 +3552,7 @@ fn a5_select_overview_level_rs(
     runtime.block_on(async move {
         let (store, path) = parse_src(src, &store_opts)?;
         let reader = ObjectReader::new(store, path);
-        let cache = ReadaheadMetadataCache::new(reader.clone());
+        let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
         let mut meta = TiffMetadataReader::try_open(&cache).await?;
         let ifds = meta.read_all_ifds(&cache).await?;
         let endianness = meta.endianness();
