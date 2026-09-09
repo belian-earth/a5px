@@ -2101,7 +2101,16 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
         let ifd = Arc::clone(&ifd_arc);
         let selected_bands = Arc::clone(&selected_bands_arc);
         let tx_chan = tx_chan_outer;
-        let strips = if use_strips { plan_strips(&tiles, STRIP_BLOCKS) } else { tiles.iter().map(|&t| vec![t]).collect() };
+        // Cap the strip length so at least io_concurrency tasks exist: a
+        // small read (16-20 blocks at io_concurrency 8) would otherwise
+        // open fewer streams than the per-block path and lose where
+        // per-stream bandwidth, not latency, is the limit.
+        let max_len = if use_strips {
+            tiles.len().div_ceil(io_concurrency.max(1)).clamp(1, STRIP_BLOCKS)
+        } else {
+            1
+        };
+        let strips = if use_strips { plan_strips(&tiles, max_len) } else { tiles.iter().map(|&t| vec![t]).collect() };
         // One fetch task per unit of io_concurrency whether the task
         // carries one block or a strip of STRIP_BLOCKS: fewer tasks starved
         // the consumers at the default setting (2.5x slower from a

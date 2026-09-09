@@ -11,7 +11,8 @@
   subset; the previous byte-range path only served planar band subsets),
   so the object store coalesces each band's contiguous blocks into one
   range request instead of one per block per band. `io_concurrency`
-  counts fetch tasks as before, each now carrying up to four blocks.
+  counts fetch tasks as before, each now carrying up to four blocks (fewer
+  on small reads, so at least `io_concurrency` tasks stay open).
   Files with a predictor or non-native byte order keep the per-block
   path.
 
