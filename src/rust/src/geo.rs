@@ -318,12 +318,6 @@ fn looks_like_wkt(s: &str) -> bool {
 pub(crate) struct GeoTransform(pub [f64; 6]);
 
 impl GeoTransform {
-    /// Compute the projected (x, y) of a pixel centre at index (col, row).
-    #[inline]
-    pub fn pixel_centre(&self, col: usize, row: usize) -> (f64, f64) {
-        self.pixel_xy(col as f64 + 0.5, row as f64 + 0.5)
-    }
-
     /// Projected (x, y) at fractional pixel coordinates: integer values lie
     /// on pixel corners, (col + 0.5, row + 0.5) is the pixel centre. The
     /// pixel grid is affine in the source CRS, so sub-pixel positions are

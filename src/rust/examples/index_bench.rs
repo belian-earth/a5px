@@ -7,7 +7,7 @@
 //!   crate     : a5::core::cell::spherical_to_cell alone (internal 1-entry cache)
 //!   locator   : a5px::locator::CellLocator (neighbour-first, cached pentagons)
 //!
-//! usage: index_bench [resolution] [pixel_m] [tile]
+//! usage: index_bench [resolution] [pixel_m] [tile] [which: all|current|crate|locator]
 
 use a5::coordinate_systems::Spherical;
 use a5::core::cell::{a5cell_contains_point, spherical_to_cell};
@@ -55,11 +55,17 @@ fn run_crate(pts: &[Spherical], res: i32, out: &mut Vec<u64>) {
 
 // --- strategy C: a5px's neighbour-first locator (src/locator.rs)
 fn run_locator(pts: &[Spherical], res: i32, w: usize, out: &mut Vec<u64>) {
-    let mut loc = CellLocator::new(res);
+    let mut loc = CellLocator::new(res, a5::cell_area(res) / 100.0);
     let mut prev_row: Vec<u64> = vec![NO_CELL; w];
     for (i, &p) in pts.iter().enumerate() {
         let c = i % w;
-        let id = loc.locate(p, prev_row[c]);
+        let mut hints = [NO_CELL; 5];
+        hints[0] = prev_row[c];
+        if c + 1 < w { hints[1] = prev_row[c + 1]; }
+        if c + 2 < w { hints[2] = prev_row[c + 2]; }
+        if c + 3 < w { hints[3] = prev_row[c + 3]; }
+        if c >= 1 { hints[4] = prev_row[c - 1]; }
+        let id = loc.locate_exact(p, &hints);
         prev_row[c] = id;
         out.push(id);
     }
@@ -70,6 +76,7 @@ fn main() {
     let res: i32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(18);
     let pixel_m: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10.0);
     let tile: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let which = args.get(4).map(|s| s.as_str()).unwrap_or("all");
 
     // Sabah-ish, matches the issue's partition
     let lon0 = 117.0;
@@ -87,18 +94,23 @@ fn main() {
     }
     eprintln!("res {res}, {pixel_m} m pixels, {tile}x{tile} tile, {n} points");
 
+    let want = |k: &str| which == "all" || which == k;
     let mut a = Vec::with_capacity(n);
     let t = Instant::now();
-    run_current(&pts, res, &mut a);
+    if want("current") { run_current(&pts, res, &mut a); }
     let ta = t.elapsed();
     let mut b = Vec::with_capacity(n);
     let t = Instant::now();
-    run_crate(&pts, res, &mut b);
+    if want("crate") { run_crate(&pts, res, &mut b); }
     let tb = t.elapsed();
     let mut c = Vec::with_capacity(n);
     let t = Instant::now();
-    run_locator(&pts, res, tile, &mut c);
+    if want("locator") { run_locator(&pts, res, tile, &mut c); }
     let tc = t.elapsed();
+    if which != "all" {
+        println!("{which}: {:.0} ns/px", [ta, tb, tc].iter().map(|d| d.as_nanos() as f64).fold(0.0, f64::max) / n as f64);
+        return;
+    }
 
     let mut distinct = AHashMap::new();
     for &id in &b {

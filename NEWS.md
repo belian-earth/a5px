@@ -1,14 +1,27 @@
 # a5px (development version)
 
-* Faster reads at fine resolutions (#6). The point-to-cell lookup now
-  tests the previous pixel's cell, the cell above and their neighbours
-  with cached pentagons before falling back to the a5 search, and each
-  block is indexed as row stripes across all `cpu_workers`, so reads that
-  span fewer blocks than workers no longer leave cores idle. A res-18
-  read of a 64-band embedding chunk is 1.6x faster at 4 workers and 2.2x
-  at 8; a res-16 Sentinel-2 read is 2x faster. Cell sets and counts are
-  unchanged; means can differ from 0.1.0 in the last bit where a cell
-  spans a stripe boundary.
+* Reads are 2-4x faster at fine resolutions (#6), with identical cell sets
+  and counts; means and other sums can differ from 0.1.0 in the last bit
+  because pixels are now summed per run and per stripe.
+  - The point-to-cell lookup (`locator.rs`) tests the previous pixel's
+    cell, the cells above it and the children of their parents with cached
+    pentagons before falling back to the a5 search, which the a5 crate's
+    own first estimate misses 42% of the time at res 18.
+  - Pixel centres are projected to A5's face frame by bilinear
+    interpolation over 16x16 pixel windows (`grid_proj.rs`); each window
+    carries a measured error bound and any pixel within that bound of a
+    cell edge or of the `bbox` is projected exactly, so results equal the
+    exact path. Windows that fail to project, straddle a dodecahedron
+    face, the antimeridian or a pole fall back to exact projection.
+  - Each block is indexed as 64-row stripes across all `cpu_workers`, so a
+    read spanning fewer blocks than workers no longer leaves cores idle;
+    stripes and workers merge as fixed pairwise trees.
+  - Pixels are accumulated band by band in runs of consecutive pixels of
+    one cell (sequential reads on planar data), into one contiguous
+    accumulator slab per stripe instead of a heap allocation per cell.
+  - `a5_raster_to_parquet()` builds its columns straight from the
+    accumulators (as float32 when asked, without the f64 copy) and encodes
+    columns in parallel.
 
 # a5px 0.1.0
 
