@@ -128,7 +128,8 @@ categorical rasters; the smooth kernels blend class codes into
 meaningless intermediates. Only used when \code{mode = "centroid"}; an
 error otherwise.}
 
-\item{cpu_workers}{Number of CPU consumers in the tile-processing pool.
+\item{cpu_workers}{Number of CPU threads for decoding and indexing
+(each decoded block is indexed as row stripes across all workers).
 \code{NULL} (default) resolves from \code{getOption("a5px.cpu_workers")}, env
 \code{A5PX_CPU_WORKERS}, then \code{\link[parallel:detectCores]{parallel::detectCores()}}.}
 

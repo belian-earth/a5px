@@ -135,7 +135,8 @@
 #'   categorical rasters; the smooth kernels blend class codes into
 #'   meaningless intermediates. Only used when `mode = "centroid"`; an
 #'   error otherwise.
-#' @param cpu_workers Number of CPU consumers in the tile-processing pool.
+#' @param cpu_workers Number of CPU threads for decoding and indexing
+#'   (each decoded block is indexed as row stripes across all workers).
 #'   `NULL` (default) resolves from `getOption("a5px.cpu_workers")`, env
 #'   `A5PX_CPU_WORKERS`, then [parallel::detectCores()].
 #' @param io_concurrency Maximum in-flight tile fetches the producer issues

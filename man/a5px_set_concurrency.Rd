@@ -24,10 +24,11 @@ a5px's reader runs as a producer / consumer pipeline:
 }
 \details{
 \itemize{
-\item \strong{\code{cpu_workers}} is the size of the consumer pool (the blocking-thread
-workers that decode each tile and drive \code{\link[a5R:a5_lonlat_to_cell]{a5R::a5_lonlat_to_cell()}} /
-\code{\link[a5R:a5_cell_to_lonlat]{a5R::a5_cell_to_lonlat()}} over its pixels). Pick this to match the
-number of physical cores you can spare.
+\item \strong{\code{cpu_workers}} is the number of CPU threads a read uses: the
+blocking-thread consumers that decode each block, and the pool of the
+same size that indexes each decoded block as row stripes, so a read
+that spans fewer blocks than workers still uses every worker. Pick
+this to match the number of physical cores you can spare.
 \item \strong{\code{io_concurrency}} is the number of in-flight tile fetches the
 producer issues at once. For local files leave this at the default
 (\code{io_concurrency = cpu_workers}); for cloud reads of multi-band

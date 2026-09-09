@@ -1,26 +1,29 @@
-//! Direct Rust-side Parquet writer.
+//! Rust-direct Parquet output.
 //!
-//! Same schema as the R `a5_read_raster_arrow()` path (cell:uint64 +
-//! value:FixedSizeList<float, n_bands>) but constructed in Rust from the
-//! aggregator's flat cell-major buffer with no R intermediary. Saves the
-//! Vec<f64> -> R numeric -> R list of vectors -> arrow Array round-trip and
-//! the per-cell R object allocation.
+//! Columns are built straight from the cell slab (as float32 when asked,
+//! so the f64 flatten copy of the R paths is never made) and encoded in
+//! parallel, one column per task on the read's index pool, then appended
+//! to the file as row groups of up to `ROW_GROUP_ROWS` cells.
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
 
-use arrow_array::{
-    ArrayRef, FixedSizeListArray, Float32Array, Float64Array, RecordBatch, UInt64Array,
-};
+use arrow_array::{ArrayRef, FixedSizeListArray, Float32Array, Float64Array, UInt64Array};
 use arrow_buffer::Buffer;
 use arrow_schema::{DataType, Field, Schema};
-use parquet::arrow::ArrowWriter;
+use parquet::arrow::arrow_writer::{compute_leaves, ArrowColumnChunk, ArrowLeafColumn, ArrowRowGroupWriterFactory};
+use parquet::arrow::{add_encoded_arrow_schema_to_metadata, ArrowSchemaConverter};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
+use parquet::file::writer::SerializedFileWriter;
 
 use crate::error::{A5CogError, Result};
+use crate::read::{AccLayout, Aggregate};
+
+/// Matches `ArrowWriter`'s default `max_row_group_size`.
+const ROW_GROUP_ROWS: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ValueType {
@@ -36,6 +39,43 @@ impl ValueType {
             other => Err(A5CogError::Invalid(format!(
                 "unknown value_type {other:?}; expected float32 or float64"
             ))),
+        }
+    }
+
+    fn data_type(self) -> DataType {
+        match self {
+            Self::Float64 => DataType::Float64,
+            Self::Float32 => DataType::Float32,
+        }
+    }
+
+    /// Array of `n` values drawn from `it`.
+    fn array_from_iter(self, n: usize, it: impl Iterator<Item = f64>) -> ArrayRef {
+        match self {
+            Self::Float64 => {
+                let mut v: Vec<f64> = Vec::with_capacity(n);
+                v.extend(it);
+                Arc::new(Float64Array::new(Buffer::from_vec(v).into(), None))
+            }
+            Self::Float32 => {
+                let mut v: Vec<f32> = Vec::with_capacity(n);
+                v.extend(it.map(|x| x as f32));
+                Arc::new(Float32Array::new(Buffer::from_vec(v).into(), None))
+            }
+        }
+    }
+
+    /// Array of `n` values produced by `f(i)`.
+    fn array(self, n: usize, f: impl Fn(usize) -> f64) -> ArrayRef {
+        match self {
+            Self::Float64 => {
+                let v: Vec<f64> = (0..n).map(f).collect();
+                Arc::new(Float64Array::new(Buffer::from_vec(v).into(), None))
+            }
+            Self::Float32 => {
+                let v: Vec<f32> = (0..n).map(|i| f(i) as f32).collect();
+                Arc::new(Float32Array::new(Buffer::from_vec(v).into(), None))
+            }
         }
     }
 }
@@ -68,17 +108,91 @@ impl CompressionChoice {
     }
 }
 
-/// Build the RecordBatch and write it to `dest` as a Parquet file.
-///
-/// Each entry of `flat_values` is one stat's cell-major buffer: index
-/// `i * n_bands + b` is band `b` of cell `i`.
-///
-/// Two layouts:
-/// - `as_vector = true`: one `FixedSizeList<float, n_bands>` per stat.
-///   Single stat -> column named `value`; multi -> `value_<stat>`.
-/// - `as_vector = false` (default): one primitive column per (band, stat).
-///   Single stat -> column named after the band (e.g. `B02`); multi ->
-///   `<band>_<stat>` (e.g. `B02_mean`). Matches the tibble path.
+fn pq_err(what: &str, e: impl std::fmt::Display) -> A5CogError {
+    A5CogError::Parquet(format!("{what}: {e}"))
+}
+
+/// Run `f` over `0..n` on the pool when there is one, else in order.
+fn par_map<T: Send>(pool: Option<&rayon::ThreadPool>, n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    match pool {
+        Some(p) if n > 1 => p.install(|| {
+            use rayon::prelude::*;
+            (0..n).into_par_iter().map(&f).collect()
+        }),
+        _ => (0..n).map(f).collect(),
+    }
+}
+
+/// Output schema fields plus the column names, for `stats` x `band_names`.
+fn fields_for(
+    band_names: &[String],
+    stats: &[String],
+    value_type: ValueType,
+    n_bands: usize,
+    as_vector: bool,
+) -> Vec<Field> {
+    let mut fields = vec![Field::new("cell", DataType::UInt64, false)];
+    if as_vector {
+        let item_field = Arc::new(Field::new("item", value_type.data_type(), true));
+        let fsl = DataType::FixedSizeList(item_field, n_bands as i32);
+        for s_name in stats {
+            let col_name = if stats.len() == 1 { "value".to_string() } else { format!("value_{s_name}") };
+            fields.push(Field::new(col_name, fsl.clone(), false));
+        }
+    } else {
+        for s_name in stats {
+            for b_name in band_names {
+                let col_name = if stats.len() == 1 { b_name.clone() } else { format!("{b_name}_{s_name}") };
+                fields.push(Field::new(col_name, value_type.data_type(), false));
+            }
+        }
+    }
+    fields
+}
+
+/// Wrap a cell-major flat array as a FixedSizeList column.
+fn fsl_column(value_type: ValueType, n_bands: usize, inner: ArrayRef) -> ArrayRef {
+    let item_field = Arc::new(Field::new("item", value_type.data_type(), true));
+    Arc::new(FixedSizeListArray::new(item_field, n_bands as i32, inner, None))
+}
+
+/// Write a finished read straight from its cell slab.
+pub(crate) fn write_aggregate_parquet<L: AccLayout>(
+    agg: &Aggregate<L>,
+    dest: &str,
+    resolution: i32,
+    value_type: ValueType,
+    compression: CompressionChoice,
+    as_vector: bool,
+) -> Result<()> {
+    let n = agg.len();
+    let n_bands = agg.n_out;
+    let stats: Vec<String> = agg.stats.iter().map(|s| s.as_str().to_string()).collect();
+    let pool = agg.pool.as_deref();
+
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(UInt64Array::from(agg.cells().to_vec()))];
+    if as_vector {
+        // one FixedSizeList per stat; the inner array is cell-major
+        for &stat in &agg.stats {
+            let mut flat = vec![0.0f64; n * n_bands];
+            agg.flat_into(stat, &mut flat);
+            let inner = value_type.array(flat.len(), |j| flat[j]);
+            columns.push(fsl_column(value_type, n_bands, inner));
+        }
+    } else {
+        let cols: Vec<ArrayRef> = par_map(pool, agg.stats.len() * n_bands, |k| {
+            let stat = agg.stats[k / n_bands];
+            let b = k % n_bands;
+            value_type.array_from_iter(n, agg.column_iter(stat, b))
+        });
+        columns.extend(cols);
+    }
+    let fields = fields_for(&agg.band_names, &stats, value_type, n_bands, as_vector);
+    let metadata = file_metadata(&agg.band_names, resolution, &stats, as_vector);
+    write_columns_parquet(dest, fields, columns, metadata, compression, pool)
+}
+
+/// Legacy entry from flat per-stat values (the centroid sampler).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn write_arrow_parquet(
     dest: &str,
@@ -110,95 +224,97 @@ pub(crate) fn write_arrow_parquet(
             )));
         }
     }
-
-    let cell_arr = UInt64Array::from(cells);
-    let value_dtype = match value_type {
-        ValueType::Float64 => DataType::Float64,
-        ValueType::Float32 => DataType::Float32,
-    };
-
-    let mut columns: Vec<ArrayRef> = Vec::new();
-    let mut fields: Vec<Field> = Vec::new();
-    columns.push(Arc::new(cell_arr));
-    fields.push(Field::new("cell", DataType::UInt64, false));
-
+    let mut columns: Vec<ArrayRef> = vec![Arc::new(UInt64Array::from(cells))];
     if as_vector {
-        let item_field = Arc::new(Field::new("item", value_dtype.clone(), true));
-        let fsl_dtype = DataType::FixedSizeList(item_field.clone(), n_bands as i32);
-        for (s_i, s_name) in stats.iter().enumerate() {
-            let inner: ArrayRef = match value_type {
-                ValueType::Float64 => {
-                    let buf = Buffer::from_vec(flat_values[s_i].clone());
-                    Arc::new(Float64Array::new(buf.into(), None)) as ArrayRef
-                }
-                ValueType::Float32 => {
-                    let casted: Vec<f32> = flat_values[s_i].iter().map(|v| *v as f32).collect();
-                    let buf = Buffer::from_vec(casted);
-                    Arc::new(Float32Array::new(buf.into(), None)) as ArrayRef
-                }
-            };
-            let fsl = FixedSizeListArray::new(item_field.clone(), n_bands as i32, inner, None);
-            let col_name = if stats.len() == 1 {
-                "value".to_string()
-            } else {
-                format!("value_{s_name}")
-            };
-            columns.push(Arc::new(fsl));
-            fields.push(Field::new(col_name, fsl_dtype.clone(), false));
+        for flat in &flat_values {
+            let inner = value_type.array(flat.len(), |j| flat[j]);
+            columns.push(fsl_column(value_type, n_bands, inner));
         }
     } else {
-        // wide: one primitive column per (band, stat). Stat-major outer to
-        // mirror Rust iteration in the tibble path.
-        for (s_i, s_name) in stats.iter().enumerate() {
-            for (b_idx, b_name) in band_names.iter().enumerate() {
-                let col_vals_f64: Vec<f64> = (0..n_cells)
-                    .map(|i| flat_values[s_i][i * n_bands + b_idx])
-                    .collect();
-                let arr: ArrayRef = match value_type {
-                    ValueType::Float64 => {
-                        Arc::new(Float64Array::new(Buffer::from_vec(col_vals_f64).into(), None))
-                            as ArrayRef
-                    }
-                    ValueType::Float32 => {
-                        let casted: Vec<f32> = col_vals_f64.into_iter().map(|v| v as f32).collect();
-                        Arc::new(Float32Array::new(Buffer::from_vec(casted).into(), None))
-                            as ArrayRef
-                    }
-                };
-                let col_name = if stats.len() == 1 {
-                    b_name.clone()
-                } else {
-                    format!("{b_name}_{s_name}")
-                };
-                columns.push(arr);
-                fields.push(Field::new(col_name, value_dtype.clone(), false));
+        for flat in &flat_values {
+            for b in 0..n_bands {
+                columns.push(value_type.array(n_cells, |i| flat[i * n_bands + b]));
             }
         }
     }
-
+    let fields = fields_for(band_names, stats, value_type, n_bands, as_vector);
     let metadata = file_metadata(band_names, resolution, stats, as_vector);
-    let schema = Schema::new(fields).with_metadata(metadata.clone());
+    write_columns_parquet(dest, fields, columns, metadata, compression, None)
+}
 
-    let batch = RecordBatch::try_new(Arc::new(schema.clone()), columns)
-        .map_err(|e| A5CogError::Parquet(format!("RecordBatch build: {e}")))?;
-
-    let file = File::create(dest)?;
-    let kv: Vec<KeyValue> = metadata
-        .into_iter()
-        .map(|(k, v)| KeyValue::new(k, v))
-        .collect();
-    let props = WriterProperties::builder()
+/// Encode `columns` to `dest`, one column per task on `pool`, in row
+/// groups of `ROW_GROUP_ROWS`. Equivalent to `ArrowWriter` on one
+/// RecordBatch (same schema metadata, same row-group size), minus its
+/// serial encoding.
+fn write_columns_parquet(
+    dest: &str,
+    fields: Vec<Field>,
+    columns: Vec<ArrayRef>,
+    metadata: HashMap<String, String>,
+    compression: CompressionChoice,
+    pool: Option<&rayon::ThreadPool>,
+) -> Result<()> {
+    let schema = Arc::new(Schema::new(fields).with_metadata(metadata.clone()));
+    let n_rows = columns.first().map(|c| c.len()).unwrap_or(0);
+    let kv: Vec<KeyValue> = metadata.into_iter().map(|(k, v)| KeyValue::new(k, v)).collect();
+    let mut props = WriterProperties::builder()
         .set_compression(compression.to_parquet())
         .set_key_value_metadata(Some(kv))
         .build();
-    let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props))
-        .map_err(|e| A5CogError::Parquet(format!("ArrowWriter: {e}")))?;
-    writer
-        .write(&batch)
-        .map_err(|e| A5CogError::Parquet(format!("write batch: {e}")))?;
-    writer
-        .close()
-        .map_err(|e| A5CogError::Parquet(format!("writer close: {e}")))?;
+    add_encoded_arrow_schema_to_metadata(&schema, &mut props);
+    let parquet_schema = ArrowSchemaConverter::new()
+        .with_coerce_types(props.coerce_types())
+        .convert(&schema)
+        .map_err(|e| pq_err("schema", e))?;
+    let props = Arc::new(props);
+    let file = File::create(dest)?;
+    let mut writer = SerializedFileWriter::new(file, parquet_schema.root_schema_ptr(), props)
+        .map_err(|e| pq_err("open writer", e))?;
+    let factory = ArrowRowGroupWriterFactory::new(&writer, Arc::clone(&schema));
+
+    let mut start = 0usize;
+    let mut rg = 0usize;
+    // always at least one row group so an empty read still carries the schema
+    loop {
+        let len = ROW_GROUP_ROWS.min(n_rows - start);
+        let col_writers = factory.create_column_writers(rg).map_err(|e| pq_err("column writers", e))?;
+        let mut leaves: Vec<ArrowLeafColumn> = Vec::with_capacity(col_writers.len());
+        for (arr, field) in columns.iter().zip(schema.fields()) {
+            let sliced = arr.slice(start, len);
+            leaves.extend(compute_leaves(field, &sliced).map_err(|e| pq_err("leaves", e))?);
+        }
+        if leaves.len() != col_writers.len() {
+            return Err(A5CogError::Parquet(format!(
+                "leaf count {} != column writers {}",
+                leaves.len(),
+                col_writers.len()
+            )));
+        }
+        let jobs: Vec<(parquet::arrow::arrow_writer::ArrowColumnWriter, ArrowLeafColumn)> =
+            col_writers.into_iter().zip(leaves).collect();
+        let encode = |(mut w, leaf): (parquet::arrow::arrow_writer::ArrowColumnWriter, ArrowLeafColumn)| -> Result<ArrowColumnChunk> {
+            w.write(&leaf).map_err(|e| pq_err("encode column", e))?;
+            w.close().map_err(|e| pq_err("close column", e))
+        };
+        let chunks: Vec<ArrowColumnChunk> = match pool {
+            Some(p) if jobs.len() > 1 => p.install(|| {
+                use rayon::prelude::*;
+                jobs.into_par_iter().map(encode).collect::<Result<Vec<_>>>()
+            })?,
+            _ => jobs.into_iter().map(encode).collect::<Result<Vec<_>>>()?,
+        };
+        let mut rg_writer = writer.next_row_group().map_err(|e| pq_err("row group", e))?;
+        for c in chunks {
+            c.append_to_row_group(&mut rg_writer).map_err(|e| pq_err("append column", e))?;
+        }
+        rg_writer.close().map_err(|e| pq_err("close row group", e))?;
+        start += len;
+        rg += 1;
+        if start >= n_rows {
+            break;
+        }
+    }
+    writer.close().map_err(|e| pq_err("close file", e))?;
     Ok(())
 }
 
@@ -216,7 +332,6 @@ fn file_metadata(
         "a5px_layout".to_string(),
         if as_vector { "fsl".into() } else { "wide".into() },
     );
-    // backwards-compat: when single stat, also write the legacy a5px_stat key
     if stats.len() == 1 {
         m.insert("a5px_stat".to_string(), stats[0].clone());
     }

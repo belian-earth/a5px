@@ -1,3 +1,36 @@
+# a5px (development version)
+
+* Reads are 2-4x faster at fine resolutions (#6), with identical cell sets
+  and counts; means and other sums can differ from 0.1.0 in the last bit
+  because pixels are now summed per run and per stripe.
+  - The point-to-cell lookup (`locator.rs`) tests the previous pixel's
+    cell, the cells above it and the children of their parents with cached
+    pentagons before falling back to the a5 search, which the a5 crate's
+    own first estimate misses 42% of the time at res 18.
+  - Pixel centres are projected to A5's face frame by bilinear
+    interpolation over 16x16 pixel windows (`grid_proj.rs`); each window
+    carries a measured error bound and any pixel within that bound of a
+    cell edge or of the `bbox` is projected exactly, so results equal the
+    exact path. Windows that fail to project, straddle a dodecahedron
+    face, the antimeridian or a pole fall back to exact projection.
+  - Each block is indexed as 64-row stripes across all `cpu_workers`, so a
+    read spanning fewer blocks than workers no longer leaves cores idle;
+    stripes and workers merge as fixed pairwise trees.
+  - Pixels are accumulated band by band in runs of consecutive pixels of
+    one cell (sequential reads on planar data), into one contiguous
+    accumulator slab per stripe instead of a heap allocation per cell.
+  - `a5_raster_to_parquet()` builds its columns straight from the
+    accumulators (as float32 when asked, without the f64 copy) and encodes
+    columns in parallel.
+  - Accumulators are partitioned by cell id across `4 * cpu_workers`
+    stores that stripes merge into as they finish, so no reduce step
+    remains when the workers stop and peak memory is the final stores plus
+    one stripe per thread (about 20% lower than 0.1.0 on a 64-band res-18
+    read). With more than one worker, merge order follows stripe
+    completion, so sums can differ in the last bit between runs; cells,
+    counts, min and max are exact, and single-worker reads stay
+    reproducible.
+
 # a5px 0.1.0
 
 First minor release.

@@ -1,6 +1,6 @@
 Package: a5px
 Title: Read GeoTIFF and Cloud-Optimised GeoTIFF Rasters as A5 Cells
-Version: 0.1.0
+Version: 0.1.0.9000
 Authors@R: c(
     person("Hugh", "Graham", role = c("aut", "cre"),
            email = "hugh@belian.earth"),
