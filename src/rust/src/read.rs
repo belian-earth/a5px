@@ -2102,9 +2102,13 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
         let selected_bands = Arc::clone(&selected_bands_arc);
         let tx_chan = tx_chan_outer;
         let strips = if use_strips { plan_strips(&tiles, STRIP_BLOCKS) } else { tiles.iter().map(|&t| vec![t]).collect() };
-        // io_concurrency counts blocks in flight; a strip task carries up
-        // to STRIP_BLOCKS of them.
-        let task_conc = if use_strips { (io_concurrency / STRIP_BLOCKS).max(2) } else { io_concurrency.max(1) };
+        // One fetch task per unit of io_concurrency whether the task
+        // carries one block or a strip of STRIP_BLOCKS: fewer tasks starved
+        // the consumers at the default setting (2.5x slower from a
+        // high-latency client). A strip task holds its blocks' compressed
+        // bytes until each is sent, so in-flight memory is up to
+        // io_concurrency x STRIP_BLOCKS blocks.
+        let task_conc = io_concurrency.max(1);
         let producer = stream::iter(strips)
             .map(|blocks| {
                 let reader = reader.clone();

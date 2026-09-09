@@ -141,8 +141,9 @@ error otherwise.}
 \code{NULL} (default) resolves from \code{getOption("a5px.cpu_workers")}, env
 \code{A5PX_CPU_WORKERS}, then \code{\link[parallel:detectCores]{parallel::detectCores()}}.}
 
-\item{io_concurrency}{Maximum in-flight tile fetches the producer issues
-to the I/O stage. \code{NULL} (default) resolves from
+\item{io_concurrency}{Maximum in-flight fetch tasks the producer issues
+to the I/O stage; each task carries one block, or a run of up to four
+adjacent blocks on files without a predictor. \code{NULL} (default) resolves from
 \code{getOption("a5px.io_concurrency")}, env \code{A5PX_IO_CONCURRENCY}, then
 \code{min(32, max(cpu_workers, 8))}. Bump this for cloud reads of multi-band
 embedding rasters where the network can absorb more parallelism than
