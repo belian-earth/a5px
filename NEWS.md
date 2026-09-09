@@ -1,3 +1,15 @@
+# a5px (development version)
+
+* Faster reads at fine resolutions (#6). The point-to-cell lookup now
+  tests the previous pixel's cell, the cell above and their neighbours
+  with cached pentagons before falling back to the a5 search, and each
+  block is indexed as row stripes across all `cpu_workers`, so reads that
+  span fewer blocks than workers no longer leave cores idle. A res-18
+  read of a 64-band embedding chunk is 1.6x faster at 4 workers and 2.2x
+  at 8; a res-16 Sentinel-2 read is 2x faster. Cell sets and counts are
+  unchanged; means can differ from 0.1.0 in the last bit where a cell
+  spans a stripe boundary.
+
 # a5px 0.1.0
 
 First minor release.

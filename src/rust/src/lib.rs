@@ -5,6 +5,7 @@ mod cell_mask;
 mod cell_raw;
 mod error;
 mod geo;
+pub mod locator;
 mod parquet_write;
 mod read;
 mod runtime;

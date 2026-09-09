@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::cell_mask::{CellMask, MaskCache};
+use crate::locator::{a5_spherical, CellLocator, NO_CELL};
 use crate::cell_raw::{raw8_list_to_u64s, u64s_to_raw8_list};
 use crate::error::{A5CogError, Result};
 use crate::geo::{
@@ -33,6 +34,10 @@ static T_BUILD_PTS_NS: AtomicU64 = AtomicU64::new(0);
 static T_PROJ_NS: AtomicU64 = AtomicU64::new(0);
 static T_INDEX_NS: AtomicU64 = AtomicU64::new(0);
 static T_MERGE_NS: AtomicU64 = AtomicU64::new(0);
+static T_STRIPE_MERGE_NS: AtomicU64 = AtomicU64::new(0);
+// serial tail after the consumers finish
+static T_REDUCE_NS: AtomicU64 = AtomicU64::new(0);
+static T_FLATTEN_NS: AtomicU64 = AtomicU64::new(0);
 // sub-stage timers inside the per-pixel loop
 static T_PIX_READ_NS: AtomicU64 = AtomicU64::new(0);
 static T_A5_CELL_NS: AtomicU64 = AtomicU64::new(0);
@@ -49,7 +54,7 @@ fn profile_enabled() -> bool {
 fn reset_timers() {
     for t in [
         &T_FETCH_NS, &T_DECODE_NS, &T_BUILD_PTS_NS, &T_PROJ_NS,
-        &T_INDEX_NS, &T_MERGE_NS,
+        &T_INDEX_NS, &T_MERGE_NS, &T_STRIPE_MERGE_NS, &T_REDUCE_NS, &T_FLATTEN_NS,
         &T_PIX_READ_NS, &T_A5_CELL_NS, &T_HM_NS, &T_PUSH_NS,
         &N_OVERLAY_INTERIOR, &N_OVERLAY_BOUNDARY,
     ] {
@@ -76,7 +81,11 @@ fn print_timers(total: f64) {
     one("  a5 lonlat->cell", T_A5_CELL_NS.load(Ordering::Relaxed));
     one("  hashmap lookup", T_HM_NS.load(Ordering::Relaxed));
     one("  push to accums", T_PUSH_NS.load(Ordering::Relaxed));
+    one("stripe merge", T_STRIPE_MERGE_NS.load(Ordering::Relaxed));
     one("merge into global", T_MERGE_NS.load(Ordering::Relaxed));
+    eprintln!("  serial tail (wall):");
+    one("  reduce workers", T_REDUCE_NS.load(Ordering::Relaxed));
+    one("  flatten output", T_FLATTEN_NS.load(Ordering::Relaxed));
     let n_int = N_OVERLAY_INTERIOR.load(Ordering::Relaxed);
     let n_bnd = N_OVERLAY_BOUNDARY.load(Ordering::Relaxed);
     if n_int + n_bnd > 0 {
@@ -640,83 +649,171 @@ fn read_pixel_chunky(data: &TypedArray, idx: usize) -> f64 {
 // ---------------------------------------------------------------------------
 // per-tile processor
 
-#[allow(clippy::too_many_arguments)]
-fn process_tile<L: AccLayout>(
-    tx: usize,
-    ty: usize,
-    data: TypedArray,
-    shape: [usize; 3],
+/// Per-read parameters shared by every tile and row stripe.
+struct TileCtx<'a> {
     planar: PlanarConfiguration,
     width: usize,
     height: usize,
     tile_w: usize,
     tile_h: usize,
-    data_n_bands: usize,
-    data_band_offsets: &[usize],
-    src_proj: &Proj,
-    dst_proj: &Proj,
-    gt: &GeoTransform,
+    src_proj: &'a Proj,
+    dst_proj: &'a Proj,
+    gt: &'a GeoTransform,
     resolution: i32,
     nodata: Option<f64>,
     bbox_lonlat: Option<[f64; 4]>,
-    dequant: Option<&DequantLut>,
-    mask: Option<&CellMask>,
+    dequant: Option<&'a DequantLut>,
+    mask: Option<&'a CellMask>,
     cfg: AccCfg,
-) -> Result<AHashMap<u64, CellAcc<L>>> {
-    let n_out = data_band_offsets.len();
-    let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
-    let actual_h = tile_h.min(height.saturating_sub(ty * tile_h));
-    if actual_w == 0 || actual_h == 0 {
-        return Ok(AHashMap::new());
+    /// Sub-point grid dimension for overlay mode; `None` is the forward path.
+    overlay_k: Option<usize>,
+}
+
+impl TileCtx<'_> {
+    /// (row, column, band) strides into the decoded buffer.
+    /// chunky: shape = [tile_h, tile_w, n_bands]; planar: [n_bands, tile_h, tile_w].
+    fn strides(&self, data_n_bands: usize) -> Result<(usize, usize, usize)> {
+        match self.planar {
+            PlanarConfiguration::Chunky => {
+                Ok((self.tile_w * data_n_bands, data_n_bands, 1))
+            }
+            PlanarConfiguration::Planar => Ok((self.tile_w, 1, self.tile_h * self.tile_w)),
+            other => Err(A5CogError::Unsupported(format!(
+                "unhandled planar configuration: {other:?}"
+            ))),
+        }
     }
 
-    let src_is_latlong = src_proj.is_latlong();
-    let dst_is_latlong = dst_proj.is_latlong();
+    /// Valid (width, height) of tile `(tx, ty)`; edge tiles are partial.
+    fn actual_dims(&self, tx: usize, ty: usize) -> (usize, usize) {
+        (
+            self.tile_w.min(self.width.saturating_sub(tx * self.tile_w)),
+            self.tile_h.min(self.height.saturating_sub(ty * self.tile_h)),
+        )
+    }
+}
+
+/// One decoded tile plus the band mapping that applies to its layout.
+struct TileData<'a> {
+    tx: usize,
+    ty: usize,
+    data: &'a TypedArray,
+    data_n_bands: usize,
+    band_offsets: &'a [usize],
+}
+
+/// Rows per indexing work unit. A 1024-row block becomes 16 stripes, enough
+/// to keep every `cpu_workers` thread busy when a read spans only a handful
+/// of blocks; each stripe pays one cold locator start and one map merge.
+const STRIPE_ROWS: usize = 64;
+
+/// Merge accumulator map `b` into `a` (`a` first in every cell's sum order).
+fn merge_maps<L: AccLayout>(
+    mut a: AHashMap<u64, CellAcc<L>>,
+    b: AHashMap<u64, CellAcc<L>>,
+) -> Result<AHashMap<u64, CellAcc<L>>> {
+    for (cell, acc) in b {
+        match a.get_mut(&cell) {
+            Some(entry) => entry.merge(&acc)?,
+            None => {
+                a.insert(cell, acc);
+            }
+        }
+    }
+    Ok(a)
+}
+
+/// Process one tile as row stripes on the index pool, or whole on the
+/// calling thread when there is no pool (`cpu_workers == 1`) or the tile
+/// is a single stripe.
+fn process_tile_striped<L: AccLayout>(
+    pool: Option<&rayon::ThreadPool>,
+    ctx: &TileCtx,
+    tile: &TileData,
+) -> Result<AHashMap<u64, CellAcc<L>>> {
+    let (_, actual_h) = ctx.actual_dims(tile.tx, tile.ty);
+    let run = |rows: std::ops::Range<usize>| match ctx.overlay_k {
+        Some(k) => process_tile_overlay::<L>(ctx, tile, rows, k),
+        None => process_tile::<L>(ctx, tile, rows),
+    };
+    let Some(pool) = pool else {
+        return run(0..actual_h);
+    };
+    let stripes: Vec<std::ops::Range<usize>> = (0..actual_h)
+        .step_by(STRIPE_ROWS)
+        .map(|r0| r0..(r0 + STRIPE_ROWS).min(actual_h))
+        .collect();
+    if stripes.len() <= 1 {
+        return run(0..actual_h);
+    }
+    // Stripes run in parallel but merge in stripe order, so a tile's result
+    // does not depend on thread scheduling (floating-point sums are
+    // order-sensitive at the last bit).
+    let maps: Vec<AHashMap<u64, CellAcc<L>>> = pool.install(|| {
+        use rayon::prelude::*;
+        stripes.into_par_iter().map(run).collect::<Result<Vec<_>>>()
+    })?;
+    let t_merge = Instant::now();
+    let mut acc: AHashMap<u64, CellAcc<L>> = AHashMap::new();
+    for m in maps {
+        acc = merge_maps(acc, m)?;
+    }
+    if profile_enabled() {
+        T_STRIPE_MERGE_NS.fetch_add(t_merge.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    Ok(acc)
+}
+
+/// Forward (pixel-centre) indexing of rows `rows` of one tile.
+fn process_tile<L: AccLayout>(
+    ctx: &TileCtx,
+    tile: &TileData,
+    rows: std::ops::Range<usize>,
+) -> Result<AHashMap<u64, CellAcc<L>>> {
+    let n_out = tile.band_offsets.len();
+    let (actual_w, actual_h) = ctx.actual_dims(tile.tx, tile.ty);
+    let rows = rows.start.min(actual_h)..rows.end.min(actual_h);
+    if actual_w == 0 || rows.is_empty() {
+        return Ok(AHashMap::new());
+    }
+    let data = tile.data;
+    let (tx, ty) = (tile.tx, tile.ty);
+    let (tile_w, tile_h) = (ctx.tile_w, ctx.tile_h);
+    let gt = ctx.gt;
+    let resolution = ctx.resolution;
+    let nodata = ctx.nodata;
+    let dequant = ctx.dequant;
+    let mask = ctx.mask;
+    let cfg = ctx.cfg;
+
+    let src_is_latlong = ctx.src_proj.is_latlong();
+    let dst_is_latlong = ctx.dst_proj.is_latlong();
 
     let prof = profile_enabled();
     let mut mask_cache = MaskCache::new();
 
-    let n = actual_w * actual_h;
-
-    // shape interpretation
-    // chunky: shape = [tile_h, tile_w, n_bands]
-    // planar: shape = [n_bands, tile_h, tile_w]
-    // strides into the underlying flat buffer
-    let (h_stride, w_stride, b_stride): (usize, usize, usize) = match planar {
-        PlanarConfiguration::Chunky => {
-            // pixel(r, c, b) = data[r * (tile_w * data_n_bands) + c * data_n_bands + b]
-            (tile_w * data_n_bands, data_n_bands, 1)
-        }
-        PlanarConfiguration::Planar => {
-            // pixel(b, r, c) = data[b * (tile_h * tile_w) + r * tile_w + c]
-            (tile_w, 1, tile_h * tile_w)
-        }
-        other => {
-            return Err(A5CogError::Unsupported(format!(
-                "unhandled planar configuration: {other:?}"
-            )));
-        }
-    };
-    let _ = shape; // shape is implied by tile_w/tile_h/data_n_bands
+    let n = actual_w * rows.len();
+    let (h_stride, w_stride, b_stride) = ctx.strides(tile.data_n_bands)?;
 
     // Build the pixel-centre list to project. With a nodata sentinel, only
     // pixels with at least one valid band are projected (projection is the
     // second-largest per-tile cost after a5 indexing, and all-nodata pixels
     // would be dropped after it anyway); `pix_idx` maps each projected point
     // back to its tile pixel. Without nodata every pixel is valid and the
-    // point index is the pixel index.
+    // point index is the pixel index offset by the stripe start.
     let t_pts = Instant::now();
     let mut points: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
     let mut pix_idx: Vec<u32> = Vec::new();
     if let Some(nd) = nodata {
         pix_idx.reserve(n);
-        for r in 0..actual_h {
+        for r in rows.clone() {
             let row_g = ty * tile_h + r;
             for c in 0..actual_w {
                 let pixel_base = r * h_stride + c * w_stride;
-                let any_valid = data_band_offsets
+                let any_valid = tile
+                    .band_offsets
                     .iter()
-                    .any(|&src_b| !is_nodata(read_pixel_chunky(&data, pixel_base + src_b * b_stride), nd));
+                    .any(|&src_b| !is_nodata(read_pixel_chunky(data, pixel_base + src_b * b_stride), nd));
                 if !any_valid {
                     continue;
                 }
@@ -731,7 +828,7 @@ fn process_tile<L: AccLayout>(
             }
         }
     } else {
-        for r in 0..actual_h {
+        for r in rows.clone() {
             let row_g = ty * tile_h + r;
             for c in 0..actual_w {
                 let col_g = tx * tile_w + c;
@@ -749,7 +846,7 @@ fn process_tile<L: AccLayout>(
     }
 
     let t_proj = Instant::now();
-    proj_points(src_proj, dst_proj, &mut points[..])?;
+    proj_points(ctx.src_proj, ctx.dst_proj, &mut points[..])?;
     if prof {
         T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -762,21 +859,20 @@ fn process_tile<L: AccLayout>(
     let mut band_vals: Vec<f64> = vec![0.0; n_out];
     let mut band_valid: Vec<bool> = vec![false; n_out];
 
-    // cell-caching: adjacent pixels at fine A5 resolutions almost always fall in
-    // the same cell. Keep the previous cell's A5Cell and try
-    // `a5cell_contains_point` (a single projection + pentagon test) before
-    // falling back to the full search-based `a5::lonlat_to_cell` (~26 estimates).
-    let mut last_cell: Option<u64> = None;
-    let mut last_a5cell: Option<a5::A5Cell> = None;
-    // accumulator entry cache, kept separate from the a5 lookup cache above:
-    // a pixel can pass the lookup yet be dropped by the AOI mask, and the
-    // lookup cache must still advance to its cell.
+    // Neighbour-first cell lookup (see locator.rs). `prev_row[c]` is the
+    // cell of the pixel above, the second candidate after the previous
+    // pixel's cell.
+    let mut locator = CellLocator::new(resolution);
+    let mut prev_row: Vec<u64> = vec![NO_CELL; actual_w];
+    // accumulator entry cache, kept separate from the locator: a pixel can
+    // pass the lookup yet be dropped by the AOI mask, and the locator must
+    // still advance to its cell.
     let mut last_entry_cell: u64 = NO_CELL;
     let mut last_entry_ptr: *mut CellAcc<L> = std::ptr::null_mut();
     // hoist nodata branch out of the per-pixel loop
     let nodata_v = nodata;
 
-    // local sub-stage accumulators (reduced once at end-of-tile)
+    // local sub-stage accumulators (reduced once at end-of-stripe)
     let mut sub_pix: u64 = 0;
     let mut sub_a5: u64 = 0;
     let mut sub_hm: u64 = 0;
@@ -784,8 +880,9 @@ fn process_tile<L: AccLayout>(
 
     let t_idx = Instant::now();
     let has_pix_idx = !pix_idx.is_empty() || nodata.is_some();
+    let stripe_base = rows.start * actual_w;
     for (idx, &(lon_o, lat_o, _)) in points.iter().enumerate() {
-        let pidx = if has_pix_idx { pix_idx[idx] as usize } else { idx };
+        let pidx = if has_pix_idx { pix_idx[idx] as usize } else { stripe_base + idx };
         let r = pidx / actual_w;
         let c = pidx % actual_w;
 
@@ -796,9 +893,9 @@ fn process_tile<L: AccLayout>(
         // nodata is compared against the raw code; the dequant LUT (when
         // present) is applied after, so decoded values enter the accumulators.
         if let Some(nd) = nodata_v {
-            for (out_b, &src_b) in data_band_offsets.iter().enumerate() {
+            for (out_b, &src_b) in tile.band_offsets.iter().enumerate() {
                 let off = pixel_base + src_b * b_stride;
-                let raw = read_pixel_chunky(&data, off);
+                let raw = read_pixel_chunky(data, off);
                 let valid = !is_nodata(raw, nd);
                 band_vals[out_b] = match dequant {
                     Some(d) => d.apply(raw),
@@ -808,9 +905,9 @@ fn process_tile<L: AccLayout>(
                 any_valid |= valid;
             }
         } else {
-            for (out_b, &src_b) in data_band_offsets.iter().enumerate() {
+            for (out_b, &src_b) in tile.band_offsets.iter().enumerate() {
                 let off = pixel_base + src_b * b_stride;
-                let raw = read_pixel_chunky(&data, off);
+                let raw = read_pixel_chunky(data, off);
                 band_vals[out_b] = match dequant {
                     Some(d) => d.apply(raw),
                     None => raw,
@@ -830,38 +927,19 @@ fn process_tile<L: AccLayout>(
             continue;
         }
 
-        if let Some(b) = bbox_lonlat {
+        if let Some(b) = ctx.bbox_lonlat {
             if lon_deg < b[0] || lon_deg > b[2] || lat_deg < b[1] || lat_deg > b[3] {
                 continue;
             }
         }
 
         let t = if prof { Some(Instant::now()) } else { None };
-        // Convert to A5's internal spherical frame once; both the cached
-        // pentagon test and the search fallback consume it directly.
-        let sph = a5_spherical(lon_deg, lat_deg);
-        let cell = if let (Some(prev_id), Some(prev_a5)) = (last_cell, last_a5cell.as_ref()) {
-            match a5::core::cell::a5cell_contains_point(prev_a5, sph) {
-                Ok(d) if d > 0.0 => prev_id,
-                _ => match a5::core::cell::spherical_to_cell(sph, resolution) {
-                    Ok(id) => {
-                        last_a5cell = a5::core::serialization::deserialize(id).ok();
-                        id
-                    }
-                    Err(_) => continue,
-                },
-            }
-        } else {
-            match a5::core::cell::spherical_to_cell(sph, resolution) {
-                Ok(id) => {
-                    last_a5cell = a5::core::serialization::deserialize(id).ok();
-                    id
-                }
-                Err(_) => continue,
-            }
-        };
+        let cell = locator.locate(a5_spherical(lon_deg, lat_deg), prev_row[c]);
         if let Some(t0) = t { sub_a5 += t0.elapsed().as_nanos() as u64; }
-        last_cell = Some(cell);
+        if cell == NO_CELL {
+            continue;
+        }
+        prev_row[c] = cell;
         if !mask_cache.allows(mask, cell, resolution) {
             continue;
         }
@@ -944,9 +1022,6 @@ fn gather_bands(
     any_valid
 }
 
-/// Sentinel for "no A5 cell" (projection failure or indexing failure).
-const NO_CELL: u64 = u64::MAX;
-
 /// Overlay-mode configuration as passed from R. `subsamples == 0` means
 /// auto-select k from the pixel/cell edge ratio (done after overview level
 /// selection, so a decimated read supersamples its own pixel size).
@@ -978,99 +1053,55 @@ fn resolve_overlay_k(
     Ok(((2.0 * pmax / p.cell_edge_m).ceil() as usize).clamp(2, 16))
 }
 
-/// Lon/lat in degrees -> A5's internal spherical frame (rotated authalic
-/// sphere). This is the projection `a5::lonlat_to_cell` performs internally;
-/// doing it once per point lets the cached pentagon test and the search
-/// fallback share it. `a5::core::*` paths are `#[doc(hidden)]` upstream but
-/// stable in practice (a5R depends on the same ones).
-#[inline]
-fn a5_spherical(lon_deg: f64, lat_deg: f64) -> a5::coordinate_systems::Spherical {
-    a5::core::coordinate_transforms::from_lon_lat(a5::LonLat::new(lon_deg, lat_deg))
-}
-
-/// Cached point -> cell lookup: try `a5cell_contains_point` against the
-/// previous cell (a single pentagon test) before the full search-based
-/// `spherical_to_cell`. Same technique as the forward path, shared by the
-/// corner and sub-point passes.
-#[inline]
-fn cell_lookup_cached(
-    sph: a5::coordinate_systems::Spherical,
-    resolution: i32,
-    last_id: &mut u64,
-    last_a5cell: &mut Option<a5::A5Cell>,
-) -> u64 {
-    if let Some(prev) = last_a5cell.as_ref() {
-        if *last_id != NO_CELL {
-            if let Ok(d) = a5::core::cell::a5cell_contains_point(prev, sph) {
-                if d > 0.0 {
-                    return *last_id;
-                }
-            }
-        }
-    }
-    match a5::core::cell::spherical_to_cell(sph, resolution) {
-        Ok(id) => {
-            *last_a5cell = a5::core::serialization::deserialize(id).ok();
-            *last_id = id;
-            id
-        }
-        Err(_) => NO_CELL,
-    }
-}
-
-/// Area-weighted tile processing for `mode = "overlay"`: each pixel
-/// contributes to every A5 cell it overlaps, weighted by the overlapped
-/// fraction of its area, approximated by k x k sub-point supersampling.
+/// Area-weighted processing of rows `rows` of one tile for
+/// `mode = "overlay"`: each pixel contributes to every A5 cell it overlaps,
+/// weighted by the overlapped fraction of its area, approximated by k x k
+/// sub-point supersampling.
 ///
-/// Cost containment: the (w+1) x (h+1) pixel-corner lattice is projected
-/// once (about one extra point per pixel versus the forward path) and each
-/// corner is indexed to a cell. A pixel whose four corners share a cell is
-/// interior: it takes a fast path equivalent to forward sampling with
-/// weight 1. Only pixels straddling a cell boundary (or the bbox edge) pay
-/// the k² sub-point cost, and their sub-points are generated in the source
-/// CRS, where the pixel grid is exactly affine, then batch-projected.
-#[allow(clippy::too_many_arguments)]
+/// Cost containment: the (w+1) x (h+1) pixel-corner lattice of the stripe
+/// is projected once (about one extra point per pixel versus the forward
+/// path, plus one shared corner row per stripe) and each corner is indexed
+/// to a cell. A pixel whose four corners share a cell is interior: it takes
+/// a fast path equivalent to forward sampling with weight 1. Only pixels
+/// straddling a cell boundary (or the bbox edge) pay the k² sub-point cost,
+/// and their sub-points are generated in the source CRS, where the pixel
+/// grid is exactly affine, then batch-projected.
 fn process_tile_overlay<L: AccLayout>(
-    tx: usize,
-    ty: usize,
-    data: TypedArray,
-    planar: PlanarConfiguration,
-    width: usize,
-    height: usize,
-    tile_w: usize,
-    tile_h: usize,
-    data_n_bands: usize,
-    data_band_offsets: &[usize],
-    src_proj: &Proj,
-    dst_proj: &Proj,
-    gt: &GeoTransform,
-    resolution: i32,
-    nodata: Option<f64>,
-    bbox_lonlat: Option<[f64; 4]>,
-    dequant: Option<&DequantLut>,
-    mask: Option<&CellMask>,
+    ctx: &TileCtx,
+    tile: &TileData,
+    rows: std::ops::Range<usize>,
     k: usize,
-    cfg: AccCfg,
 ) -> Result<AHashMap<u64, CellAcc<L>>> {
     let mut mask_cache = MaskCache::new();
-    let n_out = data_band_offsets.len();
-    let actual_w = tile_w.min(width.saturating_sub(tx * tile_w));
-    let actual_h = tile_h.min(height.saturating_sub(ty * tile_h));
-    if actual_w == 0 || actual_h == 0 {
+    let n_out = tile.band_offsets.len();
+    let (actual_w, actual_h) = ctx.actual_dims(tile.tx, tile.ty);
+    let rows = rows.start.min(actual_h)..rows.end.min(actual_h);
+    if actual_w == 0 || rows.is_empty() {
         return Ok(AHashMap::new());
     }
+    let data = tile.data;
+    let (tx, ty) = (tile.tx, tile.ty);
+    let (tile_w, tile_h) = (ctx.tile_w, ctx.tile_h);
+    let gt = ctx.gt;
+    let resolution = ctx.resolution;
+    let nodata = ctx.nodata;
+    let dequant = ctx.dequant;
+    let mask = ctx.mask;
+    let cfg = ctx.cfg;
+    let bbox_lonlat = ctx.bbox_lonlat;
 
-    let src_is_latlong = src_proj.is_latlong();
-    let dst_is_latlong = dst_proj.is_latlong();
+    let src_is_latlong = ctx.src_proj.is_latlong();
+    let dst_is_latlong = ctx.dst_proj.is_latlong();
     let prof = profile_enabled();
 
     // --- corner lattice: project once, index each corner to a cell
+    let r0 = rows.start;
     let cw = actual_w + 1;
-    let ch = actual_h + 1;
+    let ch = rows.len() + 1;
     let t_pts = Instant::now();
     let mut corners: Vec<(f64, f64, f64)> = Vec::with_capacity(cw * ch);
-    for r in 0..ch {
-        let row_g = (ty * tile_h + r) as f64;
+    for rr in 0..ch {
+        let row_g = (ty * tile_h + r0 + rr) as f64;
         for c in 0..cw {
             let col_g = (tx * tile_w + c) as f64;
             let (mut x, mut y) = gt.pixel_xy(col_g, row_g);
@@ -1085,14 +1116,13 @@ fn process_tile_overlay<L: AccLayout>(
         T_BUILD_PTS_NS.fetch_add(t_pts.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     let t_proj = Instant::now();
-    proj_points(src_proj, dst_proj, &mut corners[..])?;
+    proj_points(ctx.src_proj, ctx.dst_proj, &mut corners[..])?;
     if prof {
         T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     let t_idx = Instant::now();
-    let mut last_id: u64 = NO_CELL;
-    let mut last_a5cell: Option<a5::A5Cell> = None;
+    let mut locator = CellLocator::new(resolution);
     let mut corner_cell: Vec<u64> = vec![NO_CELL; cw * ch];
     let mut corner_ll: Vec<(f64, f64)> = Vec::with_capacity(cw * ch);
     for (i, &(lon_o, lat_o, _)) in corners.iter().enumerate() {
@@ -1102,27 +1132,15 @@ fn process_tile_overlay<L: AccLayout>(
         if !lon.is_finite() || !lat.is_finite() {
             continue;
         }
-        corner_cell[i] = cell_lookup_cached(
-            a5_spherical(lon, lat),
-            resolution,
-            &mut last_id,
-            &mut last_a5cell,
-        );
+        // hint: the corner directly above (previous corner row)
+        let above = if i >= cw { corner_cell[i - cw] } else { NO_CELL };
+        corner_cell[i] = locator.locate(a5_spherical(lon, lat), above);
     }
     drop(corners);
 
-    // --- strides (same layout logic as the forward path)
-    let (h_stride, w_stride, b_stride): (usize, usize, usize) = match planar {
-        PlanarConfiguration::Chunky => (tile_w * data_n_bands, data_n_bands, 1),
-        PlanarConfiguration::Planar => (tile_w, 1, tile_h * tile_w),
-        other => {
-            return Err(A5CogError::Unsupported(format!(
-                "unhandled planar configuration: {other:?}"
-            )));
-        }
-    };
+    let (h_stride, w_stride, b_stride) = ctx.strides(tile.data_n_bands)?;
 
-    let n = actual_w * actual_h;
+    let n = actual_w * rows.len();
     let mut local: AHashMap<u64, CellAcc<L>> = AHashMap::with_capacity((n / 64).clamp(16, 65_536));
     let mut band_vals: Vec<f64> = vec![0.0; n_out];
     let mut band_valid: Vec<bool> = vec![false; n_out];
@@ -1142,16 +1160,16 @@ fn process_tile_overlay<L: AccLayout>(
     // --- interior pass; boundary pixels are deferred
     let mut boundary: Vec<(usize, usize)> = Vec::new();
     let mut n_interior: u64 = 0;
-    for r in 0..actual_h {
+    for r in rows.clone() {
         for c in 0..actual_w {
             let pixel_base = r * h_stride + c * w_stride;
             if !gather_bands(
-                &data, pixel_base, b_stride, data_band_offsets,
+                data, pixel_base, b_stride, tile.band_offsets,
                 nodata, dequant, &mut band_vals, &mut band_valid,
             ) {
                 continue;
             }
-            let i00 = r * cw + c;
+            let i00 = (r - r0) * cw + c;
             let ids = [
                 corner_cell[i00],
                 corner_cell[i00 + 1],
@@ -1223,18 +1241,20 @@ fn process_tile_overlay<L: AccLayout>(
             }
         }
         let t_proj = Instant::now();
-        proj_points(src_proj, dst_proj, &mut pts[..])?;
+        proj_points(ctx.src_proj, ctx.dst_proj, &mut pts[..])?;
         if prof {
             T_PROJ_NS.fetch_add(t_proj.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
         for (pi, &(r, c)) in chunk.iter().enumerate() {
             let pixel_base = r * h_stride + c * w_stride;
             if !gather_bands(
-                &data, pixel_base, b_stride, data_band_offsets,
+                data, pixel_base, b_stride, tile.band_offsets,
                 nodata, dequant, &mut band_vals, &mut band_valid,
             ) {
                 continue;
             }
+            // hint: the pixel's top-left corner cell
+            let corner_hint = corner_cell[(r - r0) * cw + c];
             touched.clear();
             for &(lon_o, lat_o, _) in &pts[pi * kk..(pi + 1) * kk] {
                 let lon = if dst_is_latlong { lon_o.to_degrees() } else { lon_o };
@@ -1242,12 +1262,7 @@ fn process_tile_overlay<L: AccLayout>(
                 if !lon.is_finite() || !lat.is_finite() || !in_bbox(lon, lat) {
                     continue;
                 }
-                let id = cell_lookup_cached(
-                    a5_spherical(lon, lat),
-                    resolution,
-                    &mut last_id,
-                    &mut last_a5cell,
-                );
+                let id = locator.locate(a5_spherical(lon, lat), corner_hint);
                 if id == NO_CELL {
                     continue;
                 }
@@ -1647,6 +1662,23 @@ async fn read_raster_async_impl<L: AccLayout>(
 
     // Spawn consumer workers up-front so they're ready as soon as the
     // producer starts pushing. Each runs on the tokio blocking pool.
+    // Row-stripe indexing pool. Blocks are the fetch/decode unit but a read
+    // often spans fewer blocks than `cpu_workers`; each consumer splits its
+    // decoded block into stripes and runs them here, so all workers stay
+    // busy and the tail of a read is one stripe, not one block. Consumers
+    // block in `install` while their stripes run, so the active CPU thread
+    // count stays at `cpu_workers` (plus decode overlap).
+    let index_pool: Option<Arc<rayon::ThreadPool>> = if cpu_workers > 1 {
+        Some(Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(cpu_workers)
+                .thread_name(|i| format!("a5px-index-{i}"))
+                .build()
+                .map_err(|e| A5CogError::Internal(format!("index pool: {e}")))?,
+        ))
+    } else {
+        None
+    };
     let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<AHashMap<u64, CellAcc<L>>>>> =
         Vec::with_capacity(cpu_workers);
     for _ in 0..cpu_workers {
@@ -1661,11 +1693,29 @@ async fn read_raster_async_impl<L: AccLayout>(
         let bbox_lonlat_c = bbox_pixel_filter;
         let dequant_c = dequant.clone();
         let mask_c = mask.clone();
+        let pool = index_pool.clone();
         consumer_handles.push(tokio::task::spawn_blocking(move || {
+            let ctx = TileCtx {
+                planar,
+                width,
+                height,
+                tile_w,
+                tile_h,
+                src_proj: &src_proj,
+                dst_proj: &dst_proj,
+                gt: &gt_c,
+                resolution,
+                nodata,
+                bbox_lonlat: bbox_lonlat_c,
+                dequant: dequant_c.as_deref(),
+                mask: mask_c.as_deref(),
+                cfg,
+                overlay_k,
+            };
             let mut local: AHashMap<u64, CellAcc<L>> = AHashMap::new();
             let prof = profile_enabled();
             while let Ok(item) = rx.recv_blocking() {
-                let (data, shape, data_n_bands_eff, offsets_arc): (
+                let (data, _shape, data_n_bands_eff, offsets_arc): (
                     TypedArray,
                     [usize; 3],
                     usize,
@@ -1693,53 +1743,14 @@ async fn read_raster_async_impl<L: AccLayout>(
                         (typed, sh, n_out, Arc::clone(&identity_offsets))
                     }
                 };
-                let tile_local = if let Some(k) = overlay_k {
-                    process_tile_overlay::<L>(
-                        item.tx,
-                        item.ty,
-                        data,
-                        planar,
-                        width,
-                        height,
-                        tile_w,
-                        tile_h,
-                        data_n_bands_eff,
-                        &offsets_arc,
-                        &src_proj,
-                        &dst_proj,
-                        &gt_c,
-                        resolution,
-                        nodata,
-                        bbox_lonlat_c,
-                        dequant_c.as_deref(),
-                        mask_c.as_deref(),
-                        k,
-                        cfg,
-                    )?
-                } else {
-                    process_tile::<L>(
-                        item.tx,
-                        item.ty,
-                        data,
-                        shape,
-                        planar,
-                        width,
-                        height,
-                        tile_w,
-                        tile_h,
-                        data_n_bands_eff,
-                        &offsets_arc,
-                        &src_proj,
-                        &dst_proj,
-                        &gt_c,
-                        resolution,
-                        nodata,
-                        bbox_lonlat_c,
-                        dequant_c.as_deref(),
-                        mask_c.as_deref(),
-                        cfg,
-                    )?
+                let td = TileData {
+                    tx: item.tx,
+                    ty: item.ty,
+                    data: &data,
+                    data_n_bands: data_n_bands_eff,
+                    band_offsets: &offsets_arc,
                 };
+                let tile_local = process_tile_striped::<L>(pool.as_deref(), &ctx, &td)?;
                 let t_merge = Instant::now();
                 for (cell, acc) in tile_local {
                     if let Some(entry) = local.get_mut(&cell) {
@@ -1835,6 +1846,7 @@ async fn read_raster_async_impl<L: AccLayout>(
             )))),
         }
     }
+    let t_reduce = Instant::now();
     let mut map: AHashMap<u64, CellAcc<L>> = AHashMap::new();
     for r in consumer_results {
         let m = r?;
@@ -1850,14 +1862,52 @@ async fn read_raster_async_impl<L: AccLayout>(
             }
         }
     }
+    if profile_enabled() {
+        T_REDUCE_NS.fetch_add(t_reduce.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_flatten = Instant::now();
 
     let n_stats = stats.len();
     let n = map.len();
-    let mut cells = Vec::with_capacity(n);
+    // Draining the map into a Vec fixes the cell order for the parallel
+    // fill below; the map's iteration order is arbitrary either way.
+    let entries: Vec<(u64, CellAcc<L>)> = map.into_iter().collect();
+    let cells: Vec<u64> = entries.iter().map(|(c, _)| *c).collect();
     // cell-major flat layout per stat: flat_values[s][i*n_out + b] is the s-th
     // stat of band b of cell i.
     let mut flat_per_stat: Vec<Vec<f64>> =
-        (0..n_stats).map(|_| Vec::with_capacity(n * n_out)).collect();
+        (0..n_stats).map(|_| vec![0.0; n * n_out]).collect();
+    // Fill `out` (one stat, cells `ents`) from the accumulators.
+    let fill = |s: Stat, ents: &[(u64, CellAcc<L>)], out: &mut [f64]| {
+        for (i, (_, acc)) in ents.iter().enumerate() {
+            for b in 0..n_out {
+                out[i * n_out + b] = match s {
+                    Stat::Majority => finalise_majority(&acc.cat[b]),
+                    _ => acc.cont[b].finalise(s),
+                };
+            }
+        }
+    };
+    // The flatten is the largest serial step after the workers finish
+    // (n_cells x n_bands x n_stats finalisations), so it runs on the index
+    // pool in cell chunks when there is one.
+    const FLATTEN_CHUNK: usize = 4096;
+    match index_pool.as_deref() {
+        Some(pool) if n > FLATTEN_CHUNK => pool.install(|| {
+            use rayon::prelude::*;
+            for (s_i, s) in stats.iter().enumerate() {
+                flat_per_stat[s_i]
+                    .par_chunks_mut(FLATTEN_CHUNK * n_out)
+                    .zip(entries.par_chunks(FLATTEN_CHUNK))
+                    .for_each(|(out, ents)| fill(*s, ents, out));
+            }
+        }),
+        _ => {
+            for (s_i, s) in stats.iter().enumerate() {
+                fill(*s, &entries, &mut flat_per_stat[s_i]);
+            }
+        }
+    }
     let mut frac_out: Option<FracOut> = if fractions {
         Some(FracOut {
             classes: vec![Vec::new(); n_out],
@@ -1867,17 +1917,9 @@ async fn read_raster_async_impl<L: AccLayout>(
     } else {
         None
     };
-    for (cell, acc) in map {
-        cells.push(cell);
-        for b in 0..n_out {
-            for (s_i, s) in stats.iter().enumerate() {
-                let v = match s {
-                    Stat::Majority => finalise_majority(&acc.cat[b]),
-                    _ => acc.cont[b].finalise(*s),
-                };
-                flat_per_stat[s_i].push(v);
-            }
-            if let Some(fr) = frac_out.as_mut() {
+    if let Some(fr) = frac_out.as_mut() {
+        for (_, acc) in &entries {
+            for b in 0..n_out {
                 // classes sorted ascending so output order is deterministic;
                 // shares are each class's fraction of the cell's valid weight
                 let mut sorted = acc.cat[b].clone();
@@ -1892,6 +1934,11 @@ async fn read_raster_async_impl<L: AccLayout>(
                 fr.offsets[b].push(fr.classes[b].len() as i32);
             }
         }
+    }
+    drop(entries);
+
+    if profile_enabled() {
+        T_FLATTEN_NS.fetch_add(t_flatten.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
     Ok(Output {
