@@ -1,5 +1,19 @@
 # a5px (development version)
 
+* New `scoff` argument on `a5_read_raster()`, `a5_read_raster_arrow()` and
+  `a5_raster_to_parquet()`: `scoff = TRUE` applies the scale and offset the
+  file declares for each band (`value * scale + offset`) per pixel before
+  aggregation, with nodata matched on the raw value. It works for every
+  data type and, being linear, keeps overviews in use. A band without the
+  tags takes the GDAL defaults (scale 1, offset 0). It cannot be combined
+  with `dequant` or the categorical stats. The default stays `FALSE`.
+
+* `a5_raster_info()` gains `scale` and `offset` (per band, `NA` when
+  undeclared), `band_metadata` (each band's remaining GDAL metadata items,
+  such as `UNITTYPE`) and `metadata` (dataset-level items), so consumers no
+  longer need a second raster library to look up a product's decoding.
+  Band names now have XML entities unescaped.
+
 * New `stat = "npix"`: a single per-cell column with the number of source
   pixels that had at least one valid band (in overlay mode, their summed
   pixel-area weight). When validity is uniform across bands it equals

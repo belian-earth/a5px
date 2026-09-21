@@ -30,8 +30,16 @@ resolution image.
 \item \code{dtype}: data type string, e.g. \code{"uint16"}, \code{"int8"}, \code{"float32"};
 \code{"mixed"} when bands differ.
 \item \code{nodata}: numeric nodata value, \code{NA} if the file declares none.
+\item \code{scale}, \code{offset}: numeric vectors of length \code{n_bands} from the GDAL
+band metadata (\code{SCALE} and \code{OFFSET} items of the \code{GDAL_METADATA} tag),
+\code{NA} for a band that declares none. The decoded value is
+\code{raw * scale + offset}; see \code{scoff} in \code{\link[=a5_read_raster]{a5_read_raster()}}.
 \item \code{band_names}: character vector from the GDAL \code{DESCRIPTION} tags, or
 \code{band_NN} placeholders.
+\item \code{band_metadata}: list of length \code{n_bands} of named character vectors
+holding each band's remaining metadata items, such as \code{UNITTYPE}.
+\item \code{metadata}: named character vector of the dataset-level metadata
+items.
 \item \code{interleave}: \code{"pixel"} or \code{"band"}; \code{compression}: codec name.
 \item \code{block}: integer \code{c(width, height)} of the internal tiles;
 \code{n_blocks}: integer \code{c(x, y)} tile counts. Zero for strip-based
@@ -51,6 +59,10 @@ dimensions, data type, nodata, band names, internal block (tile) grid,
 overview levels, CRS and WGS 84 envelope. Use it to plan chunked reads
 (see \code{bbox_align} in \code{\link[=a5_read_raster]{a5_read_raster()}}) or to check what a remote source
 looks like before a long read.
+}
+\details{
+Metadata is read from the file's own \code{GDAL_METADATA} tag (default domain
+only). Sidecar \code{.aux.xml} files are not read.
 }
 \examples{
 f <- system.file("extdata", "overview_cog.tif", package = "a5px")

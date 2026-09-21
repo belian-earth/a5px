@@ -190,6 +190,7 @@ pub(crate) async fn sample_at_cells_async(
     cpu_workers: usize,
     io_concurrency: usize,
     dequant: Option<Arc<crate::read::DequantLut>>,
+    scoff: bool,
     interp: Interp,
 ) -> Result<CentroidOutput> {
     let (store, path) = crate::store::parse_src(src, &store_opts)?;
@@ -279,6 +280,8 @@ pub(crate) async fn sample_at_cells_async(
     };
     let n_out = selected_bands.len();
     let band_names: Vec<String> = selected_bands.iter().map(|&i| all_band_names[i].clone()).collect();
+    let dequant =
+        crate::read::resolve_decode(dequant, scoff, &ifd_owned, n_bands, &selected_bands)?;
 
     // Group cells by every tile their stencil touches.
     // bucket_entry = (output_index_in_cells_in, col_f, row_f)
@@ -536,7 +539,7 @@ pub(crate) async fn sample_at_cells_async(
                                 };
                                 if valid_v {
                                     let v = match dequant_c.as_deref() {
-                                        Some(d) => d.apply(raw),
+                                        Some(d) => d.band(out_b).apply(raw),
                                         None => raw,
                                     };
                                     ks[out_b] += wgt * v;

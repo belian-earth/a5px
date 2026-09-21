@@ -6,6 +6,9 @@
 #' (see `bbox_align` in [a5_read_raster()]) or to check what a remote source
 #' looks like before a long read.
 #'
+#' Metadata is read from the file's own `GDAL_METADATA` tag (default domain
+#' only). Sidecar `.aux.xml` files are not read.
+#'
 #' @inheritParams a5_read_raster
 #' @returns A list with elements:
 #'   - `width`, `height`, `n_bands`: integer dimensions of the full
@@ -13,8 +16,16 @@
 #'   - `dtype`: data type string, e.g. `"uint16"`, `"int8"`, `"float32"`;
 #'     `"mixed"` when bands differ.
 #'   - `nodata`: numeric nodata value, `NA` if the file declares none.
+#'   - `scale`, `offset`: numeric vectors of length `n_bands` from the GDAL
+#'     band metadata (`SCALE` and `OFFSET` items of the `GDAL_METADATA` tag),
+#'     `NA` for a band that declares none. The decoded value is
+#'     `raw * scale + offset`; see `scoff` in [a5_read_raster()].
 #'   - `band_names`: character vector from the GDAL `DESCRIPTION` tags, or
 #'     `band_NN` placeholders.
+#'   - `band_metadata`: list of length `n_bands` of named character vectors
+#'     holding each band's remaining metadata items, such as `UNITTYPE`.
+#'   - `metadata`: named character vector of the dataset-level metadata
+#'     items.
 #'   - `interleave`: `"pixel"` or `"band"`; `compression`: codec name.
 #'   - `block`: integer `c(width, height)` of the internal tiles;
 #'     `n_blocks`: integer `c(x, y)` tile counts. Zero for strip-based
@@ -42,7 +53,13 @@ a5_raster_info <- function(src, store_opts = NULL) {
     n_bands = as.integer(r$n_bands),
     dtype = as.character(r$dtype),
     nodata = if (is.nan(r$nodata)) NA_real_ else as.numeric(r$nodata),
+    scale = nan_to_na(r$scale),
+    offset = nan_to_na(r$offset),
     band_names = as.character(r$band_names),
+    band_metadata = lapply(seq_len(r$n_bands), function(b) {
+      metadata_items(r, b)
+    }),
+    metadata = metadata_items(r, 0L),
     interleave = as.character(r$interleave),
     compression = as.character(r$compression),
     block = c(as.integer(r$block_width), as.integer(r$block_height)),
@@ -58,4 +75,21 @@ a5_raster_info <- function(src, store_opts = NULL) {
     geotransform = as.numeric(r$geotransform),
     bbox = as.numeric(r$bbox)
   )
+}
+
+#' NaN is the Rust side's "absent" marker for scale and offset.
+#' @noRd
+nan_to_na <- function(x) {
+  x <- as.numeric(x)
+  x[is.nan(x)] <- NA_real_
+  x
+}
+
+#' Named character vector of the metadata items of one band (0 = dataset).
+#' @noRd
+metadata_items <- function(r, band) {
+  keep <- as.integer(r$md_band) == band
+  out <- as.character(r$md_value)[keep]
+  names(out) <- as.character(r$md_name)[keep]
+  out
 }

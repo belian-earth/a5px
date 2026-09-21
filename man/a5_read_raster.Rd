@@ -19,6 +19,7 @@ a5_read_raster(
   interp = c("nearest", "bilinear", "bicubic", "lanczos"),
   cpu_workers = NULL,
   io_concurrency = NULL,
+  scoff = FALSE,
   dequant = NULL,
   as_vector = FALSE,
   use_overviews = is.null(dequant),
@@ -149,6 +150,20 @@ adjacent blocks on files without a predictor. \code{NULL} (default) resolves fro
 embedding rasters where the network can absorb more parallelism than
 the CPU pool. See \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.}
 
+\item{scoff}{Logical. If \code{TRUE}, apply the scale and offset the file
+declares for each band (\code{value * scale + offset}, from the GDAL band
+metadata reported by \code{\link[=a5_raster_info]{a5_raster_info()}}) per pixel before aggregation.
+A band that declares none takes the GDAL defaults, scale 1 and offset
+0, so \code{scoff = TRUE} on a file without these tags returns raw values.
+Works for every data type. nodata is matched against the raw value,
+before scaling. The decode is linear, so it commutes with the mean and
+overviews stay in use (see \code{use_overviews}). Cannot be combined with
+\code{dequant} or with \code{majority} / \code{fractions}; to chain a further decode,
+fold the scale into the function:
+\code{dequant = function(x) f(x * s + o)}. Default \code{FALSE} reads raw values,
+unlike \code{terra::rast()}, which applies scale and offset unless
+\code{raw = TRUE}.}
+
 \item{dequant}{Optional per-pixel decode applied \emph{before} aggregation: a
 vectorised R function mapping raw integer codes to decoded values, e.g.
 \link{dequant_aef} for Alpha Earth Foundations int8 embedding codes.
@@ -242,9 +257,10 @@ than the pixel size — the forward path leaves gaps in that regime
 because each pixel only contributes to one cell.
 }
 
-\strong{Scaling:} GDAL \code{Scale} / \code{Offset} tags are \emph{not} applied. Returned
-values are in the raster's native domain. Apply scale/offset on the R side
-if needed.
+\strong{Scaling:} GDAL \code{Scale} / \code{Offset} tags are \emph{not} applied by default;
+returned values are in the raster's native domain. Set \code{scoff = TRUE} to
+apply them per pixel before aggregation. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the
+values a file declares.
 
 \strong{NoData:} the dataset-level GDAL \code{NODATA_VALUE} tag (when present) is
 used to skip per-band samples. Per-band nodata via \code{GDAL_METADATA} XML is

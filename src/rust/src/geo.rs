@@ -413,12 +413,94 @@ pub(crate) fn parse_band_descriptions(ifd: &ImageFileDirectory, n_bands: usize) 
         }
         if let Some(s) = sample {
             if s < n_bands {
-                out[s] = body.trim().to_string();
+                out[s] = unescape_xml(body.trim());
                 found_any = true;
             }
         }
     });
     if found_any { out } else { Vec::new() }
+}
+
+/// Per-band `SCALE` and `OFFSET` from the GDAL_METADATA XML, in band order.
+/// GDAL writes them on the full-resolution IFD only, as
+/// `<Item name="SCALE" sample="N" role="scale">0.01</Item>`. `NaN` marks a
+/// band that declares none; callers apply GDAL's defaults (scale 1, offset 0)
+/// or report `NA`.
+pub(crate) fn parse_band_scale_offset(
+    ifd: &ImageFileDirectory,
+    n_bands: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    scale_offset_from_xml(ifd.gdal_metadata().unwrap_or(""), n_bands)
+}
+
+fn scale_offset_from_xml(xml: &str, n_bands: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut scale = vec![f64::NAN; n_bands];
+    let mut offset = vec![f64::NAN; n_bands];
+    walk_items(xml, |sample, attrs, body| {
+        let Some(s) = sample.filter(|&s| s < n_bands) else {
+            return;
+        };
+        if parse_attr(attrs, "domain").is_some() {
+            return;
+        }
+        let target = match parse_attr(attrs, "name") {
+            Some("SCALE") => &mut scale,
+            Some("OFFSET") => &mut offset,
+            _ => return,
+        };
+        if let Ok(v) = body.trim().to_ascii_lowercase().parse::<f64>() {
+            target[s] = v;
+        }
+    });
+    (scale, offset)
+}
+
+/// Default-domain GDAL_METADATA items as `(sample, name, value)`: `sample`
+/// is the band index, `None` for dataset-level items. Per-band `SCALE`,
+/// `OFFSET` and `DESCRIPTION` are left out; they are reported through
+/// [`parse_band_scale_offset`] and [`parse_band_descriptions`].
+pub(crate) fn parse_metadata_items(
+    ifd: &ImageFileDirectory,
+    n_bands: usize,
+) -> Vec<(Option<usize>, String, String)> {
+    metadata_items_from_xml(ifd.gdal_metadata().unwrap_or(""), n_bands)
+}
+
+fn metadata_items_from_xml(xml: &str, n_bands: usize) -> Vec<(Option<usize>, String, String)> {
+    let mut out = Vec::new();
+    walk_items(xml, |sample, attrs, body| {
+        if parse_attr(attrs, "domain").is_some() {
+            return;
+        }
+        let Some(name) = parse_attr(attrs, "name") else {
+            return;
+        };
+        if let Some(s) = sample {
+            if s >= n_bands || matches!(name, "SCALE" | "OFFSET" | "DESCRIPTION") {
+                return;
+            }
+        }
+        out.push((sample, unescape_xml(name), unescape_xml(body.trim())));
+    });
+    out
+}
+
+/// Recover an item's text as GDAL reports it. The GTiff driver escapes each
+/// value itself and the XML serialiser escapes it again, so `a & b` is stored
+/// as `a &amp;amp; b`; GDAL's reader undoes both layers and so does this.
+fn unescape_xml(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    unescape_xml_once(&unescape_xml_once(s))
+}
+
+fn unescape_xml_once(s: &str) -> String {
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// Walk every `<Item ...>body</Item>` element and call `f(sample, attrs, body)`.
@@ -453,4 +535,49 @@ fn parse_attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
 
 fn attr_eq(attrs: &str, name: &str, value: &str) -> bool {
     parse_attr(attrs, name) == Some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const XML: &str = r#"<GDALMetadata>
+  <Item name="DSTAG">a &amp;amp; &amp;lt;b&amp;gt;</Item>
+  <Item name="HUTAN_TAG" sample="0">x</Item>
+  <Item name="OFFSET" sample="0" role="offset">0</Item>
+  <Item name="SCALE" sample="0" role="scale">0.01</Item>
+  <Item name="UNITTYPE" sample="0" role="unittype">m</Item>
+  <Item name="DESCRIPTION" sample="0" role="description">rh98</Item>
+  <Item name="SCALE" sample="2" role="scale">0.5</Item>
+  <Item name="OVERVIEW_RESAMPLING" domain="IMAGE_STRUCTURE">CUBIC</Item>
+</GDALMetadata>"#;
+
+    #[test]
+    fn scale_offset_per_band() {
+        let (scale, offset) = scale_offset_from_xml(XML, 3);
+        assert_eq!(scale[0], 0.01);
+        assert!(scale[1].is_nan());
+        assert_eq!(scale[2], 0.5);
+        assert_eq!(offset[0], 0.0);
+        assert!(offset[1].is_nan() && offset[2].is_nan());
+    }
+
+    #[test]
+    fn scale_offset_absent_metadata() {
+        let (scale, offset) = scale_offset_from_xml("", 2);
+        assert!(scale.iter().chain(&offset).all(|v| v.is_nan()));
+    }
+
+    #[test]
+    fn metadata_items_skip_roles_and_domains() {
+        let items = metadata_items_from_xml(XML, 3);
+        assert_eq!(
+            items,
+            vec![
+                (None, "DSTAG".to_string(), "a & <b>".to_string()),
+                (Some(0), "HUTAN_TAG".to_string(), "x".to_string()),
+                (Some(0), "UNITTYPE".to_string(), "m".to_string()),
+            ]
+        );
+    }
 }

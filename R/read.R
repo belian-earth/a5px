@@ -154,6 +154,19 @@
 #'   `min(32, max(cpu_workers, 8))`. Bump this for cloud reads of multi-band
 #'   embedding rasters where the network can absorb more parallelism than
 #'   the CPU pool. See [a5px_set_concurrency()].
+#' @param scoff Logical. If `TRUE`, apply the scale and offset the file
+#'   declares for each band (`value * scale + offset`, from the GDAL band
+#'   metadata reported by [a5_raster_info()]) per pixel before aggregation.
+#'   A band that declares none takes the GDAL defaults, scale 1 and offset
+#'   0, so `scoff = TRUE` on a file without these tags returns raw values.
+#'   Works for every data type. nodata is matched against the raw value,
+#'   before scaling. The decode is linear, so it commutes with the mean and
+#'   overviews stay in use (see `use_overviews`). Cannot be combined with
+#'   `dequant` or with `majority` / `fractions`; to chain a further decode,
+#'   fold the scale into the function:
+#'   `dequant = function(x) f(x * s + o)`. Default `FALSE` reads raw values,
+#'   unlike `terra::rast()`, which applies scale and offset unless
+#'   `raw = TRUE`.
 #' @param dequant Optional per-pixel decode applied *before* aggregation: a
 #'   vectorised R function mapping raw integer codes to decoded values, e.g.
 #'   [dequant_aef] for Alpha Earth Foundations int8 embedding codes.
@@ -193,9 +206,10 @@
 #'     numeric vectors (N = number of bands)
 #'
 #' @details
-#' **Scaling:** GDAL `Scale` / `Offset` tags are *not* applied. Returned
-#' values are in the raster's native domain. Apply scale/offset on the R side
-#' if needed.
+#' **Scaling:** GDAL `Scale` / `Offset` tags are *not* applied by default;
+#' returned values are in the raster's native domain. Set `scoff = TRUE` to
+#' apply them per pixel before aggregation. [a5_raster_info()] reports the
+#' values a file declares.
 #'
 #' **NoData:** the dataset-level GDAL `NODATA_VALUE` tag (when present) is
 #' used to skip per-band samples. Per-band nodata via `GDAL_METADATA` XML is
@@ -222,6 +236,7 @@ a5_read_raster <- function(src,
                            interp = c("nearest", "bilinear", "bicubic", "lanczos"),
                            cpu_workers = NULL,
                            io_concurrency = NULL,
+                           scoff = FALSE,
                            dequant = NULL,
                            as_vector = FALSE,
                            use_overviews = is.null(dequant),
@@ -252,8 +267,8 @@ a5_read_raster <- function(src,
   bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
   aoi_v <- check_aoi(aoi, resolution, containment)
   src_nodata_v <- check_src_nodata(src_nodata)
-  dequant_v <- check_dequant(dequant)
-  check_stat_context(stats, dequant, as_vector, fractions_ok = TRUE)
+  dequant_v <- check_dequant(dequant, scoff)
+  check_stat_context(stats, dequant, as_vector, fractions_ok = TRUE, scoff = scoff)
   warn_dequant_overviews(dequant, use_overviews)
   overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
@@ -291,6 +306,7 @@ a5_read_raster <- function(src,
     overview_target_m = overview_target_m,
     dequant_lut = dequant_v$lut,
     dequant_min = dequant_v$min,
+    scoff = dequant_v$scoff,
     overlay = identical(mode, "overlay"),
     subsamples = subsamples_v,
     cell_edge_m = cell_edge_metres(mode, resolution),
@@ -363,7 +379,7 @@ a5_read_raster <- function(src,
 read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
                                  bbox, src_nodata, cpu_workers,
                                  io_concurrency, as_vector, stats,
-                                 dequant_v = list(lut = numeric(0), min = 0),
+                                 dequant_v = list(lut = numeric(0), min = 0, scoff = FALSE),
                                  interp = "nearest",
                                  store = check_store_opts(NULL),
                                  aoi_cells = NULL) {
@@ -381,6 +397,7 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
     io_concurrency = io_concurrency,
     dequant_lut = dequant_v$lut,
     dequant_min = dequant_v$min,
+    scoff = dequant_v$scoff,
     interp = interp
   )
   cells_out <- new_a5_cell_from_rs(out$cell)
