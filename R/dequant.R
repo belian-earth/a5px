@@ -28,13 +28,28 @@ dequant_aef <- function(x) {
 dequant_lut_min <- -32768L
 dequant_lut_max <- 65535L
 
-#' Validate the user-facing `dequant` arg and build the code -> value LUT
-#' passed to Rust. Returns list(lut = double(), min = double(1)); an empty
-#' `lut` means "no dequantization".
+#' Validate the user-facing `scoff` and `dequant` args and build the
+#' code -> value LUT passed to Rust. Returns
+#' list(lut = double(), min = double(1), scoff = logical(1)); an empty `lut`
+#' means "no dequantization". The two decodes cannot be combined: the LUT is
+#' built over raw integer codes before the file is opened, so it cannot see
+#' the file's scale and offset.
 #' @noRd
-check_dequant <- function(dequant, call = rlang::caller_env()) {
+check_dequant <- function(dequant, scoff = FALSE, call = rlang::caller_env()) {
+  if (!is.logical(scoff) || length(scoff) != 1L || is.na(scoff)) {
+    cli::cli_abort("{.arg scoff} must be a length-1 non-NA logical.", call = call)
+  }
+  if (scoff && !is.null(dequant)) {
+    cli::cli_abort(
+      c(
+        "{.arg scoff} and {.arg dequant} cannot be combined.",
+        "i" = "Fold the scale and offset into the function instead: {.code dequant = function(x) f(x * s + o)}, with {.code s} and {.code o} from {.fn a5_raster_info}."
+      ),
+      call = call
+    )
+  }
   if (is.null(dequant)) {
-    return(list(lut = numeric(0), min = 0))
+    return(list(lut = numeric(0), min = 0, scoff = scoff))
   }
   if (!is.function(dequant)) {
     cli::cli_abort(
@@ -50,7 +65,7 @@ check_dequant <- function(dequant, call = rlang::caller_env()) {
       call = call
     )
   }
-  list(lut = as.double(lut), min = as.double(dequant_lut_min))
+  list(lut = as.double(lut), min = as.double(dequant_lut_min), scoff = FALSE)
 }
 
 #' Warn when a dequant read is allowed to touch overviews. Average-built

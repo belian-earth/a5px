@@ -250,6 +250,85 @@ impl DequantLut {
     }
 }
 
+/// The per-pixel decode of a read, resolved once the source is open: the
+/// caller's `dequant` LUT, or the file's own per-band scale and offset
+/// (`scoff`). The two are mutually exclusive; the R wrapper rejects the
+/// combination before any I/O.
+pub(crate) enum Decode {
+    Lut(Arc<DequantLut>),
+    /// `value * scale + offset`, indexed by output band.
+    Affine { scale: Vec<f64>, offset: Vec<f64> },
+}
+
+/// [`Decode`] narrowed to one output band, so run loops resolve the band
+/// once rather than per pixel.
+#[derive(Clone, Copy)]
+pub(crate) enum BandDecode<'a> {
+    Lut(&'a DequantLut),
+    Affine { scale: f64, offset: f64 },
+}
+
+impl Decode {
+    #[inline]
+    pub fn band(&self, out_b: usize) -> BandDecode<'_> {
+        match self {
+            Decode::Lut(d) => BandDecode::Lut(d),
+            Decode::Affine { scale, offset } => BandDecode::Affine {
+                scale: scale[out_b],
+                offset: offset[out_b],
+            },
+        }
+    }
+}
+
+impl BandDecode<'_> {
+    #[inline]
+    pub fn apply(self, v: f64) -> f64 {
+        match self {
+            BandDecode::Lut(d) => d.apply(v),
+            BandDecode::Affine { scale, offset } => v * scale + offset,
+        }
+    }
+}
+
+/// Resolve the decode for the selected bands. With `scoff`, scale and offset
+/// come from the GDAL band metadata of the full-resolution IFD (overview
+/// IFDs never carry them); a band that declares none takes GDAL's defaults,
+/// scale 1 and offset 0, and a read where every selected band is at the
+/// defaults needs no decode at all.
+pub(crate) fn resolve_decode(
+    dequant: Option<Arc<DequantLut>>,
+    scoff: bool,
+    ifd0: &async_tiff::ImageFileDirectory,
+    n_bands: usize,
+    selected_bands: &[usize],
+) -> Result<Option<Arc<Decode>>> {
+    if let Some(dq) = dequant {
+        if scoff {
+            return Err(A5CogError::Invalid(
+                "scoff cannot be combined with dequant".into(),
+            ));
+        }
+        return Ok(Some(Arc::new(Decode::Lut(dq))));
+    }
+    if !scoff {
+        return Ok(None);
+    }
+    let (scale_all, offset_all) = crate::geo::parse_band_scale_offset(ifd0, n_bands);
+    let pick = |all: &[f64], default: f64| -> Vec<f64> {
+        selected_bands
+            .iter()
+            .map(|&b| if all[b].is_nan() { default } else { all[b] })
+            .collect()
+    };
+    let scale = pick(&scale_all, 1.0);
+    let offset = pick(&offset_all, 0.0);
+    if scale.iter().all(|&s| s == 1.0) && offset.iter().all(|&o| o == 0.0) {
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(Decode::Affine { scale, offset })))
+}
+
 /// Decode the extendr-passed LUT args: empty `lut` means "no dequant".
 pub(crate) fn parse_dequant_arg(lut: Vec<f64>, min: f64) -> Option<DequantLut> {
     if lut.is_empty() {
@@ -889,7 +968,7 @@ fn read_pixel_chunky(data: &TypedArray, idx: usize) -> f64 {
 // typed pixel access
 
 /// Append the valid values of `n` pixels starting at `base` with stride
-/// `stride` to `out`: nodata pixels are skipped and the dequant LUT (when
+/// `stride` to `out`: nodata pixels are skipped and the band's decode (when
 /// present) applied, matching the array type once per run rather than per
 /// pixel.
 #[inline]
@@ -899,7 +978,7 @@ fn read_run_values(
     stride: usize,
     n: usize,
     nodata: Option<f64>,
-    dequant: Option<&DequantLut>,
+    dequant: Option<BandDecode<'_>>,
     out: &mut Vec<f64>,
 ) {
     macro_rules! run {
@@ -984,7 +1063,7 @@ struct TileCtx<'a> {
     px_per_cell: f64,
     nodata: Option<f64>,
     bbox_lonlat: Option<[f64; 4]>,
-    dequant: Option<&'a DequantLut>,
+    dequant: Option<&'a Decode>,
     mask: Option<&'a CellMask>,
     cfg: AccCfg,
     /// Sub-point grid dimension for overlay mode; `None` is the forward path.
@@ -1259,7 +1338,7 @@ fn process_tile<L: AccLayout>(
             let band_base = row_base + src_b * b_stride;
             for &(slot, c0, c1) in &runs {
                 vals.clear();
-                read_run_values(data, band_base + c0 * w_stride, w_stride, c1 - c0, nodata, dequant, &mut vals);
+                read_run_values(data, band_base + c0 * w_stride, w_stride, c1 - c0, nodata, dequant.map(|d| d.band(out_b)), &mut vals);
                 if vals.is_empty() {
                     continue;
                 }
@@ -1296,7 +1375,7 @@ fn process_tile<L: AccLayout>(
 // overlay (area-weighted) tile processing
 
 /// Read one pixel's selected-band values and validity into the caller's
-/// buffers. nodata is compared against the raw code; the dequant LUT (when
+/// buffers. nodata is compared against the raw code; the decode (when
 /// present) is applied after, matching the forward path.
 #[inline]
 #[allow(clippy::too_many_arguments)]
@@ -1306,7 +1385,7 @@ fn gather_bands(
     b_stride: usize,
     offsets: &[usize],
     nodata: Option<f64>,
-    dequant: Option<&DequantLut>,
+    dequant: Option<&Decode>,
     band_vals: &mut [f64],
     band_valid: &mut [bool],
 ) -> bool {
@@ -1319,7 +1398,7 @@ fn gather_bands(
             None => true,
         };
         band_vals[out_b] = match dequant {
-            Some(d) => d.apply(raw),
+            Some(d) => d.band(out_b).apply(raw),
             None => raw,
         };
         band_valid[out_b] = valid;
@@ -1670,6 +1749,7 @@ pub(crate) struct ReadArgs<'a> {
     pub io_concurrency: usize,
     pub overview_target_m: f64,
     pub dequant: Option<Arc<DequantLut>>,
+    pub scoff: bool,
     pub overlay: Option<OverlayParams>,
     pub fractions: bool,
     pub npix: bool,
@@ -1710,7 +1790,7 @@ async fn read_raster_to_parquet_async(
 async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggregate<L>> {
     let ReadArgs {
         src, store_opts, resolution, stats, bands_idx, bands_names, bbox_lonlat,
-        src_nodata_override, cpu_workers, io_concurrency, overview_target_m, dequant,
+        src_nodata_override, cpu_workers, io_concurrency, overview_target_m, dequant, scoff,
         overlay, fractions, npix, bbox_align_block, tile_bbox, mask,
     } = a;
     let cfg = AccCfg::from_stats(&stats, fractions, npix);
@@ -1749,10 +1829,10 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
     }
     if cfg.has_cat {
         validate_categorical_dtype(&ifd0)?;
-        if dequant.is_some() {
+        if dequant.is_some() || scoff {
             return Err(A5CogError::Invalid(
-                "dequant cannot be combined with majority/fractions: categorical \
-                 stats operate on the raw integer codes"
+                "dequant and scoff cannot be combined with majority/fractions: \
+                 categorical stats operate on the raw integer codes"
                     .into(),
             ));
         }
@@ -1885,6 +1965,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs<'_>) -> Result<Aggrega
 
     // override nodata if user specified it; otherwise use what async-tiff exposed
     let nodata = nodata_in_source_precision(&ifd0, src_nodata_override.or(nodata));
+    let dequant = resolve_decode(dequant, scoff, &ifd0, n_bands, &selected_bands)?;
 
     // Bbox-driven tile filter. For most projections the bbox of 4 corners +
     // 4 edge midpoints (re-projected to the raster CRS) is a sufficient
@@ -2727,6 +2808,7 @@ fn projected_tile_range(
 /// @param dequant_lut Pre-aggregation decode LUT over the integer code domain
 ///   starting at `dequant_min`; empty = no dequantization.
 /// @param dequant_min First code covered by `dequant_lut`.
+/// @param scoff Apply the file's per-band scale and offset before aggregation.
 /// @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
 ///   vectors; key form is `<band>` for length-1 stats and `<band>__<stat>`
 ///   for length>1), `band_names`, and `stats` (character).
@@ -2746,6 +2828,7 @@ fn a5_read_raster_rs(
     overview_target_m: f64,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    scoff: bool,
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
@@ -2798,6 +2881,7 @@ fn a5_read_raster_rs(
         io_concurrency,
         overview_target_m,
         dequant,
+        scoff,
         overlay: overlay_opt,
         fractions: fractions,
         npix,
@@ -2909,6 +2993,7 @@ fn a5_read_raster_flat_rs(
     overview_target_m: f64,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    scoff: bool,
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
@@ -2966,6 +3051,7 @@ fn a5_read_raster_flat_rs(
         io_concurrency,
         overview_target_m,
         dequant,
+        scoff,
         overlay: overlay_opt,
         fractions: false,
         npix,
@@ -3054,6 +3140,7 @@ fn a5_raster_to_parquet_rs(
     overview_target_m: f64,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    scoff: bool,
     overlay: bool,
     subsamples: i32,
     cell_edge_m: f64,
@@ -3115,6 +3202,7 @@ fn a5_raster_to_parquet_rs(
         io_concurrency,
         overview_target_m,
         dequant,
+        scoff,
         overlay: overlay_opt,
         fractions: false,
         npix,
@@ -3160,6 +3248,7 @@ fn run_sample_at_cells(
     io_concurrency: i32,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    scoff: bool,
     interp: &str,
 ) -> Result<crate::sample::CentroidOutput> {
     if !bands_idx.is_empty() && !bands_names.is_empty() {
@@ -3186,6 +3275,7 @@ fn run_sample_at_cells(
         cpu_workers,
         io_concurrency,
         dequant,
+        scoff,
         interp_e,
     ))
 }
@@ -3201,6 +3291,7 @@ fn a5_sample_at_cells_rs(
     io_concurrency: i32,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    scoff: bool,
     interp: &str,
     store_keys: Vec<String>,
     store_values: Vec<String>,
@@ -3217,6 +3308,7 @@ fn a5_sample_at_cells_rs(
         io_concurrency,
         dequant_lut,
         dequant_min,
+        scoff,
         interp,
     )?;
 
@@ -3253,6 +3345,7 @@ fn a5_sample_at_cells_flat_rs(
     io_concurrency: i32,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    scoff: bool,
     interp: &str,
     store_keys: Vec<String>,
     store_values: Vec<String>,
@@ -3269,6 +3362,7 @@ fn a5_sample_at_cells_flat_rs(
         io_concurrency,
         dequant_lut,
         dequant_min,
+        scoff,
         interp,
     )?;
 
@@ -3309,6 +3403,7 @@ fn a5_sample_to_parquet_rs(
     io_concurrency: i32,
     dequant_lut: Vec<f64>,
     dequant_min: f64,
+    scoff: bool,
     interp: &str,
     store_keys: Vec<String>,
     store_values: Vec<String>,
@@ -3327,6 +3422,7 @@ fn a5_sample_to_parquet_rs(
         io_concurrency,
         dequant_lut,
         dequant_min,
+        scoff,
         interp,
     )?;
 
@@ -3486,6 +3582,16 @@ fn a5_raster_info_rs(
         } else {
             band_names_v
         };
+        let (scale, offset) = crate::geo::parse_band_scale_offset(ifd0, n_bands);
+        // metadata items as parallel vectors; band 0 = dataset level
+        let mut md_band: Vec<i32> = Vec::new();
+        let mut md_name: Vec<String> = Vec::new();
+        let mut md_value: Vec<String> = Vec::new();
+        for (sample, name, value) in crate::geo::parse_metadata_items(ifd0, n_bands) {
+            md_band.push(sample.map_or(0, |s| s as i32 + 1));
+            md_name.push(name);
+            md_value.push(value);
+        }
         let interleave = match ifd0.planar_configuration() {
             PlanarConfiguration::Chunky => "pixel",
             PlanarConfiguration::Planar => "band",
@@ -3528,7 +3634,12 @@ fn a5_raster_info_rs(
             n_bands = n_bands as i32,
             dtype = dtype,
             nodata = nodata,
+            scale = scale,
+            offset = offset,
             band_names = band_names,
+            md_band = md_band,
+            md_name = md_name,
+            md_value = md_value,
             interleave = interleave,
             compression = compression,
             block_width = block_w,

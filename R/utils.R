@@ -139,6 +139,7 @@ check_stats <- function(stat, call = rlang::caller_env()) {
 #' @noRd
 check_stat_context <- function(stats, dequant, as_vector = FALSE,
                                fractions_ok = TRUE,
+                               scoff = FALSE,
                                call = rlang::caller_env()) {
   has_frac <- "fractions" %in% stats
   has_cat <- has_frac || "majority" %in% stats
@@ -165,9 +166,9 @@ check_stat_context <- function(stats, dequant, as_vector = FALSE,
   if ("npix" %in% stats && has_frac) {
     cli::cli_abort("{.val npix} cannot be combined with {.val fractions}.", call = call)
   }
-  if (has_cat && !is.null(dequant)) {
+  if (has_cat && (!is.null(dequant) || isTRUE(scoff))) {
     cli::cli_abort(
-      "majority/fractions operate on raw integer codes and cannot be combined with {.arg dequant}.",
+      "majority/fractions operate on raw integer codes and cannot be combined with {.arg dequant} or {.arg scoff}.",
       call = call
     )
   }

@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment See [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
 #'   argument is ignored (one sample per cell) and the table metadata
@@ -45,6 +45,7 @@ a5_read_raster_arrow <- function(src,
                                  interp = c("nearest", "bilinear", "bicubic", "lanczos"),
                                  cpu_workers = NULL,
                                  io_concurrency = NULL,
+                                 scoff = FALSE,
                                  dequant = NULL,
                                  as_vector = FALSE,
                                  value_type = c("float64", "float32"),
@@ -78,8 +79,8 @@ a5_read_raster_arrow <- function(src,
   bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
   aoi_v <- check_aoi(aoi, resolution, containment)
   src_nodata_v <- check_src_nodata(src_nodata)
-  dequant_v <- check_dequant(dequant)
-  check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
+  dequant_v <- check_dequant(dequant, scoff)
+  check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE, scoff = scoff)
   warn_dequant_overviews(dequant, use_overviews)
   overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
@@ -100,6 +101,7 @@ a5_read_raster_arrow <- function(src,
       io_concurrency = io_concurrency,
       dequant_lut = dequant_v$lut,
       dequant_min = dequant_v$min,
+      scoff = dequant_v$scoff,
       interp = interp
     )
   } else {
@@ -118,6 +120,7 @@ a5_read_raster_arrow <- function(src,
       overview_target_m = overview_target_m,
       dequant_lut = dequant_v$lut,
       dequant_min = dequant_v$min,
+      scoff = dequant_v$scoff,
       overlay = identical(mode, "overlay"),
       subsamples = subsamples_v,
       cell_edge_m = cell_edge_metres(mode, resolution),
@@ -190,7 +193,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment See
 #'   [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
@@ -230,6 +233,7 @@ a5_raster_to_parquet <- function(src,
                                  compression = c("zstd", "snappy", "none"),
                                  cpu_workers = NULL,
                                  io_concurrency = NULL,
+                                 scoff = FALSE,
                                  dequant = NULL,
                                  use_overviews = is.null(dequant),
                                  store_opts = NULL) {
@@ -262,8 +266,8 @@ a5_raster_to_parquet <- function(src,
   bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
   aoi_v <- check_aoi(aoi, resolution, containment)
   src_nodata_v <- check_src_nodata(src_nodata)
-  dequant_v <- check_dequant(dequant)
-  check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE)
+  dequant_v <- check_dequant(dequant, scoff)
+  check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE, scoff = scoff)
   warn_dequant_overviews(dequant, use_overviews)
   overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
 
@@ -289,6 +293,7 @@ a5_raster_to_parquet <- function(src,
       io_concurrency = io_concurrency,
       dequant_lut = dequant_v$lut,
       dequant_min = dequant_v$min,
+      scoff = dequant_v$scoff,
       interp = interp
     )))
   }
@@ -312,6 +317,7 @@ a5_raster_to_parquet <- function(src,
     overview_target_m = overview_target_m,
     dequant_lut = dequant_v$lut,
     dequant_min = dequant_v$min,
+    scoff = dequant_v$scoff,
     overlay = identical(mode, "overlay"),
     subsamples = subsamples_v,
     cell_edge_m = cell_edge_metres(mode, resolution),
