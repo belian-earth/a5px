@@ -29,15 +29,14 @@ test_that("scale and offset are NA and metadata empty when undeclared", {
   expect_length(info$metadata, 0L)
 })
 
-test_that("scale and offset match gdalraster", {
-  skip_if_not_installed("gdalraster")
+test_that("scale and offset match GDAL, read through terra", {
+  skip_if_not_installed("terra")
   f <- scoff_tif()
   skip_if(f == "")
-  ds <- methods::new(gdalraster::GDALRaster, f)
-  on.exit(ds$close())
+  gdal <- terra::scoff(terra::rast(f))
   info <- a5_raster_info(f)
-  expect_equal(info$scale, c(ds$getScale(1L), ds$getScale(2L)))
-  expect_equal(info$offset, c(ds$getOffset(1L), ds$getOffset(2L)))
+  expect_equal(info$scale, as.numeric(gdal[, "scale"]))
+  expect_equal(info$offset, as.numeric(gdal[, "offset"]))
 })
 
 test_that("scoff equals the per-band dequant function at full resolution", {
