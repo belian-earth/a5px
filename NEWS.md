@@ -1,5 +1,17 @@
 # a5px (development version)
 
+* Requires a5R >= 0.6.0.9001, which stores the top cell byte XOR `0xFC` so
+  that vctrs gap-filling yields `NA` rather than the world cell. Older a5R
+  versions are incompatible: every cell id would be misread without error.
+  Resolution-30 cells whose id starts with `0xFC` are no longer mistaken for
+  `NA`.
+
+* `a5_aggregate()` now groups each cell by the coarse cell containing its
+  centre (`a5R::a5_cell_to_spatial_parent()`) instead of by index parent
+  (`a5R::a5_cell_to_parent()`). The A5 index hierarchy is not spatially
+  nested, so the index parent is often a neighbour of the containing cell.
+  Results change for existing inputs.
+
 * New `scoff` argument on `a5_read_raster()`, `a5_read_raster_arrow()` and
   `a5_raster_to_parquet()`: `scoff = TRUE` applies the scale and offset the
   file declares for each band (`value * scale + offset`) per pixel before

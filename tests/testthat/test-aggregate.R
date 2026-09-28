@@ -43,7 +43,7 @@ test_that("wide aggregate (mean) reduces to coarser cells with band cols intact"
   expect_equal(unique(a5R::a5_get_resolution(out$cell)), 5L)
 
   # Manual reference: group fine cells by their parent at res 5 and mean.
-  parents <- a5R::a5_cell_to_parent(fine$cell, resolution = 5L)
+  parents <- a5R::a5_cell_to_spatial_parent(fine$cell, resolution = 5L)
   ref_means <- tapply(fine$B02, a5R::a5_u64_to_hex(parents), mean)
   out_keys  <- a5R::a5_u64_to_hex(out$cell)
   expect_equal(out$B02[match(names(ref_means), out_keys)],
@@ -79,7 +79,7 @@ test_that("wide aggregate var / sd match per-group stats::var / stats::sd", {
   vv <- a5_aggregate(fine, to_resolution = 5L, stat = "var")
   ss <- a5_aggregate(fine, to_resolution = 5L, stat = "sd")
 
-  parents <- a5R::a5_cell_to_parent(fine$cell, resolution = 5L)
+  parents <- a5R::a5_cell_to_spatial_parent(fine$cell, resolution = 5L)
   ref_var <- tapply(fine$B02, a5R::a5_u64_to_hex(parents), function(x) {
     if (length(x) >= 2L) stats::var(x) else NA_real_
   })
@@ -107,7 +107,7 @@ test_that("list-column var reduces element-wise per band", {
   expect_setequal(names(out), c("cell", "value"))
   expect_true(all(lengths(out$value) == 3L))
 
-  parents <- a5R::a5_cell_to_parent(fine$cell, resolution = 5L)
+  parents <- a5R::a5_cell_to_spatial_parent(fine$cell, resolution = 5L)
   mat <- do.call(rbind, fine$value)
   ref <- aggregate.data.frame(mat, by = list(a5R::a5_u64_to_hex(parents)),
                               FUN = function(x) {
@@ -135,7 +135,7 @@ test_that("list-column aggregate reduces element-wise", {
   expect_equal(unique(a5R::a5_get_resolution(out$cell)), 5L)
 
   # Reference: stack per-row vectors and take mean per parent group, per band.
-  parents <- a5R::a5_cell_to_parent(fine$cell, resolution = 5L)
+  parents <- a5R::a5_cell_to_spatial_parent(fine$cell, resolution = 5L)
   mat <- do.call(rbind, fine$value)
   ref <- aggregate.data.frame(mat, by = list(a5R::a5_u64_to_hex(parents)), FUN = mean)
   out_keys <- a5R::a5_u64_to_hex(out$cell)

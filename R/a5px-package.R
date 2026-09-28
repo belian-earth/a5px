@@ -27,8 +27,9 @@
 #'
 #' @section Aggregating to coarser cells:
 #' - [a5_aggregate()] --- pure-R aggregator that lifts an existing
-#'   `a5_cell`-keyed tibble to a coarser resolution via the A5-native
-#'   centroid hierarchy ([a5R::a5_cell_to_parent()]). Avoids re-reading the
+#'   `a5_cell`-keyed tibble to a coarser resolution, grouping each cell by
+#'   the coarse cell containing its centre
+#'   ([a5R::a5_cell_to_spatial_parent()]). Avoids re-reading the
 #'   source raster when you already have a high-resolution result and want
 #'   it summarised. Handles both wide (one column per band) and list-column
 #'   layouts; list columns are reduced element-wise. Same `stat` vocabulary

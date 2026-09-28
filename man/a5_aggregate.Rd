@@ -33,20 +33,22 @@ selected columns reduced. The cell column retains its original name
 and the \link[a5R:a5_cell]{a5R::a5_cell} class.
 }
 \description{
-Lifts each row's A5 cell to its parent at \code{to_resolution} via
-\code{\link[a5R:a5_cell_to_parent]{a5R::a5_cell_to_parent()}} (the A5-native centroid hierarchy) and reduces
+Lifts each row's A5 cell to its spatial parent at \code{to_resolution} via
+\code{\link[a5R:a5_cell_to_spatial_parent]{a5R::a5_cell_to_spatial_parent()}} and reduces
 the selected value columns within each parent group. Avoids re-reading
 the source raster when you already have a high-resolution result and
 want it summarised at a coarser scale.
 }
 \details{
-Uses the centroid rule: each child cell is assigned to the parent whose
-centroid contains it. This is exact for centroid placement but only
-approximate for area, because A5 parent and child cells are not perfectly
-nested. For embedding-style and distributional summaries this is a
-non-issue; if you need conservative aggregation (counts that must sum
-exactly), use a higher input resolution so boundary error is small
-relative to cell area.
+Each fine cell is assigned to the coarse cell that contains its centre.
+The A5 index hierarchy (\code{\link[a5R:a5_cell_to_parent]{a5R::a5_cell_to_parent()}}) is not spatially
+nested: for about half of cells one resolution apart, the index parent is
+a neighbour of the containing cell, so grouping by it misplaces values.
+The spatial rule is exact for centre placement but approximate for area,
+because fine cells straddle coarse-cell boundaries. If you need
+conservative aggregation (counts that must sum exactly), use a higher
+input resolution so boundary error is small relative to cell area.
+Locating centres runs in parallel under \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}.
 
 Both layouts produced by \code{\link[=a5_read_raster]{a5_read_raster()}} are supported:
 \itemize{
