@@ -1,18 +1,20 @@
 #' Aggregate A5-keyed values to a coarser resolution
 #'
-#' Lifts each row's A5 cell to its parent at `to_resolution` via
-#' [a5R::a5_cell_to_parent()] (the A5-native centroid hierarchy) and reduces
+#' Lifts each row's A5 cell to its spatial parent at `to_resolution` via
+#' [a5R::a5_cell_to_spatial_parent()] and reduces
 #' the selected value columns within each parent group. Avoids re-reading
 #' the source raster when you already have a high-resolution result and
 #' want it summarised at a coarser scale.
 #'
-#' Uses the centroid rule: each child cell is assigned to the parent whose
-#' centroid contains it. This is exact for centroid placement but only
-#' approximate for area, because A5 parent and child cells are not perfectly
-#' nested. For embedding-style and distributional summaries this is a
-#' non-issue; if you need conservative aggregation (counts that must sum
-#' exactly), use a higher input resolution so boundary error is small
-#' relative to cell area.
+#' Each fine cell is assigned to the coarse cell that contains its centre.
+#' The A5 index hierarchy ([a5R::a5_cell_to_parent()]) is not spatially
+#' nested: for about half of cells one resolution apart, the index parent is
+#' a neighbour of the containing cell, so grouping by it misplaces values.
+#' The spatial rule is exact for centre placement but approximate for area,
+#' because fine cells straddle coarse-cell boundaries. If you need
+#' conservative aggregation (counts that must sum exactly), use a higher
+#' input resolution so boundary error is small relative to cell area.
+#' Locating centres runs in parallel under [a5R::a5_set_threads()].
 #'
 #' Both layouts produced by [a5_read_raster()] are supported:
 #'   - wide: one numeric column per band (default).
@@ -91,7 +93,7 @@ a5_aggregate <- function(x,
     )
   }
 
-  parents <- a5R::a5_cell_to_parent(cells, resolution = to_resolution)
+  parents <- a5R::a5_cell_to_spatial_parent(cells, resolution = to_resolution)
   gid <- vctrs::vec_group_id(parents)
   uniq_parents <- vctrs::vec_slice(parents, !duplicated(gid))
 

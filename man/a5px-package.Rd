@@ -37,8 +37,9 @@ returns one column per band, \code{TRUE} returns a single fixed-length list /
 
 \itemize{
 \item \code{\link[=a5_aggregate]{a5_aggregate()}} --- pure-R aggregator that lifts an existing
-\code{a5_cell}-keyed tibble to a coarser resolution via the A5-native
-centroid hierarchy (\code{\link[a5R:a5_cell_to_parent]{a5R::a5_cell_to_parent()}}). Avoids re-reading the
+\code{a5_cell}-keyed tibble to a coarser resolution, grouping each cell by
+the coarse cell containing its centre
+(\code{\link[a5R:a5_cell_to_spatial_parent]{a5R::a5_cell_to_spatial_parent()}}). Avoids re-reading the
 source raster when you already have a high-resolution result and want
 it summarised. Handles both wide (one column per band) and list-column
 layouts; list columns are reduced element-wise. Same \code{stat} vocabulary
