@@ -5,7 +5,7 @@
   face order, so **every cell id changes**. Cells keep their shape and
   position at every resolution except 1, so a read returns the same cells
   with the same values and pixel counts as before, under new ids, apart
-  from the `aoi` change below. Ids
+  from the `aoi` and centroid changes below. Ids
   written by earlier versions are still valid cells but in other places;
   convert stored data once with `a5R::a5_migrate()` and never mix ids from
   the two versions.
@@ -23,6 +23,13 @@
   `containment = "overlapping"`, a5R now also selects cells that overlap the
   AOI by a thin sliver, which earlier versions missed, so such reads return
   a few more cells; every other cell keeps its statistics.
+
+* `mode = "centroid"` builds the cells of a `bbox` (or of the raster's
+  envelope) from strips at most 90 degrees wide whose edges follow the
+  parallels. a5R joins polygon vertices by great circles, so a plain
+  rectangle bulged poleward on wide boxes, and a5R 0.9.9.9000 returns a
+  single cell for a rectangle spanning the globe. Boxes under one degree on
+  each side are unchanged.
 
 * `a5_aggregate()` now groups each cell by the coarse cell containing its
   centre (`a5R::a5_cell_to_supercell()`) instead of by index parent

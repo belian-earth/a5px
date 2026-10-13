@@ -443,16 +443,10 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
   if (is.null(bbox)) {
     bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src, store$keys, store$values))
   }
-  # a5R >= 0.4.0 replaced a5_grid() with a5_polygon_to_cells() (centre-in-polygon
-  # semantics, returns compacted cells). Uncompact to a uniform grid at the
+  # Cells whose centre lies in the bbox, uncompacted to a uniform grid at the
   # requested resolution so each cell gets one centroid sample.
-  cells <- a5R::a5_uncompact(
-    a5R::a5_polygon_to_cells(
-      wk::rct(bbox[1], bbox[2], bbox[3], bbox[4]),
-      resolution = resolution
-    ),
-    resolution = resolution
-  )
+  cells <- a5R::a5_uncompact(bbox_covering(bbox, resolution),
+                             resolution = resolution)
   if (length(cells) == 0L) {
     cli::cli_abort(
       "No A5 cells have centroids within the requested bbox at resolution {resolution}. Use a finer resolution or a larger bbox.",
@@ -460,6 +454,36 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
     )
   }
   cells
+}
+
+#' The A5 covering of the cells whose centre lies in a WGS 84 bbox.
+#' a5R joins polygon vertices by great circles, so a bare rectangle bulges
+#' poleward and one spanning the globe is degenerate (a5R 0.9.9.9000 returns a
+#' single cell for it). The bbox is split into strips at most 90 degrees wide
+#' with vertices every degree, so the edges follow the parallels.
+#' @noRd
+bbox_covering <- function(bbox, resolution) {
+  brk <- unique(c(seq(bbox[1], bbox[3], by = 90), bbox[3]))
+  if (length(brk) < 2L) brk <- bbox[c(1L, 3L)]
+  n <- length(brk)
+  strips <- Map(
+    function(x0, x1) bbox_strip(x0, bbox[2], x1, bbox[4]),
+    brk[-n], brk[-1L]
+  )
+  a5R::a5_union(
+    a5R::a5_polygon_to_cells(do.call(c, unname(strips)), resolution = resolution)
+  )
+}
+
+#' A lon/lat rectangle as a polygon with a vertex at least every `step`
+#' degrees along each edge.
+#' @noRd
+bbox_strip <- function(x0, y0, x1, y1, step = 1) {
+  sx <- seq(x0, x1, length.out = max(2, ceiling((x1 - x0) / step) + 1))
+  sy <- seq(y0, y1, length.out = max(2, ceiling((y1 - y0) / step) + 1))
+  x <- c(sx, rep(x1, length(sy) - 1), rev(sx)[-1], rep(x0, length(sy) - 1))
+  y <- c(rep(y0, length(sx)), sy[-1], rep(y1, length(sx) - 1), rev(sy)[-1])
+  wk::wk_polygon(wk::xy(x, y))
 }
 
 #' Centroid mode takes one sample per cell, so `stat` is meaningless there;
