@@ -95,10 +95,12 @@ is converted to the set of A5 cells at \code{resolution} selected by
 \code{containment}, and only those cells appear in the output. Selection is
 cell-level: an included cell receives the statistics of \strong{all} its
 valid pixels, including any outside the polygon, and an excluded cell
-receives nothing. Hole interiors are excluded. Combine with \code{bbox} to
-chunk a large AOI; without \code{bbox}, tiles are selected by the envelope
-of the AOI cells, so a very irregular AOI still reads its whole
-envelope. In \code{mode = "centroid"} the AOI cells are sampled directly.}
+receives nothing. Hole interiors are excluded, and several features
+form one AOI (the union of their cells). Combine with \code{bbox} to chunk a
+large AOI; without \code{bbox}, tiles are selected by the AOI's bounding box
+padded by three cell edges, so a very irregular AOI still reads its
+whole envelope. In \code{mode = "centroid"} the AOI cells are sampled
+directly.}
 
 \item{containment}{How \code{aoi} selects cells, as in
 \code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}}: \code{"centre"} (default) keeps cells whose

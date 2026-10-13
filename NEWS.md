@@ -1,13 +1,31 @@
-# a5px (development version)
+# a5px 0.2.0
 
-* Requires a5R >= 0.6.0.9001, which stores the top cell byte XOR `0xFC` so
-  that vctrs gap-filling yields `NA` rather than the world cell. Older a5R
-  versions are incompatible: every cell id would be misread without error.
-  Resolution-30 cells whose id starts with `0xFC` are no longer mistaken for
-  `NA`.
+* a5px now uses A5 1.0: the a5 Rust crate 1.0.0-beta.2 and a5R >= 0.9.9.9000.
+  A5 1.0 introduces permanent cell ids with a new space-filling curve and
+  face order, so **every cell id changes**. Cells keep their shape and
+  position at every resolution except 1, so a read returns the same cells
+  with the same values and pixel counts as before, under new ids, apart
+  from the `aoi` change below. Ids
+  written by earlier versions are still valid cells but in other places;
+  convert stored data once with `a5R::a5_migrate()` and never mix ids from
+  the two versions.
+
+* a5R stores the top cell byte XOR `0xFC` so that vctrs gap-filling yields
+  `NA` rather than the world cell. Older a5R versions are incompatible:
+  every cell id would be misread without error. Resolution-30 cells whose
+  id starts with `0xFC` are no longer mistaken for `NA`.
+
+* `aoi` is resolved to one A5 covering, the union of the per-feature
+  coverings `a5R::a5_polygon_to_cells()` now returns. Tiles are selected
+  from the AOI's bounding box padded by three cell edges, instead of the
+  envelope of the compacted cells' boundaries: compacted cells are index
+  parents, whose outlines need not contain the cells they stand for. With
+  `containment = "overlapping"`, a5R now also selects cells that overlap the
+  AOI by a thin sliver, which earlier versions missed, so such reads return
+  a few more cells; every other cell keeps its statistics.
 
 * `a5_aggregate()` now groups each cell by the coarse cell containing its
-  centre (`a5R::a5_cell_to_spatial_parent()`) instead of by index parent
+  centre (`a5R::a5_cell_to_supercell()`) instead of by index parent
   (`a5R::a5_cell_to_parent()`). The A5 index hierarchy is not spatially
   nested, so the index parent is often a neighbour of the containing cell.
   Results change for existing inputs.

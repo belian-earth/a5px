@@ -2834,7 +2834,7 @@ fn a5_read_raster_rs(
     cell_edge_m: f64,
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
-    aoi_cells_raw: List,
+    aoi_covering: Raw,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -2866,7 +2866,7 @@ fn a5_read_raster_rs(
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
-    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_cells_raw)).map(Arc::new);
+    let mask = CellMask::from_covering_bytes(aoi_covering.as_slice()).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(ReadArgs {
         src,
@@ -2999,7 +2999,7 @@ fn a5_read_raster_flat_rs(
     cell_edge_m: f64,
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
-    aoi_cells_raw: List,
+    aoi_covering: Raw,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -3036,7 +3036,7 @@ fn a5_read_raster_flat_rs(
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
-    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_cells_raw)).map(Arc::new);
+    let mask = CellMask::from_covering_bytes(aoi_covering.as_slice()).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(ReadArgs {
         src,
@@ -3146,7 +3146,7 @@ fn a5_raster_to_parquet_rs(
     cell_edge_m: f64,
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
-    aoi_cells_raw: List,
+    aoi_covering: Raw,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<String> {
@@ -3185,7 +3185,7 @@ fn a5_raster_to_parquet_rs(
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
-    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_cells_raw)).map(Arc::new);
+    let mask = CellMask::from_covering_bytes(aoi_covering.as_slice()).map(Arc::new);
 
 
     runtime.block_on(read_raster_to_parquet_async(
@@ -3261,7 +3261,7 @@ fn run_sample_at_cells(
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let interp_e = crate::sample::Interp::parse(interp)?;
-    let cells_in = crate::cell_raw::raw8_list_to_u64s(&cells_raw);
+    let cells_in = raw8_list_to_u64s(&cells_raw);
 
     let runtime = crate::runtime::shared_runtime()?;
 

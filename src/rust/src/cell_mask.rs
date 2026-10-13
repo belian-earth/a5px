@@ -1,9 +1,12 @@
 //! Cell-level area-of-interest mask.
 //!
-//! R computes the AOI as a compacted A5 cell set (`a5R::a5_polygon_to_cells`
-//! with the chosen containment) and hands over the compacted ids. Membership
-//! of a target-resolution cell is tested by walking its ancestors: a cell is
-//! in the AOI iff it, or one of its parents, is in the compacted set. The
+//! R computes the AOI as one A5 covering (the union of
+//! `a5R::a5_polygon_to_cells` over the AOI's features, with the chosen
+//! containment) and hands over its stored values: compacted cells of mixed
+//! resolution followed by a compaction marker. Membership of a
+//! target-resolution cell is tested by walking its ancestors: a cell is in
+//! the AOI iff it, or one of its index parents, is in the compacted set,
+//! which is how compaction defines the cells a covering stands for. The
 //! compacted set stays small for large AOIs, unlike the uncompacted set at
 //! fine resolutions, and `cell_to_parent` is a few bit operations.
 
@@ -15,6 +18,18 @@ pub(crate) struct CellMask {
 }
 
 impl CellMask {
+    /// Mask from a covering's stored values as little-endian 64-bit bytes
+    /// (a5R's `a5_covering` element). The compaction marker is not a cell
+    /// and is skipped. `None` when no cells remain (no mask).
+    pub(crate) fn from_covering_bytes(bytes: &[u8]) -> Option<Self> {
+        let cells: Vec<u64> = bytes
+            .chunks_exact(8)
+            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+            .filter(|&v| !a5::is_compaction_marker(v))
+            .collect();
+        Self::from_cells(&cells)
+    }
+
     /// `None` when `cells` is empty (no mask).
     pub(crate) fn from_cells(cells: &[u64]) -> Option<Self> {
         if cells.is_empty() {

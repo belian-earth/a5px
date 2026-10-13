@@ -28,14 +28,14 @@ formula (divisor n - 1) to match R's \code{\link[stats:var]{stats::var()}} / \co
 single-row groups are returned as \code{NA}.}
 }
 \value{
-A tibble keyed by parent cells at \code{to_resolution}, with the
+A tibble keyed by supercells at \code{to_resolution}, with the
 selected columns reduced. The cell column retains its original name
 and the \link[a5R:a5_cell]{a5R::a5_cell} class.
 }
 \description{
-Lifts each row's A5 cell to its spatial parent at \code{to_resolution} via
-\code{\link[a5R:a5_cell_to_spatial_parent]{a5R::a5_cell_to_spatial_parent()}} and reduces
-the selected value columns within each parent group. Avoids re-reading
+Lifts each row's A5 cell to its supercell at \code{to_resolution} via
+\code{\link[a5R:a5_cell_to_supercell]{a5R::a5_cell_to_supercell()}} and reduces
+the selected value columns within each supercell group. Avoids re-reading
 the source raster when you already have a high-resolution result and
 want it summarised at a coarser scale.
 }

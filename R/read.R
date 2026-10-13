@@ -107,10 +107,12 @@
 #'   `containment`, and only those cells appear in the output. Selection is
 #'   cell-level: an included cell receives the statistics of **all** its
 #'   valid pixels, including any outside the polygon, and an excluded cell
-#'   receives nothing. Hole interiors are excluded. Combine with `bbox` to
-#'   chunk a large AOI; without `bbox`, tiles are selected by the envelope
-#'   of the AOI cells, so a very irregular AOI still reads its whole
-#'   envelope. In `mode = "centroid"` the AOI cells are sampled directly.
+#'   receives nothing. Hole interiors are excluded, and several features
+#'   form one AOI (the union of their cells). Combine with `bbox` to chunk a
+#'   large AOI; without `bbox`, tiles are selected by the AOI's bounding box
+#'   padded by three cell edges, so a very irregular AOI still reads its
+#'   whole envelope. In `mode = "centroid"` the AOI cells are sampled
+#'   directly.
 #' @param containment How `aoi` selects cells, as in
 #'   [a5R::a5_polygon_to_cells()]: `"centre"` (default) keeps cells whose
 #'   centre lies inside the polygon; `"overlapping"` also keeps every cell
@@ -312,7 +314,7 @@ a5_read_raster <- function(src,
     cell_edge_m = cell_edge_metres(mode, resolution),
     bbox_align_block = bbox_align_block,
     tile_bbox = aoi_v$tile_bbox,
-    aoi_cells_raw = aoi_v$cells_raw
+    aoi_covering = aoi_v$covering_raw
   )
 
   cells <- new_a5_cell_from_rs(out$cell)

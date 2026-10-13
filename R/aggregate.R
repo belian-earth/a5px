@@ -1,8 +1,8 @@
 #' Aggregate A5-keyed values to a coarser resolution
 #'
-#' Lifts each row's A5 cell to its spatial parent at `to_resolution` via
-#' [a5R::a5_cell_to_spatial_parent()] and reduces
-#' the selected value columns within each parent group. Avoids re-reading
+#' Lifts each row's A5 cell to its supercell at `to_resolution` via
+#' [a5R::a5_cell_to_supercell()] and reduces
+#' the selected value columns within each supercell group. Avoids re-reading
 #' the source raster when you already have a high-resolution result and
 #' want it summarised at a coarser scale.
 #'
@@ -33,7 +33,7 @@
 #'   formula (divisor n - 1) to match R's [stats::var()] / [stats::sd()];
 #'   single-row groups are returned as `NA`.
 #'
-#' @returns A tibble keyed by parent cells at `to_resolution`, with the
+#' @returns A tibble keyed by supercells at `to_resolution`, with the
 #'   selected columns reduced. The cell column retains its original name
 #'   and the [a5R::a5_cell] class.
 #'
@@ -93,7 +93,7 @@ a5_aggregate <- function(x,
     )
   }
 
-  parents <- a5R::a5_cell_to_spatial_parent(cells, resolution = to_resolution)
+  parents <- a5R::a5_cell_to_supercell(cells, resolution = to_resolution)
   gid <- vctrs::vec_group_id(parents)
   uniq_parents <- vctrs::vec_slice(parents, !duplicated(gid))
 
