@@ -1,6 +1,6 @@
 # a5px 0.2.0
 
-* a5px now uses A5 1.0: the a5 Rust crate 1.0.0-beta.2 and a5R >= 0.9.9.9000.
+* a5px now uses A5 1.0: the a5 Rust crate 1.0.0-beta.2 and a5R >= 0.9.9.9001.
   A5 1.0 introduces permanent cell ids with a new space-filling curve and
   face order, so **every cell id changes**. Cells keep their shape and
   position at every resolution except 1, so a read returns the same cells
