@@ -31,7 +31,8 @@ fixtures <- function() {
                        file.path(dir, "left.tif")),
     right = write_tiled(terra::crop(stack[["a"]], terra::ext(mid, ext$xmax, ext$ymin, ext$ymax)),
                         file.path(dir, "right.tif")),
-    coarse = write_tiled(terra::aggregate(stack[["a"]], 2), file.path(dir, "coarse.tif"))
+    coarse = write_tiled(terra::aggregate(stack[["a"]], 2), file.path(dir, "coarse.tif")),
+    triple = write_tiled(stats::setNames(stack[["a"]] * 3, "a"), file.path(dir, "triple.tif"))
   )
 }
 
@@ -129,4 +130,51 @@ test_that("combining sources validates bands, pixel size, labels and npix", {
   )
   expect_error(a5_read_raster(character(), 13L), "character vector")
   expect_error(a5_read_raster(fx$a, 13L, separate = NA), "separate")
+})
+
+test_that("composite = 'mean' of stat 'mean' equals the pooled mean", {
+  fx <- fixtures()
+  pooled <- ord(a5_read_raster(c(fx$left, fx$right), 13L, use_overviews = FALSE))
+  comp <- ord(a5_read_raster(c(fx$left, fx$right), 13L, use_overviews = FALSE,
+                             composite = "mean"))
+  expect_equal(comp, pooled, ignore_attr = TRUE)
+})
+
+test_that("composite reduces per-source cell values", {
+  fx <- fixtures()
+  one <- ord(a5_read_raster(fx$whole, 13L, stat = c("mean", "max"), use_overviews = FALSE))
+  src <- c(fx$whole, fx$a, fx$triple)
+  med <- ord(a5_read_raster(src, 13L, stat = c("mean", "max"), use_overviews = FALSE,
+                            composite = "median"))
+  expect_equal(med$a_mean, one$a_mean)
+  expect_equal(med$a_max, one$a_max)
+  # captures: three everywhere for three full copies
+  n <- a5_read_raster(src, 13L, use_overviews = FALSE, composite = "count")
+  expect_true(all(n$a == 3))
+  # halves: two captures on the seam, one elsewhere
+  h <- a5_read_raster(c(fx$left, fx$right), 13L, use_overviews = FALSE, composite = "count")
+  expect_setequal(unique(h$a), c(1, 2))
+  sd3 <- ord(a5_read_raster(src, 13L, use_overviews = FALSE, composite = "sd"))
+  expect_equal(sd3$a, stats::sd(c(1, 1, 3)) * abs(one$a_mean))
+})
+
+test_that("composite works in centroid mode and on the Parquet path", {
+  fx <- fixtures()
+  src <- c(fx$whole, fx$a, fx$triple)
+  one <- ord(a5_read_raster(fx$whole, 16L, mode = "centroid"))
+  med <- ord(a5_read_raster(src, 16L, mode = "centroid", composite = "median"))
+  expect_equal(med, one, ignore_attr = TRUE)
+  skip_if_not_installed("arrow")
+  dest <- withr::local_tempfile(fileext = ".parquet")
+  a5_raster_to_parquet(src, dest, 13L, use_overviews = FALSE, composite = "count")
+  expect_true(all(as.data.frame(arrow::read_parquet(dest))$a == 3))
+})
+
+test_that("composite is validated", {
+  fx <- fixtures()
+  expect_error(a5_read_raster(c(fx$a, fx$b), 13L, separate = TRUE, composite = "mean"),
+               "separate")
+  expect_error(a5_read_raster(c(fx$a, fx$whole), 13L, stat = c("mean", "npix"),
+                              composite = "mean"), "npix")
+  expect_error(a5_read_raster(c(fx$a, fx$whole), 13L, composite = "mode"), "composite")
 })

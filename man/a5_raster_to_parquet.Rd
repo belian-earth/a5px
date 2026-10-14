@@ -27,11 +27,12 @@ a5_raster_to_parquet(
   dequant = NULL,
   use_overviews = is.null(dequant),
   store_opts = NULL,
-  separate = FALSE
+  separate = FALSE,
+  composite = NULL
 )
 }
 \arguments{
-\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, scoff, dequant, subsamples, interp, as_vector, use_overviews, store_opts, bbox_align, aoi, containment, separate}{See
+\item{src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, scoff, dequant, subsamples, interp, as_vector, use_overviews, store_opts, bbox_align, aoi, containment, separate, composite}{See
 \code{\link[=a5_read_raster]{a5_read_raster()}}.}
 
 \item{dest}{Output Parquet path.}

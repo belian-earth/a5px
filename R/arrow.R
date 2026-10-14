@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,separate See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,separate,composite See [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
 #'   argument is ignored (one sample per cell) and the table metadata
@@ -51,14 +51,15 @@ a5_read_raster_arrow <- function(src,
                                  value_type = c("float64", "float32"),
                                  use_overviews = is.null(dequant),
                                  store_opts = NULL,
-                                 separate = FALSE) {
+                                 separate = FALSE,
+                                 composite = NULL) {
   rlang::check_installed("arrow", reason = "to construct Arrow tables")
   store <- check_store_opts(store_opts)
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
-  srcs <- check_sources(src, separate, stats)
+  srcs <- check_sources(src, separate, stats, composite)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
   interp <- rlang::arg_match(interp)
@@ -94,6 +95,7 @@ a5_read_raster_arrow <- function(src,
       src = srcs$src,
       src_labels = srcs$labels,
       separate = srcs$separate,
+      composite = srcs$composite,
       store_keys = store$keys,
       store_values = store$values,
       cells_raw = vctrs::vec_data(cells_in),
@@ -112,6 +114,7 @@ a5_read_raster_arrow <- function(src,
       src = srcs$src,
       src_labels = srcs$labels,
       separate = srcs$separate,
+      composite = srcs$composite,
       store_keys = store$keys,
       store_values = store$values,
       resolution = resolution,
@@ -198,7 +201,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,separate See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,separate,composite See
 #'   [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
@@ -242,14 +245,15 @@ a5_raster_to_parquet <- function(src,
                                  dequant = NULL,
                                  use_overviews = is.null(dequant),
                                  store_opts = NULL,
-                                 separate = FALSE) {
+                                 separate = FALSE,
+                                 composite = NULL) {
   store <- check_store_opts(store_opts)
   check_scalar_string(dest, "dest")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
-  srcs <- check_sources(src, separate, stats)
+  srcs <- check_sources(src, separate, stats, composite)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
   interp <- rlang::arg_match(interp)
@@ -286,6 +290,7 @@ a5_raster_to_parquet <- function(src,
       src = srcs$src,
       src_labels = srcs$labels,
       separate = srcs$separate,
+      composite = srcs$composite,
       store_keys = store$keys,
       store_values = store$values,
       dest = dest,
@@ -310,6 +315,7 @@ a5_raster_to_parquet <- function(src,
     src = srcs$src,
     src_labels = srcs$labels,
     separate = srcs$separate,
+    composite = srcs$composite,
     store_keys = store$keys,
     store_values = store$values,
     dest = dest,

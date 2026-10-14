@@ -33,6 +33,7 @@ use proj4rs::transform::transform as proj_transform;
 
 use crate::error::{A5CogError, Result};
 use crate::geo::{build_src_proj, extract_geotransform, is_nodata, parse_nodata};
+use crate::composite::Reducer;
 use crate::sources::{check_same_pixel_size, open_sources, plan_bands, OpenedSource, SourceSpec};
 
 /// Output mirrors the forward path so the R-side wrappers don't need to
@@ -185,6 +186,7 @@ struct TileWork {
 pub(crate) async fn sample_at_cells_async(
     sources: Vec<SourceSpec>,
     separate: bool,
+    composite: Option<Reducer>,
     store_opts: crate::store::StoreOpts,
     cells_in: Vec<u64>,
     bands_idx: Vec<i32>,
@@ -196,6 +198,11 @@ pub(crate) async fn sample_at_cells_async(
     scoff: bool,
     interp: Interp,
 ) -> Result<CentroidOutput> {
+    if composite.is_some() && separate {
+        return Err(A5CogError::Invalid(
+            "composite reduces sources with the same bands, and does not apply to `separate = TRUE`".into(),
+        ));
+    }
     let opened = open_sources(sources, &store_opts).await?;
     let plan = plan_bands(&opened, separate, &bands_idx, &bands_names)?;
     if !separate {
@@ -226,30 +233,28 @@ pub(crate) async fn sample_at_cells_async(
         });
     let per_source = futures::future::try_join_all(jobs).await?;
 
-    let mut sum = vec![0.0f64; n_in * n_out];
-    let mut cnt = vec![0u32; n_in * n_out];
-    for (vals, n_loc, slots) in &per_source {
-        for i in 0..n_in {
+    // Each column is the mean of its valid samples (one per source in a
+    // pooled read, at most one under `separate`), or their composite.
+    let red = composite.unwrap_or(Reducer::Mean);
+    let mut cells_out = Vec::new();
+    let mut flat_out: Vec<f64> = Vec::new();
+    let mut col_vals: Vec<Vec<(f64, f64)>> = vec![Vec::new(); n_out];
+    for i in 0..n_in {
+        col_vals.iter_mut().for_each(Vec::clear);
+        for (vals, n_loc, slots) in &per_source {
             for (b, &col) in slots.iter().enumerate() {
                 let v = vals[i * n_loc + b];
                 if !v.is_nan() {
-                    sum[i * n_out + col] += v;
-                    cnt[i * n_out + col] += 1;
+                    col_vals[col].push((v, 1.0));
                 }
             }
         }
-    }
-    let mut cells_out = Vec::new();
-    let mut flat_out: Vec<f64> = Vec::new();
-    for i in 0..n_in {
-        let base = i * n_out;
-        if !cnt[base..base + n_out].iter().any(|&c| c > 0) {
+        if col_vals.iter().all(Vec::is_empty) {
             continue;
         }
         cells_out.push(cells_in[i]);
-        for b in 0..n_out {
-            let c = cnt[base + b];
-            flat_out.push(if c > 0 { sum[base + b] / c as f64 } else { f64::NAN });
+        for v in col_vals.iter_mut() {
+            flat_out.push(red.reduce(v));
         }
     }
     Ok(CentroidOutput { cells: cells_out, flat: flat_out, n_bands: n_out, band_names: plan.names })

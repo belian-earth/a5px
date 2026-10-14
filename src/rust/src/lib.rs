@@ -3,6 +3,7 @@ use extendr_api::prelude::*;
 mod band_fetch;
 mod cell_mask;
 mod cell_raw;
+mod composite;
 mod error;
 mod geo;
 mod grid_proj;

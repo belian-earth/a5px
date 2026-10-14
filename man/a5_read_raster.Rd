@@ -24,7 +24,8 @@ a5_read_raster(
   as_vector = FALSE,
   use_overviews = is.null(dequant),
   store_opts = NULL,
-  separate = FALSE
+  separate = FALSE,
+  composite = NULL
 )
 }
 \arguments{
@@ -238,6 +239,21 @@ Single-band files without band descriptions all report the band name
 \code{band_01}, so \code{separate = FALSE} cannot tell red, green and blue files
 apart and pools them into one band; set \code{separate = TRUE} for files
 that hold different bands.}
+
+\item{composite}{How several sources with the same bands combine.
+\code{NULL} (default) pools their pixels, as described under \code{separate}.
+Otherwise \code{stat} is computed for each source and cell, then reduced
+across the sources: \code{"mean"}, \code{"median"}, \code{"min"}, \code{"max"}, \code{"sum"},
+\code{"count"}, \code{"var"}, \code{"sd"} or \code{"majority"}. Each source's value is
+weighted by its valid pixel count in the cell, so a source that covers
+only a sliver of a cell (at a scene edge, or around masked cloud)
+carries little weight; \code{"min"}, \code{"max"}, \code{"sum"} and \code{"count"} are
+unweighted. \code{"count"} gives the number of sources with valid data in
+the cell, such as the number of cloud-free captures. With
+\code{stat = "mean"}, \code{composite = "mean"} equals the pooled mean. Cells are
+the shared grid, so the sources need not be aligned. In centroid mode
+each source's sample has weight 1. Not available with
+\code{separate = TRUE}, \code{"fractions"} or \code{"npix"}.}
 }
 \value{
 A \code{\link[tibble:tibble]{tibble::tibble()}} with columns:

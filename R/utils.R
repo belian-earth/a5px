@@ -36,11 +36,12 @@ check_scalar_count <- function(x, arg, min = 1L, call = rlang::caller_env()) {
   invisible(x)
 }
 
-#' Validate `src` and `separate`. Returns the sources, their labels (the
-#' names of `src`, else each file name without its extension) and the
-#' `separate` flag.
+#' Validate `src`, `separate` and `composite`. Returns the sources, their
+#' labels (the names of `src`, else each file name without its extension),
+#' the `separate` flag and the composite reducer (`""` for none).
 #' @noRd
-check_sources <- function(src, separate, stats, call = rlang::caller_env()) {
+check_sources <- function(src, separate, stats, composite = NULL,
+                          call = rlang::caller_env()) {
   if (!is.character(src) || length(src) == 0L || anyNA(src) || any(!nzchar(src))) {
     cli::cli_abort(
       "{.arg src} must be a character vector of paths or URLs.",
@@ -71,7 +72,27 @@ check_sources <- function(src, separate, stats, call = rlang::caller_env()) {
       )
     }
   }
-  list(src = unname(src), labels = unname(labels), separate = separate)
+  if (is.null(composite)) {
+    composite <- ""
+  } else {
+    composite <- rlang::arg_match0(
+      composite,
+      c("mean", "median", "min", "max", "sum", "count", "var", "sd", "majority"),
+      arg_nm = "composite", error_call = call
+    )
+    if (separate) {
+      cli::cli_abort(
+        "{.arg composite} combines sources with the same bands, so it does not apply with {.code separate = TRUE}.",
+        call = call
+      )
+    }
+    bad <- intersect(stats, c("fractions", "npix"))
+    if (length(bad)) {
+      cli::cli_abort("{.arg composite} does not apply to {.val {bad}}.", call = call)
+    }
+  }
+  list(src = unname(src), labels = unname(labels), separate = separate,
+       composite = composite)
 }
 
 #' Build an a5_cell vector from the b1..b8 raw fields returned by Rust.

@@ -74,6 +74,20 @@
 #'   `band_01`, so `separate = FALSE` cannot tell red, green and blue files
 #'   apart and pools them into one band; set `separate = TRUE` for files
 #'   that hold different bands.
+#' @param composite How several sources with the same bands combine.
+#'   `NULL` (default) pools their pixels, as described under `separate`.
+#'   Otherwise `stat` is computed for each source and cell, then reduced
+#'   across the sources: `"mean"`, `"median"`, `"min"`, `"max"`, `"sum"`,
+#'   `"count"`, `"var"`, `"sd"` or `"majority"`. Each source's value is
+#'   weighted by its valid pixel count in the cell, so a source that covers
+#'   only a sliver of a cell (at a scene edge, or around masked cloud)
+#'   carries little weight; `"min"`, `"max"`, `"sum"` and `"count"` are
+#'   unweighted. `"count"` gives the number of sources with valid data in
+#'   the cell, such as the number of cloud-free captures. With
+#'   `stat = "mean"`, `composite = "mean"` equals the pooled mean. Cells are
+#'   the shared grid, so the sources need not be aligned. In centroid mode
+#'   each source's sample has weight 1. Not available with
+#'   `separate = TRUE`, `"fractions"` or `"npix"`.
 #' @param resolution Integer scalar A5 resolution (0--30).
 #' @param stat Aggregation. One of `"mean"`, `"sum"`, `"count"`, `"min"`,
 #'   `"max"`, `"var"`, `"sd"`, `"majority"`, `"fractions"`, `"npix"`, or any
@@ -269,13 +283,14 @@ a5_read_raster <- function(src,
                            as_vector = FALSE,
                            use_overviews = is.null(dequant),
                            store_opts = NULL,
-                           separate = FALSE) {
+                           separate = FALSE,
+                           composite = NULL) {
   store <- check_store_opts(store_opts)
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
-  srcs <- check_sources(src, separate, stats)
+  srcs <- check_sources(src, separate, stats, composite)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
   interp <- rlang::arg_match(interp)
@@ -324,6 +339,7 @@ a5_read_raster <- function(src,
     src = srcs$src,
     src_labels = srcs$labels,
     separate = srcs$separate,
+    composite = srcs$composite,
     store_keys = store$keys,
     store_values = store$values,
     resolution = resolution,
@@ -420,6 +436,7 @@ read_raster_centroid <- function(srcs, resolution, bands_idx, bands_names,
     src = srcs$src,
     src_labels = srcs$labels,
     separate = srcs$separate,
+    composite = srcs$composite,
     store_keys = store$keys,
     store_values = store$values,
     cells_raw = vctrs::vec_data(cells),

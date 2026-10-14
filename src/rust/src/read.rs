@@ -26,6 +26,7 @@ use crate::geo::{
     GeoTransform, build_src_proj, extract_geotransform, is_nodata, parse_band_descriptions,
     parse_nodata,
 };
+use crate::composite::Reducer;
 use crate::sources::{
     check_same_pixel_size, open_sources, plan_bands, source_specs, OpenedSource, SourceSpec,
 };
@@ -822,6 +823,18 @@ impl<L: AccLayout> CellStore<L> {
 }
 
 impl<L: AccLayout> CellStore<L> {
+    /// Valid pixel weight of local cell `i`, band `b`: the pixel count, or
+    /// under overlay sampling the summed overlap fractions.
+    #[inline]
+    fn weight(&self, i: usize, b: usize) -> f64 {
+        let idx = i * self.n_out + b;
+        if self.cfg.has_cont {
+            self.cont[idx].finalise(Stat::Count)
+        } else {
+            self.cat[idx].iter().map(|&(_, w)| w).sum()
+        }
+    }
+
     /// Finalised value of `stat` for local cell `i`, band `b`.
     #[inline]
     fn value(&self, stat: Stat, i: usize, b: usize) -> f64 {
@@ -1798,6 +1811,16 @@ pub(crate) struct ReadArgs {
     pub bbox_align_block: bool,
     pub tile_bbox: Option<[f64; 4]>,
     pub mask: Option<Arc<CellMask>>,
+    /// Reduce per-source cell values across sources instead of pooling
+    /// their pixels.
+    pub composite: Option<Reducer>,
+}
+
+/// A finished read: one pooled aggregate, or one per source to be
+/// composited.
+enum ReadResult<L: AccLayout> {
+    Pooled(Aggregate<L>),
+    PerSource(Vec<Aggregate<L>>, Reducer),
 }
 
 macro_rules! dispatch_layout {
@@ -1812,7 +1835,10 @@ macro_rules! dispatch_layout {
 }
 
 async fn read_raster_async(a: ReadArgs) -> Result<Output> {
-    Ok(dispatch_layout!(a, |agg: Aggregate<_>| agg.into_output()))
+    Ok(dispatch_layout!(a, |r: ReadResult<_>| match r {
+        ReadResult::Pooled(agg) => agg.into_output(),
+        ReadResult::PerSource(aggs, red) => composite_output(aggs, red),
+    }))
 }
 
 /// Read and write straight to Parquet from the cell slab (no f64 flatten).
@@ -1824,9 +1850,85 @@ async fn read_raster_to_parquet_async(
     compression: crate::parquet_write::CompressionChoice,
     as_vector: bool,
 ) -> Result<()> {
-    dispatch_layout!(a, |agg: Aggregate<_>| {
-        crate::parquet_write::write_aggregate_parquet(&agg, dest, resolution, value_type, compression, as_vector)
+    dispatch_layout!(a, |r: ReadResult<_>| match r {
+        ReadResult::Pooled(agg) => {
+            crate::parquet_write::write_aggregate_parquet(&agg, dest, resolution, value_type, compression, as_vector)
+        }
+        ReadResult::PerSource(aggs, red) => {
+            let out = composite_output(aggs, red);
+            crate::parquet_write::write_arrow_parquet(
+                dest, out.cells, out.flat_values, out.n_bands, &out.band_names, &out.stats,
+                resolution, value_type, compression, as_vector,
+            )
+        }
     })
+}
+
+/// Composite per-source aggregates: for each cell and band, reduce each
+/// stat's per-source values, weighted by the source's valid pixel weight in
+/// that cell and band. Output cells are in first-seen order over the
+/// sources.
+fn composite_output<L: AccLayout>(aggs: Vec<Aggregate<L>>, red: Reducer) -> Output {
+    let t_flatten = Instant::now();
+    let n_out = aggs[0].n_out;
+    let stats = aggs[0].stats.clone();
+    let band_names = aggs[0].band_names.clone();
+    // (source, part, local index) of every source cell, grouped by output cell
+    let mut index: AHashMap<u64, u32> = AHashMap::new();
+    let mut cells: Vec<u64> = Vec::new();
+    let mut refs: Vec<(u32, u32, u32, u32)> = Vec::new();
+    for (s, agg) in aggs.iter().enumerate() {
+        for (pi, part) in agg.parts.iter().enumerate() {
+            for (i, &cell) in part.cells.iter().enumerate() {
+                let o = *index.entry(cell).or_insert_with(|| {
+                    cells.push(cell);
+                    (cells.len() - 1) as u32
+                });
+                refs.push((o, s as u32, pi as u32, i as u32));
+            }
+        }
+    }
+    drop(index);
+    refs.sort_unstable_by_key(|r| r.0);
+    let n = cells.len();
+    let mut flat: Vec<Vec<f64>> = (0..stats.len()).map(|_| vec![f64::NAN; n * n_out]).collect();
+    let mut vals: Vec<(f64, f64)> = Vec::new();
+    let mut k = 0;
+    while k < refs.len() {
+        let o = refs[k].0 as usize;
+        let mut end = k;
+        while end < refs.len() && refs[end].0 as usize == o {
+            end += 1;
+        }
+        let group = &refs[k..end];
+        for (si, &stat) in stats.iter().enumerate() {
+            for b in 0..n_out {
+                vals.clear();
+                for &(_, s, pi, i) in group {
+                    let part = &aggs[s as usize].parts[pi as usize];
+                    let w = part.weight(i as usize, b);
+                    let v = part.value(stat, i as usize, b);
+                    if w > 0.0 && v.is_finite() {
+                        vals.push((v, w));
+                    }
+                }
+                flat[si][o * n_out + b] = red.reduce(&mut vals);
+            }
+        }
+        k = end;
+    }
+    if profile_enabled() {
+        T_FLATTEN_NS.fetch_add(t_flatten.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    Output {
+        cells,
+        flat_values: flat,
+        n_bands: n_out,
+        band_names,
+        stats: stats.iter().map(|s| s.as_str().to_string()).collect(),
+        fractions: None,
+        npix: None,
+    }
 }
 
 /// Settings shared by every source of a read, for [`plan_source`].
@@ -2064,16 +2166,23 @@ fn plan_source(
     }))
 }
 
-async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<Aggregate<L>> {
+async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<L>> {
     let ReadArgs {
         sources, separate, store_opts, resolution, stats, bands_idx, bands_names, bbox_lonlat,
         src_nodata_override, cpu_workers, io_concurrency, overview_target_m, dequant, scoff,
-        overlay, fractions, npix, bbox_align_block, tile_bbox, mask,
+        overlay, fractions, npix, bbox_align_block, tile_bbox, mask, composite,
     } = a;
     let cfg = AccCfg::from_stats(&stats, fractions, npix);
     if separate && npix {
         return Err(A5CogError::Invalid(
             "\"npix\" counts the pixels of one raster; with `separate = TRUE` use each band's count".into(),
+        ));
+    }
+    if composite.is_some() && (separate || fractions || npix) {
+        return Err(A5CogError::Invalid(
+            "composite reduces sources with the same bands, and does not apply to \"fractions\", \
+             \"npix\" or `separate = TRUE`"
+                .into(),
         ));
     }
     let prof_call = profile_enabled();
@@ -2121,7 +2230,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<Aggregate<L
         T_PLAN_NS.fetch_add(t_plan.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     if plans.is_empty() {
-        return Ok(Aggregate::empty(band_names, n_out, stats, fractions, cfg));
+        return Ok(ReadResult::Pooled(Aggregate::empty(band_names, n_out, stats, fractions, cfg)));
     }
     let t_pipe = Instant::now();
     // Under block alignment the whole tile is in, so the per-pixel bbox
@@ -2187,7 +2296,14 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<Aggregate<L
         })
         .max()
         .unwrap_or(0);
-    let parts: Arc<PartitionedStore<L>> = Arc::new(PartitionedStore::new(log2p, n_out, cfg, expected_cells));
+    // One store, or one per source when compositing.
+    let per_source = composite.is_some();
+    let n_stores = if per_source { plans.len() } else { 1 };
+    let parts: Arc<Vec<PartitionedStore<L>>> = Arc::new(
+        (0..n_stores)
+            .map(|_| PartitionedStore::new(log2p, n_out, cfg, expected_cells))
+            .collect(),
+    );
     let mut consumer_handles: Vec<tokio::task::JoinHandle<Result<()>>> =
         Vec::with_capacity(cpu_workers);
     for _ in 0..cpu_workers {
@@ -2266,7 +2382,8 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<Aggregate<L
                     data_n_bands: data_n_bands_eff,
                     band_offsets: offsets_arc,
                 };
-                process_tile_striped::<L>(pool.as_deref(), &ctx, &td, &parts)?;
+                let store = &parts[if per_source { item.src } else { 0 }];
+                process_tile_striped::<L>(pool.as_deref(), &ctx, &td, store)?;
             }
             Ok::<(), A5CogError>(())
         }));
@@ -2407,14 +2524,21 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<Aggregate<L
         T_PIPELINE_NS.fetch_add(t_pipe.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     let t_reduce = Instant::now();
-    let parts = Arc::try_unwrap(parts)
-        .map_err(|_| A5CogError::Internal("partition store still shared after workers joined".into()))?
-        .into_parts()?;
-    let agg = Aggregate::from_parts(parts, n_out, band_names, stats, fractions, index_pool);
+    let stores = Arc::try_unwrap(parts)
+        .map_err(|_| A5CogError::Internal("partition store still shared after workers joined".into()))?;
+    let mut aggs: Vec<Aggregate<L>> = Vec::with_capacity(stores.len());
+    for st in stores {
+        aggs.push(Aggregate::from_parts(
+            st.into_parts()?, n_out, band_names.clone(), stats.clone(), fractions, index_pool.clone(),
+        ));
+    }
     if profile_enabled() {
         T_REDUCE_NS.fetch_add(t_reduce.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
-    Ok(agg)
+    Ok(match composite {
+        Some(red) => ReadResult::PerSource(aggs, red),
+        None => ReadResult::Pooled(aggs.pop().expect("one pooled store")),
+    })
 }
 
 /// A finished read before flattening: the partition slabs plus output
@@ -2919,6 +3043,8 @@ fn projected_tile_range(
 ///   uses the source strings.
 /// @param separate Read each source's bands as separate columns rather than
 ///   pooling the sources as one raster.
+/// @param composite Reducer across sources' per-cell values ("mean",
+///   "median", ...); empty pools the sources' pixels.
 /// @param resolution A5 resolution (0--30).
 /// @param stats Character vector of stats: subset of "mean", "sum", "count",
 ///   "min", "max". Length-1 behaves identically to the previous scalar API.
@@ -2945,6 +3071,7 @@ fn a5_read_raster_rs(
     src: Vec<String>,
     src_labels: Vec<String>,
     separate: bool,
+    composite: &str,
     resolution: i32,
     stats: Vec<String>,
     bands_idx: Vec<i32>,
@@ -2999,6 +3126,7 @@ fn a5_read_raster_rs(
     let out: Output = runtime.block_on(read_raster_async(ReadArgs {
         sources: source_specs(src, src_labels)?,
         separate,
+        composite: Reducer::parse(composite)?,
         store_opts,
         resolution,
         stats: stats_e,
@@ -3113,6 +3241,7 @@ fn a5_read_raster_flat_rs(
     src: Vec<String>,
     src_labels: Vec<String>,
     separate: bool,
+    composite: &str,
     resolution: i32,
     stats: Vec<String>,
     bands_idx: Vec<i32>,
@@ -3172,6 +3301,7 @@ fn a5_read_raster_flat_rs(
     let out: Output = runtime.block_on(read_raster_async(ReadArgs {
         sources: source_specs(src, src_labels)?,
         separate,
+        composite: Reducer::parse(composite)?,
         store_opts,
         resolution,
         stats: stats_e,
@@ -3259,6 +3389,7 @@ fn a5_raster_to_parquet_rs(
     src: Vec<String>,
     src_labels: Vec<String>,
     separate: bool,
+    composite: &str,
     dest: &str,
     resolution: i32,
     stats: Vec<String>,
@@ -3326,6 +3457,7 @@ fn a5_raster_to_parquet_rs(
         ReadArgs {
         sources: source_specs(src, src_labels)?,
         separate,
+        composite: Reducer::parse(composite)?,
         store_opts,
         resolution,
         stats: stats_e,
@@ -3376,6 +3508,7 @@ fn run_sample_at_cells(
     src: Vec<String>,
     src_labels: Vec<String>,
     separate: bool,
+    composite: &str,
     store_opts: StoreOpts,
     cells_raw: List,
     bands_idx: Vec<i32>,
@@ -3405,6 +3538,7 @@ fn run_sample_at_cells(
     runtime.block_on(crate::sample::sample_at_cells_async(
         source_specs(src, src_labels)?,
         separate,
+        Reducer::parse(composite)?,
         store_opts,
         cells_in,
         bands_idx,
@@ -3423,6 +3557,7 @@ fn a5_sample_at_cells_rs(
     src: Vec<String>,
     src_labels: Vec<String>,
     separate: bool,
+    composite: &str,
     cells_raw: List,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
@@ -3441,6 +3576,7 @@ fn a5_sample_at_cells_rs(
         src,
         src_labels,
         separate,
+        composite,
         store_opts,
         cells_raw,
         bands_idx,
@@ -3481,6 +3617,7 @@ fn a5_sample_at_cells_flat_rs(
     src: Vec<String>,
     src_labels: Vec<String>,
     separate: bool,
+    composite: &str,
     cells_raw: List,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
@@ -3499,6 +3636,7 @@ fn a5_sample_at_cells_flat_rs(
         src,
         src_labels,
         separate,
+        composite,
         store_opts,
         cells_raw,
         bands_idx,
@@ -3538,6 +3676,7 @@ fn a5_sample_to_parquet_rs(
     src: Vec<String>,
     src_labels: Vec<String>,
     separate: bool,
+    composite: &str,
     dest: &str,
     resolution: i32,
     cells_raw: List,
@@ -3563,6 +3702,7 @@ fn a5_sample_to_parquet_rs(
         src,
         src_labels,
         separate,
+        composite,
         store_opts,
         cells_raw,
         bands_idx,
