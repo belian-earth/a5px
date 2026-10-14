@@ -51,9 +51,11 @@ pak::pak("belian-earth/a5view")
 Genome](https://source.coop/earthgenome/sentinel2-temporal-mosaics)
 publishes annual cloud-free Sentinel-2 mosaics as one COG per band. This
 reads the red, green and blue bands of a 2023 tile over the fjords of
-south Greenland into resolution-14 cells, about 360 m across. With the
-default `stat = "mean"`, a5px reads the coarsest COG overview that still
-has several pixels per cell, rather than every 10 m pixel.
+south Greenland into resolution-14 cells, about 360 m across.
+`separate = TRUE` makes each file a column, named after the file, and
+the three files share one fetch queue. With the default `stat = "mean"`,
+a5px reads the coarsest COG overview that still has several pixels per
+cell, rather than every 10 m pixel.
 
 ``` r
 library(a5px)
@@ -62,29 +64,23 @@ tile <- paste0(
   "https://data.source.coop/earthgenome/sentinel2-temporal-mosaics/",
   "23VMH_2023-01-01_2024-01-01/"
 )
+rgb <- paste0(tile, c("B04", "B03", "B02"), ".tif") # red, green, blue
 
-# Read one band per file and name its column after the band
-read_band <- function(band, ...) {
-  cells <- a5_read_raster(paste0(tile, band, ".tif"), ...)
-  setNames(cells, c("cell", band))
-}
-
-rgb <- c("B04", "B03", "B02") # red, green, blue
-fjords <- Reduce(merge, lapply(rgb, read_band, resolution = 14L))
-tibble::as_tibble(fjords)
+fjords <- a5_read_raster(rgb, resolution = 14L, separate = TRUE)
+fjords
 #> # A tibble: 95,875 × 4
 #>    cell               B04   B03   B02
 #>    <a5_cell>        <dbl> <dbl> <dbl>
-#>  1 0da0531580000000  298.  416.  537.
-#>  2 0da053bf80000000  269.  359.  458.
-#>  3 0da053c080000000  274.  382.  510.
-#>  4 0da053c180000000  319   434   519 
-#>  5 0da053c280000000  302.  422.  563.
-#>  6 0da053c380000000  293.  406.  525.
-#>  7 0da053c480000000  304.  410.  517.
-#>  8 0da053c580000000  306.  421.  540.
-#>  9 0da053c680000000  306.  416.  535.
-#> 10 0da053c780000000  298.  399.  502.
+#>  1 0da201e280000000 8468. 8411. 8809.
+#>  2 0da201de80000000 7548. 7455. 7794.
+#>  3 0da2be2780000000 7176. 7007. 7260.
+#>  4 0da201e080000000 8523. 8439. 8826.
+#>  5 0da2be2980000000 6389. 6308. 6632.
+#>  6 0da2be2580000000 8230. 7798. 8373.
+#>  7 0da2f30c80000000  846.  818.  753.
+#>  8 0da2f30a80000000  764.  723.  637.
+#>  9 0da2f03a80000000 1188. 1190. 1176.
+#> 10 0da1ff1080000000 8863. 8560. 8758.
 #> # ℹ 95,865 more rows
 ```
 
@@ -108,10 +104,9 @@ ggplot(fjords, aes(cell = cell, fill = cells_rgb(B04, B03, B02, range = c(0, 450
 about 180 m across, with outlines to show the pentagonal cells:
 
 ``` r
-glacier <- Reduce(merge, lapply(
-  rgb, read_band,
-  resolution = 15L, bbox = c(-45.36, 61.11, -45.14, 61.21)
-))
+glacier <- a5_read_raster(
+  rgb, resolution = 15L, bbox = c(-45.36, 61.11, -45.14, 61.21), separate = TRUE
+)
 
 ggplot(glacier, aes(cell = cell, fill = cells_rgb(B04, B03, B02, range = c(0, 4500)))) +
   geom_a5(colour = "white", linewidth = 0.05) +
@@ -146,9 +141,11 @@ a5_store_config(src)  # resolved object store configuration for a remote src
 
 Their main arguments:
 
-- `src`: a path or URL: local, `file://`, `http(s)://`, `s3://`, `gs://`
-  or `az://`. Remote reads fetch byte ranges and never download the
-  whole file.
+- `src`: one or more paths or URLs: local, `file://`, `http(s)://`,
+  `s3://`, `gs://` or `az://`. Remote reads fetch byte ranges and never
+  download the whole file.
+- `separate`, `composite`: how several files combine (see [Several
+  files](#several-files)).
 - `resolution`: A5 resolution, 0 to 30. `a5R::a5_cell_area()` gives the
   cell area at each.
 - `stat`: one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`,
@@ -168,6 +165,34 @@ Their main arguments:
 - `cpu_workers`, `io_concurrency`: tile-level concurrency.
 - `store_opts`: object store options (see [Remote
   sources](#remote-sources)).
+
+### Several files
+
+Several files are read in one pass and share the fetch queue and
+workers. How they combine depends on what they hold:
+
+``` r
+# bands stored one per file: one column per file, named by names(src)
+# or the file name
+a5_read_raster(c(red = red_url, nir = nir_url), 14L, separate = TRUE)
+
+# adjacent tiles, or repeat captures, of one product: pixels pooled
+a5_read_raster(c(tile_a, tile_b), 14L)
+
+# a statistic per capture, reduced across captures for each cell
+a5_read_raster(dates, 14L, composite = "median")
+a5_read_raster(dates, 14L, composite = "count") # captures per cell
+```
+
+Pooled files must have the same bands and pixel size. Every valid pixel
+enters its cell once, so cells on a seam between tiles combine exactly.
+Where files overlap, every capture counts, unlike GDAL’s last-wins rule:
+`sum` and `count` include the overlap once per file. `composite` instead
+computes `stat` for each file, then reduces across files per cell,
+weighting each file by its valid pixel count there; the cell grid is
+shared, so the files need not be aligned. Single-band files without band
+descriptions look identical to the pooling check, so set
+`separate = TRUE` for files that hold different bands.
 
 ### Several statistics in one pass
 

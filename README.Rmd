@@ -62,9 +62,11 @@ pak::pak("belian-earth/a5view")
 [Earth Genome](https://source.coop/earthgenome/sentinel2-temporal-mosaics)
 publishes annual cloud-free Sentinel-2 mosaics as one COG per band. This
 reads the red, green and blue bands of a 2023 tile over the fjords of
-south Greenland into resolution-14 cells, about 360 m across. With the
-default `stat = "mean"`, a5px reads the coarsest COG overview that still
-has several pixels per cell, rather than every 10 m pixel.
+south Greenland into resolution-14 cells, about 360 m across.
+`separate = TRUE` makes each file a column, named after the file, and
+the three files share one fetch queue. With the default `stat = "mean"`,
+a5px reads the coarsest COG overview that still has several pixels per
+cell, rather than every 10 m pixel.
 
 ```{r read, message = FALSE}
 library(a5px)
@@ -73,16 +75,10 @@ tile <- paste0(
   "https://data.source.coop/earthgenome/sentinel2-temporal-mosaics/",
   "23VMH_2023-01-01_2024-01-01/"
 )
+rgb <- paste0(tile, c("B04", "B03", "B02"), ".tif") # red, green, blue
 
-# Read one band per file and name its column after the band
-read_band <- function(band, ...) {
-  cells <- a5_read_raster(paste0(tile, band, ".tif"), ...)
-  setNames(cells, c("cell", band))
-}
-
-rgb <- c("B04", "B03", "B02") # red, green, blue
-fjords <- Reduce(merge, lapply(rgb, read_band, resolution = 14L))
-tibble::as_tibble(fjords)
+fjords <- a5_read_raster(rgb, resolution = 14L, separate = TRUE)
+fjords
 ```
 
 a5view's `geom_a5()` draws the cells as a ggplot2 layer, and
@@ -103,10 +99,9 @@ ggplot(fjords, aes(cell = cell, fill = cells_rgb(B04, B03, B02, range = c(0, 450
 about 180 m across, with outlines to show the pentagonal cells:
 
 ```{r glacier}
-glacier <- Reduce(merge, lapply(
-  rgb, read_band,
-  resolution = 15L, bbox = c(-45.36, 61.11, -45.14, 61.21)
-))
+glacier <- a5_read_raster(
+  rgb, resolution = 15L, bbox = c(-45.36, 61.11, -45.14, 61.21), separate = TRUE
+)
 
 ggplot(glacier, aes(cell = cell, fill = cells_rgb(B04, B03, B02, range = c(0, 4500)))) +
   geom_a5(colour = "white", linewidth = 0.05) +
@@ -139,9 +134,11 @@ a5_store_config(src)  # resolved object store configuration for a remote src
 
 Their main arguments:
 
-- `src`: a path or URL: local, `file://`, `http(s)://`, `s3://`,
-  `gs://` or `az://`. Remote reads fetch byte ranges and never download
-  the whole file.
+- `src`: one or more paths or URLs: local, `file://`, `http(s)://`,
+  `s3://`, `gs://` or `az://`. Remote reads fetch byte ranges and never
+  download the whole file.
+- `separate`, `composite`: how several files combine (see [Several
+  files](#several-files)).
 - `resolution`: A5 resolution, 0 to 30. `a5R::a5_cell_area()` gives the
   cell area at each.
 - `stat`: one or more of `"mean"`, `"sum"`, `"count"`, `"min"`,
@@ -161,6 +158,34 @@ Their main arguments:
 - `cpu_workers`, `io_concurrency`: tile-level concurrency.
 - `store_opts`: object store options (see [Remote
   sources](#remote-sources)).
+
+### Several files
+
+Several files are read in one pass and share the fetch queue and
+workers. How they combine depends on what they hold:
+
+```r
+# bands stored one per file: one column per file, named by names(src)
+# or the file name
+a5_read_raster(c(red = red_url, nir = nir_url), 14L, separate = TRUE)
+
+# adjacent tiles, or repeat captures, of one product: pixels pooled
+a5_read_raster(c(tile_a, tile_b), 14L)
+
+# a statistic per capture, reduced across captures for each cell
+a5_read_raster(dates, 14L, composite = "median")
+a5_read_raster(dates, 14L, composite = "count") # captures per cell
+```
+
+Pooled files must have the same bands and pixel size. Every valid pixel
+enters its cell once, so cells on a seam between tiles combine exactly.
+Where files overlap, every capture counts, unlike GDAL's last-wins rule:
+`sum` and `count` include the overlap once per file. `composite`
+instead computes `stat` for each file, then reduces across files per
+cell, weighting each file by its valid pixel count there; the cell grid
+is shared, so the files need not be aligned. Single-band files without
+band descriptions look identical to the pooling check, so set
+`separate = TRUE` for files that hold different bands.
 
 ### Several statistics in one pass
 
