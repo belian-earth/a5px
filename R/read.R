@@ -112,7 +112,9 @@
 #'   large AOI; without `bbox`, tiles are selected by the AOI's bounding box
 #'   padded by three cell edges, so a very irregular AOI still reads its
 #'   whole envelope. In `mode = "centroid"` the AOI cells are sampled
-#'   directly.
+#'   directly. Polygon edges are great circles, as in a5R, so a
+#'   [wk::rct()] bulges poleward rather than following the parallels, and
+#'   one 180 degrees wide or more is an error unless it covers the globe.
 #' @param containment How `aoi` selects cells, as in
 #'   [a5R::a5_polygon_to_cells()]: `"centre"` (default) keeps cells whose
 #'   centre lies inside the polygon; `"overlapping"` also keeps every cell
@@ -314,7 +316,7 @@ a5_read_raster <- function(src,
     cell_edge_m = cell_edge_metres(mode, resolution),
     bbox_align_block = bbox_align_block,
     tile_bbox = aoi_v$tile_bbox,
-    aoi_covering = aoi_v$covering_raw
+    aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
   )
 
   cells <- new_a5_cell_from_rs(out$cell)
@@ -427,10 +429,7 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
     # AOI cells are the sample set; a bbox further restricts by centroid.
     cells <- a5R::a5_uncompact(aoi_cells, resolution = resolution)
     if (!is.null(bbox)) {
-      ll <- a5R::a5_cell_to_lonlat(cells, as_dataframe = TRUE)
-      keep <- ll$lon >= bbox[1] & ll$lon <= bbox[3] &
-        ll$lat >= bbox[2] & ll$lat <= bbox[4]
-      cells <- cells[keep]
+      cells <- cells_centred_in(cells, bbox)
     }
     if (length(cells) == 0L) {
       cli::cli_abort(
@@ -443,10 +442,14 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
   if (is.null(bbox)) {
     bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src, store$keys, store$values))
   }
-  # Cells whose centre lies in the bbox, uncompacted to a uniform grid at the
-  # requested resolution so each cell gets one centroid sample.
-  cells <- a5R::a5_uncompact(bbox_covering(bbox, resolution),
-                             resolution = resolution)
+  # Cells whose centre lies in the bbox, at the requested resolution so each
+  # cell gets one centroid sample. The candidates come from a covering of the
+  # bbox padded past the covering's residual bulge.
+  candidates <- a5R::a5_uncompact(
+    bbox_covering(pad_bbox(bbox, bbox_pad_deg), resolution),
+    resolution = resolution
+  )
+  cells <- cells_centred_in(candidates, bbox)
   if (length(cells) == 0L) {
     cli::cli_abort(
       "No A5 cells have centroids within the requested bbox at resolution {resolution}. Use a finer resolution or a larger bbox.",
@@ -456,12 +459,34 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
   cells
 }
 
-#' The A5 covering of the cells whose centre lies in a WGS 84 bbox.
-#' a5R joins polygon vertices by great circles, so a bare rectangle bulges
-#' poleward (a 20 degree edge along 10N peaks at 10.15N). The bbox is split
-#' into strips at most 90 degrees wide with vertices every degree, so the
-#' edges follow the parallels to within about 100 m. Strips also avoid the
-#' degenerate whole-globe rectangle of a5R before 0746500.
+#' The cells of `cells` whose centre lies in a WGS 84 bbox.
+#' @noRd
+cells_centred_in <- function(cells, bbox) {
+  ll <- a5R::a5_cell_to_lonlat(cells, as_dataframe = TRUE)
+  cells[ll$lon >= bbox[1] & ll$lon <= bbox[3] &
+          ll$lat >= bbox[2] & ll$lat <= bbox[4]]
+}
+
+#' Degrees of padding that hold every cell centred in a bbox inside
+#' `bbox_covering()` of the padded bbox. A 1 degree chord along a parallel
+#' strays at most 0.0011 degrees (about 120 m, at 45 degrees latitude) from
+#' it; meridian edges are exact.
+#' @noRd
+bbox_pad_deg <- 0.01
+
+#' `bbox` grown by `pad` degrees on each side, clamped to the globe.
+#' @noRd
+pad_bbox <- function(bbox, pad) {
+  c(max(bbox[1] - pad, -180), max(bbox[2] - pad, -90),
+    min(bbox[3] + pad, 180), min(bbox[4] + pad, 90))
+}
+
+#' The A5 covering of the cells whose centre lies in a WGS 84 bbox, to within
+#' the bulge of its edges. a5R joins polygon vertices by great circles, so a
+#' bare rectangle bulges poleward (a 20 degree edge along 10N peaks at
+#' 10.15N), and one 180 degrees wide or more is an error unless it covers the
+#' globe. The bbox is split into strips at most 90 degrees wide with vertices
+#' every degree, so the edges follow the parallels to within `bbox_pad_deg`.
 #' @noRd
 bbox_covering <- function(bbox, resolution) {
   brk <- unique(c(seq(bbox[1], bbox[3], by = 90), bbox[3]))

@@ -22,13 +22,15 @@
   parents, whose outlines need not contain the cells they stand for. With
   `containment = "overlapping"`, a5R now also selects cells that overlap the
   AOI by a thin sliver, which earlier versions missed, so such reads return
-  a few more cells; every other cell keeps its statistics.
+  a few more cells; every other cell keeps its statistics. An `aoi` covering
+  the whole globe now selects every cell, and a `wk::rct()` 180 degrees wide
+  or more that does not is an error.
 
-* `mode = "centroid"` builds the cells of a `bbox` (or of the raster's
-  envelope) from strips at most 90 degrees wide whose edges follow the
-  parallels. a5R joins polygon vertices by great circles, so a plain
-  rectangle bulged poleward on wide boxes and selected cells whose centres
-  lie outside the box. Boxes under one degree on each side are unchanged.
+* `mode = "centroid"` now samples exactly the cells whose centre lies in the
+  `bbox` (or the raster's envelope). a5R joins polygon vertices by great
+  circles, so the plain rectangle used before bulged poleward and selected
+  cells centred outside the box. Only cells centred in that bulge change: up
+  to 120 m for a box 1 degree wide, growing with width.
 
 * `a5_aggregate()` now groups each cell by the coarse cell containing its
   centre (`a5R::a5_cell_to_supercell()`) instead of by index parent

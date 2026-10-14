@@ -1,17 +1,17 @@
 #' Resolve the user-facing `aoi` / `containment` args into one A5 covering
-#' (an `a5_covering` of length one, or NULL), its raw form for Rust (the
-#' covering's compacted cells and compaction marker as little-endian 64-bit
-#' values), and a WGS 84 envelope that drives tile selection when no `bbox`
-#' is given. The envelope is the AOI's bounding box padded by `aoi_pad_edges`
-#' cell edges, enough to hold every pixel of every selected cell: under
-#' `"overlapping"` a boundary cell keeps its full statistics. Padding the
-#' geometry costs nothing, where the cells' own boundaries would need the
-#' covering expanded to full resolution.
+#' (an `a5_covering` of length one, or NULL), its compacted cells for Rust
+#' (`a5R::a5_covering_stored()`), and a WGS 84 envelope that drives tile
+#' selection when no `bbox` is given. The envelope is the AOI's bounding box
+#' padded by `aoi_pad_edges` cell edges, enough to hold every pixel of every
+#' selected cell: under `"overlapping"` a boundary cell keeps its full
+#' statistics. Padding the geometry costs nothing, where the cells' own
+#' boundaries would need the covering expanded to full resolution.
 #' @noRd
 check_aoi <- function(aoi, resolution, containment, call = rlang::caller_env()) {
   containment <- rlang::arg_match(containment, c("centre", "overlapping"),
                                   error_call = call)
-  empty <- list(cells = NULL, covering_raw = raw(0), tile_bbox = numeric(0))
+  empty <- list(cells = NULL, covering_stored = a5R::a5_cell(character()),
+                tile_bbox = numeric(0))
   if (is.null(aoi)) {
     if (containment != "centre") {
       cli::cli_abort(
@@ -40,11 +40,14 @@ check_aoi <- function(aoi, resolution, containment, call = rlang::caller_env()) 
       call = call
     )
   }
+  stored <- a5R::a5_covering_stored(cells)
+  if (any(a5R::a5_get_resolution(stored) < 0L)) {
+    # the world cell: an AOI covering the globe restricts nothing
+    return(empty)
+  }
   list(
     cells = cells,
-    # a5R's internal storage, not a public contract; a5R::a5_covering_stored()
-    # is the public route from a5R 0746500 (it drops the marker)
-    covering_raw = unclass(cells)[[1L]],
+    covering_stored = stored,
     tile_bbox = aoi_tile_bbox(aoi, resolution)
   )
 }

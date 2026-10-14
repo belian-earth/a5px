@@ -126,7 +126,7 @@ a5_read_raster_arrow <- function(src,
       cell_edge_m = cell_edge_metres(mode, resolution),
       bbox_align_block = bbox_align_block,
       tile_bbox = aoi_v$tile_bbox,
-      aoi_covering = aoi_v$covering_raw
+      aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
     )
   }
 
@@ -323,7 +323,7 @@ a5_raster_to_parquet <- function(src,
     cell_edge_m = cell_edge_metres(mode, resolution),
     bbox_align_block = bbox_align_block,
     tile_bbox = aoi_v$tile_bbox,
-    aoi_covering = aoi_v$covering_raw
+    aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
   ))
 }
 

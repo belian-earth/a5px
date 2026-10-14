@@ -367,6 +367,20 @@ test_that("centroid honours bbox", {
   expect_lt(nrow(sub), nrow(full_bbox))
 })
 
+test_that("centroid bbox cells are exactly those centred in the bbox", {
+  # wide boxes, where great-circle edges stray furthest from the parallels
+  for (bb in list(c(-170, 10, 170, 40), c(0, 60, 120, 80))) {
+    cells <- a5px:::centroid_cells(NULL, 6L, bb)
+    wide <- a5R::a5_uncompact(
+      a5px:::bbox_covering(a5px:::pad_bbox(bb, 1), 6L), resolution = 6L
+    )
+    ll <- a5R::a5_cell_to_lonlat(wide, as_dataframe = TRUE)
+    want <- wide[ll$lon >= bb[1] & ll$lon <= bb[3] &
+                   ll$lat >= bb[2] & ll$lat <= bb[4]]
+    expect_setequal(a5R::a5_u64_to_hex(cells), a5R::a5_u64_to_hex(want))
+  }
+})
+
 test_that("user-defined CRS is reconstructed from GeoKey fields (LAEA)", {
   path <- system.file("extdata", "laea_custom.tif", package = "a5px")
   skip_if(path == "", "laea_custom.tif not installed")

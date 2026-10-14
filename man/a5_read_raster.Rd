@@ -100,7 +100,9 @@ form one AOI (the union of their cells). Combine with \code{bbox} to chunk a
 large AOI; without \code{bbox}, tiles are selected by the AOI's bounding box
 padded by three cell edges, so a very irregular AOI still reads its
 whole envelope. In \code{mode = "centroid"} the AOI cells are sampled
-directly.}
+directly. Polygon edges are great circles, as in a5R, so a
+\code{\link[wk:rct]{wk::rct()}} bulges poleward rather than following the parallels, and
+one 180 degrees wide or more is an error unless it covers the globe.}
 
 \item{containment}{How \code{aoi} selects cells, as in
 \code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}}: \code{"centre"} (default) keeps cells whose

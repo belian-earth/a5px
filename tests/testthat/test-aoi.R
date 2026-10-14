@@ -137,3 +137,15 @@ test_that("an aoi outside the raster yields no cells", {
   out <- a5_read_raster(f, 12L, aoi = far, use_overviews = FALSE)
   expect_equal(nrow(out), 0L)
 })
+
+test_that("an aoi covering the globe selects every cell", {
+  f <- ov_tif()
+  skip_if(f == "")
+  for (mode in c("forward", "centroid")) {
+    full <- ord(a5_read_raster(f, 12L, mode = mode, use_overviews = FALSE))
+    out <- ord(a5_read_raster(f, 12L, aoi = wk::rct(-180, -90, 180, 90),
+                              mode = mode, use_overviews = FALSE))
+    expect_gt(nrow(out), 0L)
+    expect_equal(out, full, ignore_attr = TRUE, info = mode)
+  }
+})
