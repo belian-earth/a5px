@@ -9,6 +9,10 @@
 #' Metadata is read from the file's own `GDAL_METADATA` tag (default domain
 #' only). Sidecar `.aux.xml` files are not read.
 #'
+#' @param src Path or URL to a GeoTIFF / COG. Supported schemes: local path
+#'   (no scheme), `file://`, `http(s)://`, `s3://`, `gs://`, `az://`. See
+#'   the "Remote sources" section of [a5px-package] for how cloud clients
+#'   are configured.
 #' @inheritParams a5_read_raster
 #' @returns A list with elements:
 #'   - `width`, `height`, `n_bands`: integer dimensions of the full

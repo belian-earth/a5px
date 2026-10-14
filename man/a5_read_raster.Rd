@@ -23,14 +23,17 @@ a5_read_raster(
   dequant = NULL,
   as_vector = FALSE,
   use_overviews = is.null(dequant),
-  store_opts = NULL
+  store_opts = NULL,
+  separate = FALSE
 )
 }
 \arguments{
-\item{src}{Path or URL to a GeoTIFF / COG. Supported schemes: local path
-(no scheme), \verb{file://}, \verb{http(s)://}, \verb{s3://}, \verb{gs://}, \verb{az://}. See
-the "Remote sources" section of \link{a5px-package} for how cloud clients
-are configured.}
+\item{src}{Paths or URLs of one or more GeoTIFFs / COGs. Supported
+schemes: local path (no scheme), \verb{file://}, \verb{http(s)://}, \verb{s3://},
+\verb{gs://}, \verb{az://}. See the "Remote sources" section of \link{a5px-package}
+for how cloud clients are configured. Several sources are read in one
+pass: their tiles share \code{io_concurrency} and \code{cpu_workers}. \code{separate}
+sets how they combine; names of \code{src} label the sources.}
 
 \item{resolution}{Integer scalar A5 resolution (0--30).}
 
@@ -210,6 +213,31 @@ keys for the provider, e.g. \code{aws_region}, \code{aws_skip_signature},
 \verb{azure_*} equivalents, and for plain HTTP(S) the client keys such as
 \code{timeout} or \code{allow_http}. Unknown keys, and any key given with a
 local path, are errors. Inspect the result with \code{\link[=a5_store_config]{a5_store_config()}}.}
+
+\item{separate}{How several sources combine.
+\itemize{
+\item \code{FALSE} (default): the sources are pieces of one raster, such as
+adjacent tiles of a mosaic or captures of one area on different
+dates. They must have the same bands (count and names) and the same
+ground pixel size. Every valid pixel of every source enters its
+cell's statistics once, so cells on a seam between sources combine
+exactly. Where sources overlap, every capture counts: \code{mean}, \code{min}
+and \code{max} are over all observations, and \code{sum} and \code{count} include
+the overlap once per source, so \code{count} measures how many
+observations cover each cell. This differs from GDAL, where the last
+source wins.
+\item \code{TRUE}: each source adds its bands, as \code{gdalbuildvrt -separate}.
+Sources need not share a grid, CRS or pixel size. A single-band
+source is named by its label and a multi-band source's bands are
+\verb{<label>_<band>}; the label is the source's name in \code{src}, else its
+file name without extension. \code{bands} selects from this combined
+list.
+}
+
+Single-band files without band descriptions all report the band name
+\code{band_01}, so \code{separate = FALSE} cannot tell red, green and blue files
+apart and pools them into one band; set \code{separate = TRUE} for files
+that hold different bands.}
 }
 \value{
 A \code{\link[tibble:tibble]{tibble::tibble()}} with columns:

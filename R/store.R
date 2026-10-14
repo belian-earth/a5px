@@ -46,6 +46,10 @@ check_store_opts <- function(store_opts, call = rlang::caller_env()) {
 #' region, endpoint and signing before a long read. Credential values are
 #' never returned, only whether static credentials are present.
 #'
+#' @param src Path or URL to a GeoTIFF / COG. Supported schemes: local path
+#'   (no scheme), `file://`, `http(s)://`, `s3://`, `gs://`, `az://`. See
+#'   the "Remote sources" section of [a5px-package] for how cloud clients
+#'   are configured.
 #' @inheritParams a5_read_raster
 #' @returns A named character vector. Always contains `provider` (one of
 #'   `"local"`, `"s3"`, `"gcs"`, `"azure"`, `"http"`); remote providers add

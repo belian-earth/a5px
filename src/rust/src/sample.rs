@@ -24,18 +24,16 @@ use std::sync::Arc;
 
 use ahash::AHashMap;
 use async_tiff::decoder::DecoderRegistry;
-use async_tiff::metadata::TiffMetadataReader;
-use async_tiff::reader::{AsyncFileReader, ObjectReader};
+use async_tiff::reader::AsyncFileReader;
 use async_tiff::tags::PlanarConfiguration;
-use async_tiff::{TIFF, TypedArray};
+use async_tiff::TypedArray;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use proj4rs::Proj;
 use proj4rs::transform::transform as proj_transform;
 
 use crate::error::{A5CogError, Result};
-use crate::geo::{
-    build_src_proj, extract_geotransform, is_nodata, parse_band_descriptions, parse_nodata,
-};
+use crate::geo::{build_src_proj, extract_geotransform, is_nodata, parse_nodata};
+use crate::sources::{check_same_pixel_size, open_sources, plan_bands, OpenedSource, SourceSpec};
 
 /// Output mirrors the forward path so the R-side wrappers don't need to
 /// branch on mode.
@@ -179,9 +177,14 @@ struct TileWork {
     entries: Vec<(usize, f64, f64)>,
 }
 
+/// Sample `cells_in` from every source and combine. With `separate`, each
+/// source fills its own output columns; otherwise each column is the mean of
+/// the sources' valid samples at the cell centre. Cells with no valid band
+/// in any source are dropped.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sample_at_cells_async(
-    src: &str,
+    sources: Vec<SourceSpec>,
+    separate: bool,
     store_opts: crate::store::StoreOpts,
     cells_in: Vec<u64>,
     bands_idx: Vec<i32>,
@@ -193,18 +196,81 @@ pub(crate) async fn sample_at_cells_async(
     scoff: bool,
     interp: Interp,
 ) -> Result<CentroidOutput> {
-    let (store, path) = crate::store::parse_src(src, &store_opts)?;
-    let reader = ObjectReader::new(store, path);
-    let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
-    let mut meta = TiffMetadataReader::try_open(&cache).await?;
-    let ifds = meta.read_all_ifds(&cache).await?;
-    let endianness = meta.endianness();
-    let tiff = TIFF::new(ifds, endianness);
-    let ifd_owned = tiff
-        .ifds()
-        .first()
-        .ok_or_else(|| A5CogError::Invalid("no IFDs".into()))?
-        .clone();
+    let opened = open_sources(sources, &store_opts).await?;
+    let plan = plan_bands(&opened, separate, &bands_idx, &bands_names)?;
+    if !separate {
+        check_same_pixel_size(&opened)?;
+    }
+    let n_out = plan.n_out();
+    let n_in = cells_in.len();
+    // Sources sample concurrently; split the worker and fetch budgets so
+    // the read as a whole stays within them.
+    let n_src = plan.selected.iter().filter(|s| !s.is_empty()).count().max(1);
+    let cpu_each = cpu_workers.div_ceil(n_src).max(1);
+    let io_each = io_concurrency.div_ceil(n_src).max(1);
+    let jobs = opened
+        .into_iter()
+        .zip(plan.selected)
+        .zip(plan.slots)
+        .filter(|((_, sel), _)| !sel.is_empty())
+        .map(|((open, sel), slots)| {
+            let cells = &cells_in;
+            let dequant = dequant.clone();
+            async move {
+                let vals = sample_source(
+                    open, &sel, cells, src_nodata_override, cpu_each, io_each, dequant, scoff, interp,
+                )
+                .await?;
+                Ok::<_, A5CogError>((vals, sel.len(), slots))
+            }
+        });
+    let per_source = futures::future::try_join_all(jobs).await?;
+
+    let mut sum = vec![0.0f64; n_in * n_out];
+    let mut cnt = vec![0u32; n_in * n_out];
+    for (vals, n_loc, slots) in &per_source {
+        for i in 0..n_in {
+            for (b, &col) in slots.iter().enumerate() {
+                let v = vals[i * n_loc + b];
+                if !v.is_nan() {
+                    sum[i * n_out + col] += v;
+                    cnt[i * n_out + col] += 1;
+                }
+            }
+        }
+    }
+    let mut cells_out = Vec::new();
+    let mut flat_out: Vec<f64> = Vec::new();
+    for i in 0..n_in {
+        let base = i * n_out;
+        if !cnt[base..base + n_out].iter().any(|&c| c > 0) {
+            continue;
+        }
+        cells_out.push(cells_in[i]);
+        for b in 0..n_out {
+            let c = cnt[base + b];
+            flat_out.push(if c > 0 { sum[base + b] / c as f64 } else { f64::NAN });
+        }
+    }
+    Ok(CentroidOutput { cells: cells_out, flat: flat_out, n_bands: n_out, band_names: plan.names })
+}
+
+/// Sample one source at the centres of `cells_in`, for its `selected`
+/// local bands. Returns `cells_in.len() * selected.len()` values, cell-major,
+/// NaN where the source has no valid sample.
+#[allow(clippy::too_many_arguments)]
+async fn sample_source(
+    open: OpenedSource,
+    selected: &[usize],
+    cells_in: &[u64],
+    src_nodata_override: Option<f64>,
+    cpu_workers: usize,
+    io_concurrency: usize,
+    dequant: Option<Arc<crate::read::DequantLut>>,
+    scoff: bool,
+    interp: Interp,
+) -> Result<Vec<f64>> {
+    let OpenedSource { reader, endianness, ifd0: ifd_owned, n_bands, .. } = open;
 
     if let Some(dq) = dequant.as_deref() {
         crate::read::validate_dequant_dtype(&ifd_owned, dq)?;
@@ -225,7 +291,6 @@ pub(crate) async fn sample_at_cells_async(
 
     let width = ifd_owned.image_width() as usize;
     let height = ifd_owned.image_height() as usize;
-    let n_bands = ifd_owned.samples_per_pixel() as usize;
     let planar = ifd_owned.planar_configuration();
     let (tile_w, tile_h) = match (ifd_owned.tile_width(), ifd_owned.tile_height()) {
         (Some(w), Some(h)) => (w as usize, h as usize),
@@ -240,46 +305,8 @@ pub(crate) async fn sample_at_cells_async(
         &ifd_owned,
         src_nodata_override.or(parse_nodata(&ifd_owned)),
     );
-    let band_names_v = parse_band_descriptions(&ifd_owned, n_bands);
-    let all_band_names: Vec<String> = if band_names_v.is_empty() {
-        (0..n_bands).map(|i| format!("band_{:02}", i + 1)).collect()
-    } else {
-        band_names_v
-    };
-
-    // resolve band selection to 0-based indices (mirrors read.rs)
-    let selected_bands: Vec<usize> = if !bands_idx.is_empty() {
-        bands_idx
-            .iter()
-            .map(|&i| {
-                if i < 1 || (i as usize) > n_bands {
-                    Err(A5CogError::Invalid(format!(
-                        "band index {i} out of range 1..={n_bands}"
-                    )))
-                } else {
-                    Ok((i - 1) as usize)
-                }
-            })
-            .collect::<Result<Vec<_>>>()?
-    } else if !bands_names.is_empty() {
-        bands_names
-            .iter()
-            .map(|name| {
-                all_band_names
-                    .iter()
-                    .position(|d| d == name)
-                    .ok_or_else(|| {
-                        A5CogError::Invalid(format!(
-                            "band name {name:?} not found; available: {all_band_names:?}"
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        (0..n_bands).collect()
-    };
+    let selected_bands: Vec<usize> = selected.to_vec();
     let n_out = selected_bands.len();
-    let band_names: Vec<String> = selected_bands.iter().map(|&i| all_band_names[i].clone()).collect();
     let dequant =
         crate::read::resolve_decode(dequant, scoff, &ifd_owned, n_bands, &selected_bands)?;
 
@@ -348,16 +375,10 @@ pub(crate) async fn sample_at_cells_async(
     }
     drop(placed);
 
-    if buckets.is_empty() {
-        return Ok(CentroidOutput {
-            cells: Vec::new(),
-            flat: Vec::new(),
-            n_bands: n_out,
-            band_names,
-        });
-    }
-
     let n_in = cells_in.len();
+    if buckets.is_empty() {
+        return Ok(vec![f64::NAN; n_in * n_out]);
+    }
 
     let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
         && n_out < n_bands
@@ -671,13 +692,11 @@ pub(crate) async fn sample_at_cells_async(
     // contribute nothing and the remaining weights rescale to 1 (nearest,
     // bilinear), or the cell falls back to bilinear over its valid 2x2
     // (bicubic, lanczos with an incomplete stencil). A band whose total
-    // weight is ~0 is NA; cells with no valid band are dropped, matching
-    // the nearest-only behaviour.
+    // weight is ~0 is NaN.
     const MIN_W: f64 = 1e-9;
     let (_, sn) = interp.footprint();
     let full_stencil = (sn * sn) as u32;
-    let mut cells_out = Vec::new();
-    let mut flat_out: Vec<f64> = Vec::new();
+    let mut out = vec![f64::NAN; n_in * n_out];
     for i in 0..n_in {
         let base = i * n_out;
         let complete = !needs_fallback || n_valid[i] >= full_stencil;
@@ -686,19 +705,11 @@ pub(crate) async fn sample_at_cells_async(
         } else {
             (&b_sum[base..base + n_out], &b_w[base..base + n_out])
         };
-        if !(0..n_out).any(|b| ws[b] > MIN_W) {
-            continue;
-        }
-        cells_out.push(cells_in[i]);
         for b in 0..n_out {
-            flat_out.push(if ws[b] > MIN_W { sums[b] / ws[b] } else { f64::NAN });
+            if ws[b] > MIN_W {
+                out[base + b] = sums[b] / ws[b];
+            }
         }
     }
-
-    Ok(CentroidOutput {
-        cells: cells_out,
-        flat: flat_out,
-        n_bands: n_out,
-        band_names,
-    })
+    Ok(out)
 }

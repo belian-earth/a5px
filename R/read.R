@@ -37,10 +37,12 @@
 #'   than the pixel size — the forward path leaves gaps in that regime
 #'   because each pixel only contributes to one cell.
 #'
-#' @param src Path or URL to a GeoTIFF / COG. Supported schemes: local path
-#'   (no scheme), `file://`, `http(s)://`, `s3://`, `gs://`, `az://`. See
-#'   the "Remote sources" section of [a5px-package] for how cloud clients
-#'   are configured.
+#' @param src Paths or URLs of one or more GeoTIFFs / COGs. Supported
+#'   schemes: local path (no scheme), `file://`, `http(s)://`, `s3://`,
+#'   `gs://`, `az://`. See the "Remote sources" section of [a5px-package]
+#'   for how cloud clients are configured. Several sources are read in one
+#'   pass: their tiles share `io_concurrency` and `cpu_workers`. `separate`
+#'   sets how they combine; names of `src` label the sources.
 #' @param store_opts Named character vector or named list of object store
 #'   options for a remote `src`, applied after the environment defaults so
 #'   an explicit option always wins. Keys are the `object_store` config
@@ -50,6 +52,28 @@
 #'   `azure_*` equivalents, and for plain HTTP(S) the client keys such as
 #'   `timeout` or `allow_http`. Unknown keys, and any key given with a
 #'   local path, are errors. Inspect the result with [a5_store_config()].
+#' @param separate How several sources combine.
+#'   - `FALSE` (default): the sources are pieces of one raster, such as
+#'     adjacent tiles of a mosaic or captures of one area on different
+#'     dates. They must have the same bands (count and names) and the same
+#'     ground pixel size. Every valid pixel of every source enters its
+#'     cell's statistics once, so cells on a seam between sources combine
+#'     exactly. Where sources overlap, every capture counts: `mean`, `min`
+#'     and `max` are over all observations, and `sum` and `count` include
+#'     the overlap once per source, so `count` measures how many
+#'     observations cover each cell. This differs from GDAL, where the last
+#'     source wins.
+#'   - `TRUE`: each source adds its bands, as `gdalbuildvrt -separate`.
+#'     Sources need not share a grid, CRS or pixel size. A single-band
+#'     source is named by its label and a multi-band source's bands are
+#'     `<label>_<band>`; the label is the source's name in `src`, else its
+#'     file name without extension. `bands` selects from this combined
+#'     list.
+#'
+#'   Single-band files without band descriptions all report the band name
+#'   `band_01`, so `separate = FALSE` cannot tell red, green and blue files
+#'   apart and pools them into one band; set `separate = TRUE` for files
+#'   that hold different bands.
 #' @param resolution Integer scalar A5 resolution (0--30).
 #' @param stat Aggregation. One of `"mean"`, `"sum"`, `"count"`, `"min"`,
 #'   `"max"`, `"var"`, `"sd"`, `"majority"`, `"fractions"`, `"npix"`, or any
@@ -244,13 +268,14 @@ a5_read_raster <- function(src,
                            dequant = NULL,
                            as_vector = FALSE,
                            use_overviews = is.null(dequant),
-                           store_opts = NULL) {
-  check_scalar_string(src, "src")
+                           store_opts = NULL,
+                           separate = FALSE) {
   store <- check_store_opts(store_opts)
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
+  srcs <- check_sources(src, separate, stats)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
   interp <- rlang::arg_match(interp)
@@ -278,7 +303,7 @@ a5_read_raster <- function(src,
 
   if (mode == "centroid") {
     return(read_raster_centroid(
-      src = src,
+      srcs = srcs,
       resolution = resolution,
       bands_idx = band_sel$idx,
       bands_names = band_sel$names,
@@ -296,7 +321,9 @@ a5_read_raster <- function(src,
   }
 
   out <- a5_read_raster_rs(
-    src = src,
+    src = srcs$src,
+    src_labels = srcs$labels,
+    separate = srcs$separate,
     store_keys = store$keys,
     store_values = store$values,
     resolution = resolution,
@@ -380,7 +407,7 @@ a5_read_raster <- function(src,
 #' Centroid-mode read: enumerate cells covering the bbox via
 #' [a5R::a5_polygon_to_cells()], then sample one pixel per cell.
 #' @noRd
-read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
+read_raster_centroid <- function(srcs, resolution, bands_idx, bands_names,
                                  bbox, src_nodata, cpu_workers,
                                  io_concurrency, as_vector, stats,
                                  dequant_v = list(lut = numeric(0), min = 0, scoff = FALSE),
@@ -388,9 +415,11 @@ read_raster_centroid <- function(src, resolution, bands_idx, bands_names,
                                  store = check_store_opts(NULL),
                                  aoi_cells = NULL) {
   warn_centroid_stat(stats)
-  cells <- centroid_cells(src, resolution, bbox, store, aoi_cells)
+  cells <- centroid_cells(srcs$src, resolution, bbox, store, aoi_cells)
   out <- a5_sample_at_cells_rs(
-    src = src,
+    src = srcs$src,
+    src_labels = srcs$labels,
+    separate = srcs$separate,
     store_keys = store$keys,
     store_values = store$values,
     cells_raw = vctrs::vec_data(cells),
@@ -440,7 +469,11 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
     return(cells)
   }
   if (is.null(bbox)) {
-    bbox <- as.numeric(a5_raster_bbox_lonlat_rs(src, store$keys, store$values))
+    # the envelope of every source
+    env <- vapply(src, function(s) {
+      as.numeric(a5_raster_bbox_lonlat_rs(s, store$keys, store$values))
+    }, numeric(4))
+    bbox <- c(min(env[1, ]), min(env[2, ]), max(env[3, ]), max(env[4, ]))
   }
   # Cells whose centre lies in the bbox, at the requested resolution so each
   # cell gets one centroid sample. The candidates come from a covering of the

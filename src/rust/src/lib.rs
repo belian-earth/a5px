@@ -12,6 +12,7 @@ mod parquet_write;
 mod read;
 mod runtime;
 mod sample;
+mod sources;
 mod store;
 
 extendr_module! {

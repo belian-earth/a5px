@@ -36,6 +36,44 @@ check_scalar_count <- function(x, arg, min = 1L, call = rlang::caller_env()) {
   invisible(x)
 }
 
+#' Validate `src` and `separate`. Returns the sources, their labels (the
+#' names of `src`, else each file name without its extension) and the
+#' `separate` flag.
+#' @noRd
+check_sources <- function(src, separate, stats, call = rlang::caller_env()) {
+  if (!is.character(src) || length(src) == 0L || anyNA(src) || any(!nzchar(src))) {
+    cli::cli_abort(
+      "{.arg src} must be a character vector of paths or URLs.",
+      call = call
+    )
+  }
+  if (!is.logical(separate) || length(separate) != 1L || is.na(separate)) {
+    cli::cli_abort("{.arg separate} must be {.code TRUE} or {.code FALSE}.", call = call)
+  }
+  labels <- names(src)
+  if (is.null(labels) || any(is.na(labels) | !nzchar(labels))) {
+    labels <- sub("\\.[^.]*$", "", basename(sub("[?#].*$", "", src)))
+  }
+  if (separate) {
+    if ("npix" %in% stats) {
+      cli::cli_abort(
+        "{.val npix} counts the pixels of one raster; with {.code separate = TRUE} use each band's {.val count}.",
+        call = call
+      )
+    }
+    dup <- unique(labels[duplicated(labels)])
+    if (length(dup)) {
+      cli::cli_abort(
+        c("Sources need distinct labels when {.code separate = TRUE}.",
+          "x" = "{.val {dup}} label{?s} more than one source.",
+          "i" = "Name the sources, for example {.code src = c(red = ..., green = ...)}."),
+        call = call
+      )
+    }
+  }
+  list(src = unname(src), labels = unname(labels), separate = separate)
+}
+
 #' Build an a5_cell vector from the b1..b8 raw fields returned by Rust.
 #' @noRd
 new_a5_cell_from_rs <- function(x) {

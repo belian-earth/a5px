@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,separate See [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
 #'   argument is ignored (one sample per cell) and the table metadata
@@ -50,14 +50,15 @@ a5_read_raster_arrow <- function(src,
                                  as_vector = FALSE,
                                  value_type = c("float64", "float32"),
                                  use_overviews = is.null(dequant),
-                                 store_opts = NULL) {
+                                 store_opts = NULL,
+                                 separate = FALSE) {
   rlang::check_installed("arrow", reason = "to construct Arrow tables")
-  check_scalar_string(src, "src")
   store <- check_store_opts(store_opts)
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
+  srcs <- check_sources(src, separate, stats)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
   interp <- rlang::arg_match(interp)
@@ -86,11 +87,13 @@ a5_read_raster_arrow <- function(src,
 
   out <- if (mode == "centroid") {
     warn_centroid_stat(stats)
-    cells_in <- centroid_cells(src, resolution,
+    cells_in <- centroid_cells(srcs$src, resolution,
                                if (length(bbox_v)) bbox_v else NULL, store,
                                aoi_v$cells)
     a5_sample_at_cells_flat_rs(
-      src = src,
+      src = srcs$src,
+      src_labels = srcs$labels,
+      separate = srcs$separate,
       store_keys = store$keys,
       store_values = store$values,
       cells_raw = vctrs::vec_data(cells_in),
@@ -106,7 +109,9 @@ a5_read_raster_arrow <- function(src,
     )
   } else {
     a5_read_raster_flat_rs(
-      src = src,
+      src = srcs$src,
+      src_labels = srcs$labels,
+      separate = srcs$separate,
       store_keys = store$keys,
       store_values = store$values,
       resolution = resolution,
@@ -193,7 +198,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,separate See
 #'   [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
@@ -236,14 +241,15 @@ a5_raster_to_parquet <- function(src,
                                  scoff = FALSE,
                                  dequant = NULL,
                                  use_overviews = is.null(dequant),
-                                 store_opts = NULL) {
-  check_scalar_string(src, "src")
+                                 store_opts = NULL,
+                                 separate = FALSE) {
   store <- check_store_opts(store_opts)
   check_scalar_string(dest, "dest")
   resolution <- vctrs::vec_cast(resolution, integer(), x_arg = "resolution")
   vctrs::vec_assert(resolution, size = 1L)
   check_resolution(resolution)
   stats <- check_stats(stat)
+  srcs <- check_sources(src, separate, stats)
   mode <- rlang::arg_match(mode)
   subsamples_v <- check_subsamples(subsamples, mode)
   interp <- rlang::arg_match(interp)
@@ -273,11 +279,13 @@ a5_raster_to_parquet <- function(src,
 
   if (mode == "centroid") {
     warn_centroid_stat(stats)
-    cells_in <- centroid_cells(src, resolution,
+    cells_in <- centroid_cells(srcs$src, resolution,
                                if (length(bbox_v)) bbox_v else NULL, store,
                                aoi_v$cells)
     return(invisible(a5_sample_to_parquet_rs(
-      src = src,
+      src = srcs$src,
+      src_labels = srcs$labels,
+      separate = srcs$separate,
       store_keys = store$keys,
       store_values = store$values,
       dest = dest,
@@ -299,7 +307,9 @@ a5_raster_to_parquet <- function(src,
   }
 
   invisible(a5_raster_to_parquet_rs(
-    src = src,
+    src = srcs$src,
+    src_labels = srcs$labels,
+    separate = srcs$separate,
     store_keys = store$keys,
     store_values = store$values,
     dest = dest,
