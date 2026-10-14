@@ -458,9 +458,10 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
 
 #' The A5 covering of the cells whose centre lies in a WGS 84 bbox.
 #' a5R joins polygon vertices by great circles, so a bare rectangle bulges
-#' poleward and one spanning the globe is degenerate (a5R 0.9.9.9000 returns a
-#' single cell for it). The bbox is split into strips at most 90 degrees wide
-#' with vertices every degree, so the edges follow the parallels.
+#' poleward (a 20 degree edge along 10N peaks at 10.15N). The bbox is split
+#' into strips at most 90 degrees wide with vertices every degree, so the
+#' edges follow the parallels to within about 100 m. Strips also avoid the
+#' degenerate whole-globe rectangle of a5R before 0746500.
 #' @noRd
 bbox_covering <- function(bbox, resolution) {
   brk <- unique(c(seq(bbox[1], bbox[3], by = 90), bbox[3]))

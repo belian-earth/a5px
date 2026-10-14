@@ -42,6 +42,8 @@ check_aoi <- function(aoi, resolution, containment, call = rlang::caller_env()) 
   }
   list(
     cells = cells,
+    # a5R's internal storage, not a public contract; a5R::a5_covering_stored()
+    # is the public route from a5R 0746500 (it drops the marker)
     covering_raw = unclass(cells)[[1L]],
     tile_bbox = aoi_tile_bbox(aoi, resolution)
   )

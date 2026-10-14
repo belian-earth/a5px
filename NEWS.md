@@ -27,9 +27,8 @@
 * `mode = "centroid"` builds the cells of a `bbox` (or of the raster's
   envelope) from strips at most 90 degrees wide whose edges follow the
   parallels. a5R joins polygon vertices by great circles, so a plain
-  rectangle bulged poleward on wide boxes, and a5R 0.9.9.9000 returns a
-  single cell for a rectangle spanning the globe. Boxes under one degree on
-  each side are unchanged.
+  rectangle bulged poleward on wide boxes and selected cells whose centres
+  lie outside the box. Boxes under one degree on each side are unchanged.
 
 * `a5_aggregate()` now groups each cell by the coarse cell containing its
   centre (`a5R::a5_cell_to_supercell()`) instead of by index parent
