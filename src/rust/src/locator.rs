@@ -32,7 +32,7 @@
 
 use a5::coordinate_systems::{Face, Spherical};
 use a5::core::cell::{get_pentagon, spherical_to_cell};
-use a5::core::serialization::{deserialize, FIRST_HILBERT_RESOLUTION};
+use a5::core::serialization::{deserialize, FIRST_CURVE_RESOLUTION};
 use a5::core::utils::OriginId;
 use a5::projections::dodecahedron::DodecahedronProjection;
 use ahash::AHashMap;
@@ -222,14 +222,14 @@ impl CellLocator {
         // children. Coarser pixels take three levels (64 children) so a
         // parent still spans a run of pixels.
         let k = if px_per_cell >= 4.0 { 2 } else { 3 };
-        let parent_res = if resolution - k >= FIRST_HILBERT_RESOLUTION {
+        let parent_res = if resolution - k >= FIRST_CURVE_RESOLUTION {
             Some(resolution - k)
         } else {
             None
         };
         Self {
             resolution,
-            direct: resolution < FIRST_HILBERT_RESOLUTION,
+            direct: resolution < FIRST_CURVE_RESOLUTION,
             parent_res,
             geoms: AHashMap::with_capacity(1024),
             kids: AHashMap::with_capacity(256),

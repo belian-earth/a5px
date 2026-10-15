@@ -15,7 +15,7 @@
   from a worker are now reported instead of "consumer pool dropped
   channel".
 
-* a5px now uses A5 1.0: the a5 Rust crate 1.0.0-beta.2 and a5R >= 0.9.9.9001.
+* a5px now uses A5 1.0: the a5 Rust crate 1.0.0-beta.3 and a5R >= 0.9.9.9001.
   A5 1.0 introduces permanent cell ids with a new space-filling curve and
   face order, so **every cell id changes**. Cells keep their shape and
   position at every resolution except 1, so a read returns the same cells
@@ -24,6 +24,12 @@
   written by earlier versions are still valid cells but in other places;
   convert stored data once with `a5R::a5_migrate()` and never mix ids from
   the two versions.
+
+* Rust dependencies are updated: proj4rs 0.2 (spherical oblique and
+  south-polar Lambert azimuthal equal-area fixes), async-tiff 0.4 and
+  object_store 0.14 (one reqwest 0.13 HTTP client, no panic on HTTP 500
+  responses), and arrow and parquet 60. HTTPS now uses rustls with the
+  aws-lc-rs provider. The minimum Rust version is 1.89.
 
 * a5R stores the top cell byte XOR `0xFC` so that vctrs gap-filling yields
   `NA` rather than the world cell. Older a5R versions are incompatible:

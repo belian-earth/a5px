@@ -3,7 +3,7 @@ name = 'a5px'
 publish = false
 version = '0.1.0'
 edition = '2021'
-rust-version = '1.85'
+rust-version = '1.89'
 
 [lib]
 crate-type = [ 'rlib', 'staticlib' ]
@@ -15,10 +15,10 @@ path = 'document.rs'
 
 [dependencies]
 extendr-api = '0.9.0'
-a5 = '=1.0.0-beta.2'
-async-tiff = { version = '0.3', default-features = false, features = ['object_store', 'reqwest', 'tokio'] }
-object_store = { version = '0.13', features = ['aws', 'gcp', 'azure', 'http'] }
-proj4rs = { version = '0.1', default-features = false, features = ['crs-definitions'] }
+a5 = '=1.0.0-beta.3'
+async-tiff = { version = '0.4', default-features = false, features = ['object_store', 'reqwest', 'tokio'] }
+object_store = { version = '0.14', features = ['aws', 'gcp', 'azure', 'http'] }
+proj4rs = { version = '0.2', default-features = false, features = ['crs-definitions'] }
 proj4wkt = '0.1'
 tokio = { version = '1', features = ['rt-multi-thread', 'sync', 'macros'] }
 rayon = '1.11'
@@ -30,10 +30,10 @@ bytes = '1'
 ahash = '0.8'
 thiserror = '2'
 url = '2'
-arrow-array = '59'
-arrow-buffer = '59'
-arrow-schema = '59'
-parquet = { version = '59', default-features = false, features = ['arrow', 'zstd', 'snap'] }
+arrow-array = '60'
+arrow-buffer = '60'
+arrow-schema = '60'
+parquet = { version = '60', default-features = false, features = ['arrow', 'zstd', 'snap'] }
 
 [profile.release]
 lto = true
