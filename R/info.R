@@ -41,6 +41,9 @@
 #'     the proj string a5px resolved.
 #'   - `geotransform`: the 6-element GDAL geotransform.
 #'   - `bbox`: WGS 84 envelope `c(xmin, ymin, xmax, ymax)` of the footprint.
+#'     For a raster across the antimeridian `xmax` exceeds 180, as
+#'     [a5R::a5_bbox()] reports such polygons; one containing a pole spans
+#'     every longitude and reaches the pole.
 #' @examples
 #' f <- system.file("extdata", "overview_cog.tif", package = "a5px")
 #' info <- a5_raster_info(f)

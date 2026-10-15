@@ -353,6 +353,7 @@ async fn sample_source(
     let src_is_latlong = src_proj.is_latlong();
     let inv_gt1 = 1.0 / gt.0[1];
     let inv_gt5 = 1.0 / gt.0[5];
+    let lon_centre = gt.0[0] + 0.5 * width as f64 * gt.0[1];
 
     // Per-cell centroid -> fractional pixel coordinate and stencil extent,
     // computed in parallel (the projection dominates for millions of cells);
@@ -380,6 +381,9 @@ async fn sample_source(
                 if src_is_latlong {
                     p.0 = p.0.to_degrees();
                     p.1 = p.1.to_degrees();
+                    // a geographic raster may store longitudes 0 to 360 or
+                    // run past 180: take the copy nearest its centre
+                    p.0 += 360.0 * ((lon_centre - p.0) / 360.0).round();
                 }
                 let (x, y) = (p.0, p.1);
                 if !x.is_finite() || !y.is_finite() {

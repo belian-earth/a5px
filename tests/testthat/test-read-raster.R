@@ -291,8 +291,10 @@ test_that("bbox arg validates", {
   skip_if_not(file.exists(path), "exe_cog.tif missing")
   expect_error(a5_read_raster(path, resolution = 12L, bbox = c(0, 0)),
                "length-4")
-  expect_error(a5_read_raster(path, resolution = 12L, bbox = c(2, 0, 1, 1)),
-               "xmin < xmax")
+  expect_error(a5_read_raster(path, resolution = 12L, bbox = c(0, 1, 1, 0)),
+               "ymin < ymax")
+  expect_error(a5_read_raster(path, resolution = 12L, bbox = c(1, 0, 1, 1)),
+               "xmin != xmax")
 })
 
 test_that("src_nodata overrides metadata nodata", {
@@ -402,4 +404,27 @@ test_that("a5_read_raster errors on non-georeferenced TIFF", {
   path <- file.path(tif_dir(), "test_non_geo.tif")
   skip_if_not(file.exists(path), "test_non_geo.tif missing")
   expect_error(a5_read_raster(path, resolution = 10))
+})
+
+test_that("a PixelIsPoint raster is placed as GDAL places it", {
+  skip_if_not_installed("terra")
+  skip_if_not_installed("sf")
+  dir <- withr::local_tempdir()
+  r <- terra::rast(nrows = 64, ncols = 64, crs = "EPSG:4326",
+                   extent = terra::ext(10, 10.64, 45, 45.64))
+  terra::values(r) <- seq_len(64 * 64)
+  names(r) <- "v"
+  area <- file.path(dir, "area.tif")
+  terra::writeRaster(r, area, gdal = c("TILED=YES", "BLOCKXSIZE=16", "BLOCKYSIZE=16"))
+  point <- file.path(dir, "point.tif")
+  sf::gdal_utils("translate", area, point,
+                 options = c("-mo", "AREA_OR_POINT=Point", "-co", "TILED=YES",
+                             "-co", "BLOCKXSIZE=16", "-co", "BLOCKYSIZE=16"))
+  # GDAL reads the Point file at the same place as the Area one
+  expect_equal(as.vector(terra::ext(terra::rast(point))), as.vector(terra::ext(r)))
+  gt <- a5_raster_info(point)$geotransform
+  expect_equal(gt[c(1, 4)], c(10, 45.64))
+  ord <- function(df) df[order(a5R::a5_u64_to_hex(df$cell)), , drop = FALSE]
+  expect_equal(ord(a5_read_raster(point, 12L, stat = "sum")),
+               ord(a5_read_raster(area, 12L, stat = "sum")))
 })

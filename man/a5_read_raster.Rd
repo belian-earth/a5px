@@ -78,8 +78,12 @@ tag (falling back to \code{band_NN} when descriptions are absent).
 supplied, only tiles overlapping the bbox (in raster CRS) are fetched
 from the COG, and pixels outside the bbox are skipped. The bbox is
 half-open on its \code{xmax} / \code{ymax} edges, except at 180 and 90, so bboxes
-that share an edge take a pixel centred on it once. \code{NULL} (default)
-reads the whole raster.}
+that share an edge take a pixel centred on it once. For a box across
+the antimeridian give \code{xmin > xmax}, such as \code{c(179, -1, -179, 1)}.
+Pixel longitudes are wrapped to -180 to 180 before the test, so a
+raster stored in longitudes 0 to 360 meets bboxes west of 0, and a
+pixel centred on the antimeridian belongs to boxes starting at -180.
+\code{NULL} (default) reads the whole raster.}
 
 \item{bbox_align}{How \code{bbox} selects pixels. \code{"pixel"} (default) keeps
 every pixel whose centre lies in the bbox. \code{"block"} keeps every

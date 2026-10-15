@@ -14,8 +14,11 @@ const_tif <- function(value, path, crs = "EPSG:32633", ext = c(400000, 420480, 1
   terra::values(r) <- value
   names(r) <- "v"
   if (cog) {
-    terra::writeRaster(r, path, filetype = "COG", overwrite = TRUE,
-                       gdal = c("BLOCKSIZE=256", "OVERVIEWS=AUTO"))
+    # terra hands the COG options to its in-memory copy too, which warns
+    suppressWarnings(
+      terra::writeRaster(r, path, filetype = "COG", overwrite = TRUE,
+                         gdal = c("BLOCKSIZE=256", "OVERVIEWS=AUTO"))
+    )
   } else {
     terra::writeRaster(r, path, overwrite = TRUE,
                        gdal = c("TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256"))
