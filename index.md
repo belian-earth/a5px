@@ -127,11 +127,11 @@ arr <- a5_read_raster_arrow(src, resolution, stat, bands, value_type = "float64"
 a5_raster_to_parquet(src, dest, resolution, stat, bands, value_type, compression)
 
 # write a tibble or Arrow table from the first two
-a5_write_parquet(x, dest, compression = "zstd")
+a5px_write_parquet(x, dest, compression = "zstd")
 
 # metadata without reading pixels
 a5_raster_info(src)   # dimensions, data type, block grid, overviews, CRS, envelope
-a5_store_config(src)  # resolved object store configuration for a remote src
+a5px_store_config(src)  # resolved object store configuration for a remote src
 ```
 
 Their main arguments:
@@ -141,7 +141,7 @@ Their main arguments:
   download the whole file.
 - `separate`, `composite`: how several files combine (see [Several
   files](#several-files)).
-- `resolution`: A5 resolution, 0 to 30.
+- `resolution`: A5 resolution, 0 to 29 (30 is not yet supported).
   [`a5R::a5_cell_area()`](https://belian-earth.github.io/a5R/reference/a5_resolution_stats.html)
   gives the cell area at each.
 - `stat`: one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`,
@@ -321,7 +321,7 @@ a5_read_raster(src, 14L, store_opts = c(aws_region = "us-west-2",
                                         aws_skip_signature = "true"))
 
 # check region, endpoint and signing before a long read
-a5_store_config(src, store_opts = c(aws_region = "us-west-2"))
+a5px_store_config(src, store_opts = c(aws_region = "us-west-2"))
 ```
 
 a5px does not read the shared credentials file or `AWS_PROFILE`. Without

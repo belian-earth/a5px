@@ -26,7 +26,7 @@ Raster metadata and object store configuration, without reading pixels.
 
 - [`a5_raster_info()`](https://belian-earth.github.io/a5px/reference/a5_raster_info.md)
   : Inspect a raster's structure
-- [`a5_store_config()`](https://belian-earth.github.io/a5px/reference/a5_store_config.md)
+- [`a5px_store_config()`](https://belian-earth.github.io/a5px/reference/a5px_store_config.md)
   : Inspect the object store configuration a source resolves to
 
 ## Coarser resolutions
@@ -40,16 +40,20 @@ Summarise A5-keyed results at a coarser resolution without re-reading.
 
 Write A5-keyed results to Parquet.
 
-- [`a5_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5_write_parquet.md)
+- [`a5px_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5px_write_parquet.md)
   : Write A5-keyed values to a Parquet file
 
 ## Configuration
 
-Worker and fetch concurrency.
+Worker and fetch concurrency, and the session cache of remote reads.
 
 - [`a5px_set_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md)
   [`a5px_get_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md)
   : Tile-level concurrency for raster reads
+- [`a5px_set_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
+  [`a5px_cache_info()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
+  [`a5px_clear_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
+  : Session cache of remote byte ranges
 
 ## Package overview
 

@@ -122,7 +122,7 @@ It handles both the wide and the list-column layout, with the same
     <h2 id="writing">Writing<a class="anchor" aria-label="anchor" href="#writing"></a></h2>
 
 
-<p><code><a href="a5_write_parquet.html">a5_write_parquet()</a></code> writes a tibble or Arrow table from the readers to
+<p><code><a href="a5px_write_parquet.html">a5px_write_parquet()</a></code> writes a tibble or Arrow table from the readers to
 Parquet, with a schema for A5 cells and value lists.</p>
     </div>
     <div class="section level2">
@@ -132,7 +132,7 @@ Parquet, with a schema for A5 cells and value lists.</p>
 <ul><li><p><code><a href="a5_raster_info.html">a5_raster_info()</a></code>: dimensions, data type, block grid, overview levels,
 CRS, band scale and offset, and the WGS 84 envelope, without reading
 pixels.</p></li>
-<li><p><code><a href="a5_store_config.html">a5_store_config()</a></code>: the object store configuration a remote <code>src</code>
+<li><p><code><a href="a5px_store_config.html">a5px_store_config()</a></code>: the object store configuration a remote <code>src</code>
 resolves to.</p></li>
 </ul></div>
     <div class="section level2">
@@ -153,10 +153,13 @@ cells afterwards with coverage fractions of your choice.</p>
 
 <p>The accumulators hold every touched cell in memory (about 4.5 GB per
 million cells with 64 bands and <code>stat = c("mean", "count")</code>), so split
-very large reads by <code>bbox</code>. With <code>bbox_align = "block"</code> each chunk takes
-whole COG blocks, so no block is fetched twice; with
-<code>stat = c("sum", "count")</code> the per-cell partials of adjacent chunks add
-up exactly, and means follow. <code><a href="a5_raster_info.html">a5_raster_info()</a></code> reports the block grid
+very large reads by <code>bbox</code>. A pixel centred on an edge two chunks share
+belongs to one of them, so with <code>stat = c("sum", "count")</code> the per-cell
+partials of adjacent chunks add up exactly, and means follow. A remote
+block that several chunks touch is fetched once and then served from the
+session cache (<code><a href="a5px_set_cache.html">a5px_set_cache()</a></code>), as long as the cache holds it. With
+<code>bbox_align = "block"</code> each chunk takes whole COG blocks instead, so no
+chunk reads a block another chunk owns. <code><a href="a5_raster_info.html">a5_raster_info()</a></code> reports the block grid
 and envelope to build the chunks from.</p>
     </div>
     <div class="section level2">
@@ -167,7 +170,9 @@ and envelope to build the chunks from.</p>
 defaults for the worker pool (<code>cpu_workers</code>) and the number of tile
 fetches in flight (<code>io_concurrency</code>). They are independent of
 <code><a href="https://belian-earth.github.io/a5R/reference/a5_threads.html" class="external-link">a5R::a5_set_threads()</a></code>. Remote reads are usually limited by latency,
-so a higher <code>io_concurrency</code> often helps.</p>
+so a higher <code>io_concurrency</code> often helps. Remote reads keep the byte
+ranges they fetch in a session cache, so reads split into <code>bbox</code> chunks
+fetch each block once; <code><a href="a5px_set_cache.html">a5px_set_cache()</a></code> sets its budget.</p>
     </div>
     <div class="section level2">
     <h2 id="common-arguments">Common arguments<a class="anchor" aria-label="anchor" href="#common-arguments"></a></h2>
@@ -176,8 +181,8 @@ so a higher <code>io_concurrency</code> often helps.</p>
 <p>All readers accept the same core arguments:</p><ul><li><p><code>src</code>: one or more paths or URLs: local, <code>file://</code>, <code>http(s)://</code>,
 <code>s3://</code>, <code>gs://</code> or <code>az://</code>. Remote reads fetch byte ranges and never
 download the whole file; see "Remote sources".</p></li>
-<li><p><code>resolution</code>: A5 resolution, 0 to 30; <code><a href="https://belian-earth.github.io/a5R/reference/a5_resolution_stats.html" class="external-link">a5R::a5_cell_area()</a></code> gives the
-cell area at each.</p></li>
+<li><p><code>resolution</code>: A5 resolution, 0 to 29 (30 is not yet supported);
+<code><a href="https://belian-earth.github.io/a5R/reference/a5_resolution_stats.html" class="external-link">a5R::a5_cell_area()</a></code> gives the cell area at each.</p></li>
 <li><p><code>stat</code>: one or more of <code>"mean"</code>, <code>"sum"</code>, <code>"count"</code>, <code>"min"</code>, <code>"max"</code>,
 <code>"var"</code>, <code>"sd"</code>, <code>"majority"</code>, <code>"fractions"</code> and <code>"npix"</code>. Several give
 one column per band and stat. <code>var</code> and <code>sd</code> use the sample formula
@@ -196,7 +201,7 @@ selected bands are fetched.</p></li>
 byte-range requests and the file is never downloaded whole. Cloud
 clients are configured from the environment first and from the readers'
 <code>store_opts</code> argument second, so an explicit option always wins.
-<code><a href="a5_store_config.html">a5_store_config()</a></code> shows the resolved configuration without making a
+<code><a href="a5px_store_config.html">a5px_store_config()</a></code> shows the resolved configuration without making a
 request.</p><ul><li><p>S3: every <code>AWS_*</code> variable <code>object_store</code> understands, including
 <code>AWS_REGION</code> / <code>AWS_DEFAULT_REGION</code>, <code>AWS_ACCESS_KEY_ID</code>,
 <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_SESSION_TOKEN</code>, <code>AWS_ENDPOINT</code> /

@@ -75,7 +75,7 @@ with two columns:
 
 ## See also
 
-[`a5_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5_write_parquet.md)
+[`a5px_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5px_write_parquet.md)
 to write the result to Parquet,
 [`a5_read_raster()`](https://belian-earth.github.io/a5px/reference/a5_read_raster.md)
 for the tibble path.
@@ -88,6 +88,6 @@ if (FALSE) { # \dontrun{
     "https://data.source.coop/.../tile.tiff",
     resolution = 14L, bands = 1:8, value_type = "float32"
   )
-  a5_write_parquet(tbl, "embeddings.parquet")
+  a5px_write_parquet(tbl, "embeddings.parquet")
 } # }
 ```

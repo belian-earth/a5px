@@ -2,7 +2,7 @@
 
 Same engine and on-disk schema as
 [`a5_read_raster_arrow()`](https://belian-earth.github.io/a5px/reference/a5_read_raster_arrow.md) +
-[`a5_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5_write_parquet.md),
+[`a5px_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5px_write_parquet.md),
 but skips the R/Arrow round-trip entirely: the Rust side aggregates
 pixels into A5 cells, builds the `cell:uint64` +
 `value:FixedSizeList<float, n_bands>` RecordBatch from its existing flat

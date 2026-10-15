@@ -146,11 +146,11 @@
 <span><span class="fu"><a href="reference/a5_raster_to_parquet.html">a5_raster_to_parquet</a></span><span class="op">(</span><span class="va">src</span>, <span class="va">dest</span>, <span class="va">resolution</span>, <span class="va">stat</span>, <span class="va">bands</span>, <span class="va">value_type</span>, <span class="va">compression</span><span class="op">)</span></span>
 <span></span>
 <span><span class="co"># write a tibble or Arrow table from the first two</span></span>
-<span><span class="fu"><a href="reference/a5_write_parquet.html">a5_write_parquet</a></span><span class="op">(</span><span class="va">x</span>, <span class="va">dest</span>, compression <span class="op">=</span> <span class="st">"zstd"</span><span class="op">)</span></span>
+<span><span class="fu"><a href="reference/a5px_write_parquet.html">a5px_write_parquet</a></span><span class="op">(</span><span class="va">x</span>, <span class="va">dest</span>, compression <span class="op">=</span> <span class="st">"zstd"</span><span class="op">)</span></span>
 <span></span>
 <span><span class="co"># metadata without reading pixels</span></span>
 <span><span class="fu"><a href="reference/a5_raster_info.html">a5_raster_info</a></span><span class="op">(</span><span class="va">src</span><span class="op">)</span>   <span class="co"># dimensions, data type, block grid, overviews, CRS, envelope</span></span>
-<span><span class="fu"><a href="reference/a5_store_config.html">a5_store_config</a></span><span class="op">(</span><span class="va">src</span><span class="op">)</span>  <span class="co"># resolved object store configuration for a remote src</span></span></code></pre></div>
+<span><span class="fu"><a href="reference/a5px_store_config.html">a5px_store_config</a></span><span class="op">(</span><span class="va">src</span><span class="op">)</span>  <span class="co"># resolved object store configuration for a remote src</span></span></code></pre></div>
 <p>Their main arguments:</p>
 <ul>
 <li>
@@ -158,7 +158,7 @@
 <li>
 <code>separate</code>, <code>composite</code>: how several files combine (see <a href="#several-files">Several files</a>).</li>
 <li>
-<code>resolution</code>: A5 resolution, 0 to 30. <code><a href="https://belian-earth.github.io/a5R/reference/a5_resolution_stats.html" class="external-link">a5R::a5_cell_area()</a></code> gives the cell area at each.</li>
+<code>resolution</code>: A5 resolution, 0 to 29 (30 is not yet supported). <code><a href="https://belian-earth.github.io/a5R/reference/a5_resolution_stats.html" class="external-link">a5R::a5_cell_area()</a></code> gives the cell area at each.</li>
 <li>
 <code>stat</code>: one or more of <code>"mean"</code>, <code>"sum"</code>, <code>"count"</code>, <code>"min"</code>, <code>"max"</code>, <code>"var"</code>, <code>"sd"</code>, <code>"majority"</code> and <code>"fractions"</code>. With several, the tibble has one column per band and stat, and the Arrow and Parquet outputs one list column per stat.</li>
 <li>
@@ -281,7 +281,7 @@
 <span>                                        aws_skip_signature <span class="op">=</span> <span class="st">"true"</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
 <span><span class="co"># check region, endpoint and signing before a long read</span></span>
-<span><span class="fu"><a href="reference/a5_store_config.html">a5_store_config</a></span><span class="op">(</span><span class="va">src</span>, store_opts <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>aws_region <span class="op">=</span> <span class="st">"us-west-2"</span><span class="op">)</span><span class="op">)</span></span></code></pre></div>
+<span><span class="fu"><a href="reference/a5px_store_config.html">a5px_store_config</a></span><span class="op">(</span><span class="va">src</span>, store_opts <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>aws_region <span class="op">=</span> <span class="st">"us-west-2"</span><span class="op">)</span><span class="op">)</span></span></code></pre></div>
 <p>a5px does not read the shared credentials file or <code>AWS_PROFILE</code>. Without credentials or <code>aws_skip_signature</code>, the client falls back to instance metadata, which off AWS waits for a long timeout before failing.</p>
 </div>
 <div class="section level3">

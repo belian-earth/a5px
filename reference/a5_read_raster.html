@@ -89,7 +89,8 @@ sets how they combine; names of <code>src</code> label the sources.</p></dd>
 
 
 <dt id="arg-resolution">resolution<a class="anchor" aria-label="anchor" href="#arg-resolution"></a></dt>
-<dd><p>Integer scalar A5 resolution (0–30).</p></dd>
+<dd><p>Integer scalar A5 resolution (0–29). Resolution 30 is
+refused for now: A5 returns resolution-29 cells for some points at 30.</p></dd>
 
 
 <dt id="arg-stat">stat<a class="anchor" aria-label="anchor" href="#arg-stat"></a></dt>
@@ -181,8 +182,8 @@ the polygon boundary touches, for gap-free coverage. Only used with
 <dt id="arg-src-nodata">src_nodata<a class="anchor" aria-label="anchor" href="#arg-src-nodata"></a></dt>
 <dd><p>Optional numeric scalar overriding the source nodata.
 Use this when the file's <code>TIFFTAG_GDAL_NODATA</code> tag is missing or wrong;
-it takes precedence over the metadata value when set. <code>NULL</code> (default)
-uses whatever <code>async-tiff</code> exposes.</p></dd>
+it takes precedence over the metadata value when set. <code>NaN</code> and
+infinities are accepted. <code>NULL</code> (default) uses the file's tag.</p></dd>
 
 
 <dt id="arg-mode">mode<a class="anchor" aria-label="anchor" href="#arg-mode"></a></dt>
@@ -221,7 +222,8 @@ error otherwise.</p></dd>
 <dd><p>Number of CPU threads for decoding and indexing
 (each decoded block is indexed as row stripes across all workers).
 <code>NULL</code> (default) resolves from <code>getOption("a5px.cpu_workers")</code>, env
-<code>A5PX_CPU_WORKERS</code>, then <code><a href="https://rdrr.io/r/parallel/detectCores.html" class="external-link">parallel::detectCores()</a></code>.</p></dd>
+<code>A5PX_CPU_WORKERS</code>, then the CPUs available to the R process, which
+respects container and cgroup CPU limits.</p></dd>
 
 
 <dt id="arg-io-concurrency">io_concurrency<a class="anchor" aria-label="anchor" href="#arg-io-concurrency"></a></dt>
@@ -229,7 +231,7 @@ error otherwise.</p></dd>
 to the I/O stage; each task carries one block, or a run of up to four
 adjacent blocks on files without a predictor. <code>NULL</code> (default) resolves from
 <code>getOption("a5px.io_concurrency")</code>, env <code>A5PX_IO_CONCURRENCY</code>, then
-<code>min(32, max(cpu_workers, 8))</code>. Bump this for cloud reads of multi-band
+<code>min(16, max(cpu_workers, 8))</code>. Bump this for cloud reads of multi-band
 embedding rasters where the network can absorb more parallelism than
 the CPU pool. See <code><a href="a5px_set_concurrency.html">a5px_set_concurrency()</a></code>.</p></dd>
 
@@ -261,8 +263,9 @@ The function is evaluated once over the full integer code domain to
 build a lookup table applied on the Rust side, which restricts
 <code>dequant</code> to sources with an integer data type of 16 bits or fewer
 (int8 / uint8 / int16 / uint16); other dtypes error at read time.
-nodata is matched against the raw code, before decoding. <code>NULL</code>
-(default) reads raw values.</p></dd>
+nodata is matched against the raw code, before decoding, and a code
+the function maps to <code>NA</code> is skipped like nodata. <code>NULL</code> (default)
+reads raw values.</p></dd>
 
 
 <dt id="arg-as-vector">as_vector<a class="anchor" aria-label="anchor" href="#arg-as-vector"></a></dt>
@@ -298,7 +301,7 @@ keys for the provider, e.g. <code>aws_region</code>, <code>aws_skip_signature</c
 <code>aws_endpoint</code>, <code>aws_virtual_hosted_style_request</code>, the <code>google_*</code> /
 <code>azure_*</code> equivalents, and for plain HTTP(S) the client keys such as
 <code>timeout</code> or <code>allow_http</code>. Unknown keys, and any key given with a
-local path, are errors. Inspect the result with <code><a href="a5_store_config.html">a5_store_config()</a></code>.</p></dd>
+local path, are errors. Inspect the result with <code><a href="a5px_store_config.html">a5px_store_config()</a></code>.</p></dd>
 
 
 <dt id="arg-separate">separate<a class="anchor" aria-label="anchor" href="#arg-separate"></a></dt>
@@ -345,7 +348,8 @@ with <code>stat = "var"</code> includes. <code>"count"</code> gives the number o
 valid data in the cell, such as the number of cloud-free captures, and
 <code>"sum"</code> and <code>"count"</code> are 0 where no source has valid data. With
 <code>stat = "mean"</code>, <code>composite = "mean"</code> equals the pooled mean. Cells are
-the shared grid, so the sources need not be aligned. In centroid mode
+the shared grid, so the sources' pixel grids need not be aligned,
+though they must have the same pixel size. In centroid mode
 each source's sample has weight 1. Not available with
 <code>separate = TRUE</code>, <code>"fractions"</code> or <code>"npix"</code>.</p></dd>
 
@@ -392,9 +396,11 @@ because each pixel only contributes to one cell.</p></li>
 returned values are in the raster's native domain. Set <code>scoff = TRUE</code> to
 apply them per pixel before aggregation. <code><a href="a5_raster_info.html">a5_raster_info()</a></code> reports the
 values a file declares.</p>
-<p><strong>NoData:</strong> the dataset-level GDAL <code>NODATA_VALUE</code> tag (when present) is
-used to skip per-band samples. Per-band nodata via <code>GDAL_METADATA</code> XML is
-not yet supported.</p>
+<p><strong>NoData:</strong> a pixel's band value is skipped when it equals the
+dataset-wide nodata value (GDAL's <code>TIFFTAG_GDAL_NODATA</code>, or
+<code>src_nodata</code>), when it is <code>NaN</code>, whatever the nodata value, and when
+<code>dequant</code> maps it to <code>NA</code>. GeoTIFF has no per-band nodata; bands read
+from separate files with <code>separate = TRUE</code> each keep their file's.</p>
     </div>
 
     <div class="section level2">

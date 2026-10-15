@@ -65,7 +65,7 @@ It handles both the wide and the list-column layout, with the same
 
 ## Writing
 
-[`a5_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5_write_parquet.md)
+[`a5px_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5px_write_parquet.md)
 writes a tibble or Arrow table from the readers to Parquet, with a
 schema for A5 cells and value lists.
 
@@ -75,7 +75,7 @@ schema for A5 cells and value lists.
   dimensions, data type, block grid, overview levels, CRS, band scale
   and offset, and the WGS 84 envelope, without reading pixels.
 
-- [`a5_store_config()`](https://belian-earth.github.io/a5px/reference/a5_store_config.md):
+- [`a5px_store_config()`](https://belian-earth.github.io/a5px/reference/a5px_store_config.md):
   the object store configuration a remote `src` resolves to.
 
 ## Areas of interest
@@ -93,10 +93,15 @@ fractions of your choice.
 
 The accumulators hold every touched cell in memory (about 4.5 GB per
 million cells with 64 bands and `stat = c("mean", "count")`), so split
-very large reads by `bbox`. With `bbox_align = "block"` each chunk takes
-whole COG blocks, so no block is fetched twice; with
-`stat = c("sum", "count")` the per-cell partials of adjacent chunks add
-up exactly, and means follow.
+very large reads by `bbox`. A pixel centred on an edge two chunks share
+belongs to one of them, so with `stat = c("sum", "count")` the per-cell
+partials of adjacent chunks add up exactly, and means follow. A remote
+block that several chunks touch is fetched once and then served from the
+session cache
+([`a5px_set_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)),
+as long as the cache holds it. With `bbox_align = "block"` each chunk
+takes whole COG blocks instead, so no chunk reads a block another chunk
+owns.
 [`a5_raster_info()`](https://belian-earth.github.io/a5px/reference/a5_raster_info.md)
 reports the block grid and envelope to build the chunks from.
 
@@ -110,7 +115,11 @@ number of tile fetches in flight (`io_concurrency`). They are
 independent of
 [`a5R::a5_set_threads()`](https://belian-earth.github.io/a5R/reference/a5_threads.html).
 Remote reads are usually limited by latency, so a higher
-`io_concurrency` often helps.
+`io_concurrency` often helps. Remote reads keep the byte ranges they
+fetch in a session cache, so reads split into `bbox` chunks fetch each
+block once;
+[`a5px_set_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
+sets its budget.
 
 ## Common arguments
 
@@ -120,7 +129,7 @@ All readers accept the same core arguments:
   `s3://`, `gs://` or `az://`. Remote reads fetch byte ranges and never
   download the whole file; see "Remote sources".
 
-- `resolution`: A5 resolution, 0 to 30;
+- `resolution`: A5 resolution, 0 to 29 (30 is not yet supported);
   [`a5R::a5_cell_area()`](https://belian-earth.github.io/a5R/reference/a5_resolution_stats.html)
   gives the cell area at each.
 
@@ -144,7 +153,7 @@ All readers accept the same core arguments:
 byte-range requests and the file is never downloaded whole. Cloud
 clients are configured from the environment first and from the readers'
 `store_opts` argument second, so an explicit option always wins.
-[`a5_store_config()`](https://belian-earth.github.io/a5px/reference/a5_store_config.md)
+[`a5px_store_config()`](https://belian-earth.github.io/a5px/reference/a5px_store_config.md)
 shows the resolved configuration without making a request.
 
 - S3: every `AWS_*` variable `object_store` understands, including

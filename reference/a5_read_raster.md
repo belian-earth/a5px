@@ -46,7 +46,8 @@ a5_read_raster(
 
 - resolution:
 
-  Integer scalar A5 resolution (0–30).
+  Integer scalar A5 resolution (0–29). Resolution 30 is refused for now:
+  A5 returns resolution-29 cells for some points at 30.
 
 - stat:
 
@@ -150,8 +151,8 @@ a5_read_raster(
 
   Optional numeric scalar overriding the source nodata. Use this when
   the file's `TIFFTAG_GDAL_NODATA` tag is missing or wrong; it takes
-  precedence over the metadata value when set. `NULL` (default) uses
-  whatever `async-tiff` exposes.
+  precedence over the metadata value when set. `NaN` and infinities are
+  accepted. `NULL` (default) uses the file's tag.
 
 - mode:
 
@@ -188,8 +189,9 @@ a5_read_raster(
 
   Number of CPU threads for decoding and indexing (each decoded block is
   indexed as row stripes across all workers). `NULL` (default) resolves
-  from `getOption("a5px.cpu_workers")`, env `A5PX_CPU_WORKERS`, then
-  [`parallel::detectCores()`](https://rdrr.io/r/parallel/detectCores.html).
+  from `getOption("a5px.cpu_workers")`, env `A5PX_CPU_WORKERS`, then the
+  CPUs available to the R process, which respects container and cgroup
+  CPU limits.
 
 - io_concurrency:
 
@@ -197,7 +199,7 @@ a5_read_raster(
   each task carries one block, or a run of up to four adjacent blocks on
   files without a predictor. `NULL` (default) resolves from
   `getOption("a5px.io_concurrency")`, env `A5PX_IO_CONCURRENCY`, then
-  `min(32, max(cpu_workers, 8))`. Bump this for cloud reads of
+  `min(16, max(cpu_workers, 8))`. Bump this for cloud reads of
   multi-band embedding rasters where the network can absorb more
   parallelism than the CPU pool. See
   [`a5px_set_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md).
@@ -232,8 +234,8 @@ a5_read_raster(
   a lookup table applied on the Rust side, which restricts `dequant` to
   sources with an integer data type of 16 bits or fewer (int8 / uint8 /
   int16 / uint16); other dtypes error at read time. nodata is matched
-  against the raw code, before decoding. `NULL` (default) reads raw
-  values.
+  against the raw code, before decoding, and a code the function maps to
+  `NA` is skipped like nodata. `NULL` (default) reads raw values.
 
 - as_vector:
 
@@ -271,7 +273,7 @@ a5_read_raster(
   `azure_*` equivalents, and for plain HTTP(S) the client keys such as
   `timeout` or `allow_http`. Unknown keys, and any key given with a
   local path, are errors. Inspect the result with
-  [`a5_store_config()`](https://belian-earth.github.io/a5px/reference/a5_store_config.md).
+  [`a5px_store_config()`](https://belian-earth.github.io/a5px/reference/a5px_store_config.md).
 
 - separate:
 
@@ -322,9 +324,10 @@ a5_read_raster(
   cell, such as the number of cloud-free captures, and `"sum"` and
   `"count"` are 0 where no source has valid data. With `stat = "mean"`,
   `composite = "mean"` equals the pooled mean. Cells are the shared
-  grid, so the sources need not be aligned. In centroid mode each
-  source's sample has weight 1. Not available with `separate = TRUE`,
-  `"fractions"` or `"npix"`.
+  grid, so the sources' pixel grids need not be aligned, though they
+  must have the same pixel size. In centroid mode each source's sample
+  has weight 1. Not available with `separate = TRUE`, `"fractions"` or
+  `"npix"`.
 
 ## Value
 
@@ -388,9 +391,11 @@ apply them per pixel before aggregation.
 [`a5_raster_info()`](https://belian-earth.github.io/a5px/reference/a5_raster_info.md)
 reports the values a file declares.
 
-**NoData:** the dataset-level GDAL `NODATA_VALUE` tag (when present) is
-used to skip per-band samples. Per-band nodata via `GDAL_METADATA` XML
-is not yet supported.
+**NoData:** a pixel's band value is skipped when it equals the
+dataset-wide nodata value (GDAL's `TIFFTAG_GDAL_NODATA`, or
+`src_nodata`), when it is `NaN`, whatever the nodata value, and when
+`dequant` maps it to `NA`. GeoTIFF has no per-band nodata; bands read
+from separate files with `separate = TRUE` each keep their file's.
 
 ## Examples
 

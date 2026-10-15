@@ -5,11 +5,11 @@
       fontURL: "https://cdn.jsdelivr.net/npm/mathjax@3.2.2/es5/output/chtml/fonts/woff-v2"
     }
   };
-</script><script src="../deps/jquery-3.6.0/jquery-3.6.0.min.js"></script><meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no"><link href="../deps/bootstrap-5.3.8/bootstrap.min.css" rel="stylesheet"><script src="../deps/bootstrap-5.3.8/bootstrap.bundle.min.js"></script><link href="../deps/font-awesome-6.5.2/css/all.min.css" rel="stylesheet"><link href="../deps/font-awesome-6.5.2/css/v4-shims.min.css" rel="stylesheet"><script src="../deps/headroom-0.11.0/headroom.min.js"></script><script src="../deps/headroom-0.11.0/jQuery.headroom.min.js"></script><script src="../deps/bootstrap-toc-1.0.1/bootstrap-toc.min.js"></script><script src="../deps/clipboard.js-2.0.11/clipboard.min.js"></script><script src="../deps/search-1.0.0/autocomplete.jquery.min.js"></script><script src="../deps/search-1.0.0/fuse.min.js"></script><script src="../deps/search-1.0.0/mark.min.js"></script><!-- pkgdown --><script src="../pkgdown.js"></script><meta property="og:title" content="Aggregate A5-keyed values to a coarser resolution — a5_aggregate"><meta name="description" content="Lifts each row's A5 cell to its supercell at to_resolution via
+</script><script src="../deps/jquery-3.6.0/jquery-3.6.0.min.js"></script><meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no"><link href="../deps/bootstrap-5.3.8/bootstrap.min.css" rel="stylesheet"><script src="../deps/bootstrap-5.3.8/bootstrap.bundle.min.js"></script><link href="../deps/font-awesome-6.5.2/css/all.min.css" rel="stylesheet"><link href="../deps/font-awesome-6.5.2/css/v4-shims.min.css" rel="stylesheet"><script src="../deps/headroom-0.11.0/headroom.min.js"></script><script src="../deps/headroom-0.11.0/jQuery.headroom.min.js"></script><script src="../deps/bootstrap-toc-1.0.1/bootstrap-toc.min.js"></script><script src="../deps/clipboard.js-2.0.11/clipboard.min.js"></script><script src="../deps/search-1.0.0/autocomplete.jquery.min.js"></script><script src="../deps/search-1.0.0/fuse.min.js"></script><script src="../deps/search-1.0.0/mark.min.js"></script><!-- pkgdown --><script src="../pkgdown.js"></script><meta property="og:title" content="Aggregate A5-keyed values to a coarser resolution — a5_aggregate"><meta name="description" content="Lifts each row's A5 cell to its supercell at resolution via
 a5R::a5_cell_to_supercell() and reduces
 the selected value columns within each supercell group. Avoids re-reading
 the source raster when you already have a high-resolution result and
-want it summarised at a coarser scale."><meta property="og:description" content="Lifts each row's A5 cell to its supercell at to_resolution via
+want it summarised at a coarser scale."><meta property="og:description" content="Lifts each row's A5 cell to its supercell at resolution via
 a5R::a5_cell_to_supercell() and reduces
 the selected value columns within each supercell group. Avoids re-reading
 the source raster when you already have a high-resolution result and
@@ -47,7 +47,7 @@ want it summarised at a coarser scale."><meta property="og:image" content="https
     </div>
 
     <div class="ref-description section level2">
-    <p>Lifts each row's A5 cell to its supercell at <code>to_resolution</code> via
+    <p>Lifts each row's A5 cell to its supercell at <code>resolution</code> via
 <code><a href="https://belian-earth.github.io/a5R/reference/a5_spatial_hierarchy.html" class="external-link">a5R::a5_cell_to_supercell()</a></code> and reduces
 the selected value columns within each supercell group. Avoids re-reading
 the source raster when you already have a high-resolution result and
@@ -58,9 +58,10 @@ want it summarised at a coarser scale.</p>
     <h2 id="ref-usage">Usage<a class="anchor" aria-label="anchor" href="#ref-usage"></a></h2>
     <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">a5_aggregate</span><span class="op">(</span></span>
 <span>  <span class="va">x</span>,</span>
-<span>  <span class="va">to_resolution</span>,</span>
+<span>  <span class="va">resolution</span>,</span>
 <span>  <span class="va">...</span>,</span>
-<span>  stat <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"mean"</span>, <span class="st">"sum"</span>, <span class="st">"count"</span>, <span class="st">"min"</span>, <span class="st">"max"</span>, <span class="st">"var"</span>, <span class="st">"sd"</span><span class="op">)</span></span>
+<span>  stat <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"mean"</span>, <span class="st">"sum"</span>, <span class="st">"count"</span>, <span class="st">"min"</span>, <span class="st">"max"</span>, <span class="st">"var"</span>, <span class="st">"sd"</span><span class="op">)</span>,</span>
+<span>  weights <span class="op">=</span> <span class="cn">NULL</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -73,9 +74,10 @@ want it summarised at a coarser scale.</p>
 <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a>.</p></dd>
 
 
-<dt id="arg-to-resolution">to_resolution<a class="anchor" aria-label="anchor" href="#arg-to-resolution"></a></dt>
+<dt id="arg-resolution">resolution<a class="anchor" aria-label="anchor" href="#arg-resolution"></a></dt>
 <dd><p>Integer scalar. The coarser target resolution.
-Must be strictly less than the input cells' resolution.</p></dd>
+Must be strictly less than the input cells' resolution, which must be
+the same for every row.</p></dd>
 
 
 <dt id="arg--">...<a class="anchor" aria-label="anchor" href="#arg--"></a></dt>
@@ -90,10 +92,17 @@ non-<code>NA</code> source values per group. <code>"var"</code> / <code>"sd"</co
 formula (divisor n - 1) to match R's <code><a href="https://rdrr.io/r/stats/cor.html" class="external-link">stats::var()</a></code> / <code><a href="https://rdrr.io/r/stats/sd.html" class="external-link">stats::sd()</a></code>;
 single-row groups are returned as <code>NA</code>.</p></dd>
 
+
+<dt id="arg-weights">weights<a class="anchor" aria-label="anchor" href="#arg-weights"></a></dt>
+<dd><p>Name of a numeric column of row weights for <code>"mean"</code>, or
+<code>NULL</code> (default) to use <code>npix</code> when <code>x</code> has it and equal weights
+otherwise. Rows with weight 0 or <code>NA</code> do not count. The weights column
+is summed, like <code>npix</code>.</p></dd>
+
 </dl></div>
     <div class="section level2">
     <h2 id="value">Value<a class="anchor" aria-label="anchor" href="#value"></a></h2>
-    <p>A tibble keyed by supercells at <code>to_resolution</code>, with the
+    <p>A tibble keyed by supercells at <code>resolution</code>, with the
 selected columns reduced. The cell column retains its original name
 and the <a href="https://belian-earth.github.io/a5R/reference/a5_cell.html" class="external-link">a5R::a5_cell</a> class.</p>
     </div>
@@ -108,6 +117,13 @@ because fine cells straddle coarse-cell boundaries. If you need
 conservative aggregation (counts that must sum exactly), use a higher
 input resolution so boundary error is small relative to cell area.
 Locating centres runs in parallel under <code><a href="https://belian-earth.github.io/a5R/reference/a5_threads.html" class="external-link">a5R::a5_set_threads()</a></code>.</p>
+<p>A cell's mean summarises its pixels, so <code>"mean"</code> is weighted by each
+row's pixel count: the <code>npix</code> column when <code>x</code> has one (read with
+<code>stat = c("mean", "npix")</code>), or the column named by <code>weights</code>. The
+result then equals a direct read at the coarse resolution, up to cells
+straddling coarse-cell boundaries. Without weights every row counts
+once. The <code>npix</code> column itself is always summed. <code>"var"</code> and <code>"sd"</code> are
+unweighted, over the rows' values.</p>
 <p>Both layouts produced by <code><a href="a5_read_raster.html">a5_read_raster()</a></code> are supported:</p><ul><li><p>wide: one numeric column per band (default).</p></li>
 <li><p>list-of-numeric: a single fixed-length list column (<code>as_vector = TRUE</code>).
 Reduced element-wise.</p></li>
@@ -116,8 +132,8 @@ Reduced element-wise.</p></li>
     <div class="section level2">
     <h2 id="ref-examples">Examples<a class="anchor" aria-label="anchor" href="#ref-examples"></a></h2>
     <div class="sourceCode"><pre class="sourceCode r"><code><span class="r-in"><span><span class="kw">if</span> <span class="op">(</span><span class="cn">FALSE</span><span class="op">)</span> <span class="op">{</span> <span class="co"># \dontrun{</span></span></span>
-<span class="r-in"><span>  <span class="va">fine</span> <span class="op">&lt;-</span> <span class="fu"><a href="a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">path</span>, resolution <span class="op">=</span> <span class="fl">14L</span><span class="op">)</span></span></span>
-<span class="r-in"><span>  <span class="va">coarse</span> <span class="op">&lt;-</span> <span class="fu">a5_aggregate</span><span class="op">(</span><span class="va">fine</span>, to_resolution <span class="op">=</span> <span class="fl">10L</span><span class="op">)</span></span></span>
+<span class="r-in"><span>  <span class="va">fine</span> <span class="op">&lt;-</span> <span class="fu"><a href="a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">path</span>, resolution <span class="op">=</span> <span class="fl">14L</span>, stat <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"mean"</span>, <span class="st">"npix"</span><span class="op">)</span><span class="op">)</span></span></span>
+<span class="r-in"><span>  <span class="va">coarse</span> <span class="op">&lt;-</span> <span class="fu">a5_aggregate</span><span class="op">(</span><span class="va">fine</span>, resolution <span class="op">=</span> <span class="fl">10L</span><span class="op">)</span></span></span>
 <span class="r-in"><span></span></span>
 <span class="r-in"><span>  <span class="co"># explicit column selection + sum reducer</span></span></span>
 <span class="r-in"><span>  <span class="fu">a5_aggregate</span><span class="op">(</span><span class="va">fine</span>, <span class="fl">10L</span>, <span class="va">B02</span>, <span class="va">B03</span>, stat <span class="op">=</span> <span class="st">"sum"</span><span class="op">)</span></span></span>

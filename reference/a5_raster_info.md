@@ -34,7 +34,7 @@ a5_raster_info(src, store_opts = NULL)
   `azure_*` equivalents, and for plain HTTP(S) the client keys such as
   `timeout` or `allow_http`. Unknown keys, and any key given with a
   local path, are errors. Inspect the result with
-  [`a5_store_config()`](https://belian-earth.github.io/a5px/reference/a5_store_config.md).
+  [`a5px_store_config()`](https://belian-earth.github.io/a5px/reference/a5px_store_config.md).
 
 ## Value
 

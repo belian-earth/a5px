@@ -35,21 +35,22 @@ defaults.
   this to match the number of physical cores you can spare.
 
 - **`io_concurrency`** is the number of in-flight tile fetches the
-  producer issues at once. For local files leave this at the default
-  (`io_concurrency = cpu_workers`); for cloud reads of multi-band
-  embedding rasters, push it higher (`32`, `64`+) so the network stays
-  busy while CPU workers consume from a bounded channel.
+  producer issues at once. For local files the default is enough; for
+  cloud reads of multi-band embedding rasters, push it higher (`32`,
+  `64`+) so the network stays busy while CPU workers consume from a
+  bounded channel.
 
 These two knobs replace the old `threads` arg, which conflated tokio
 worker count and tile-level parallelism in confusing ways.
 
 Defaults are resolved per call: function args \> options \> env vars \>
-built-in default
-([`parallel::detectCores()`](https://rdrr.io/r/parallel/detectCores.html)
-for `cpu_workers`, the same value capped at 32 for `io_concurrency`).
-Set globally via `a5px_set_concurrency()`,
-`options(a5px.cpu_workers = ...)`, `options(a5px.io_concurrency = ...)`,
-or environment variables `A5PX_CPU_WORKERS` / `A5PX_IO_CONCURRENCY`.
+built-in default. For `cpu_workers` that is the number of CPUs available
+to the R process, which respects affinity masks and container or cgroup
+CPU quotas (a job limited to 4 CPUs on a 20-core host gets 4); for
+`io_concurrency` it is `min(16, max(cpu_workers, 8))`. Set globally via
+`a5px_set_concurrency()`, `options(a5px.cpu_workers = ...)`,
+`options(a5px.io_concurrency = ...)`, or environment variables
+`A5PX_CPU_WORKERS` / `A5PX_IO_CONCURRENCY`.
 
 ## Examples
 
