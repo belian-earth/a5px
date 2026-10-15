@@ -95,7 +95,9 @@ a5_read_raster(
   Optional spatial subset, as a numeric `c(xmin, ymin, xmax, ymax)` in
   WGS 84 lon/lat. When supplied, only tiles overlapping the bbox (in
   raster CRS) are fetched from the COG, and pixels outside the bbox are
-  skipped. `NULL` (default) reads the whole raster.
+  skipped. The bbox is half-open on its `xmax` / `ymax` edges, except at
+  180 and 90, so bboxes that share an edge take a pixel centred on it
+  once. `NULL` (default) reads the whole raster.
 
 - bbox_align:
 
@@ -284,7 +286,11 @@ a5_read_raster(
     and `max` are over all observations, and `sum` and `count` include
     the overlap once per source, so `count` measures how many
     observations cover each cell. This differs from GDAL, where the last
-    source wins.
+    source wins. Each band must also be stored with the same scale and
+    offset in every source, unless `scoff` or `dequant` decodes the
+    values first, and with `use_overviews` all sources read one overview
+    pixel size: the coarsest suitable overview they all have, else full
+    resolution.
 
   - `TRUE`: each source adds its bands, as `gdalbuildvrt -separate`.
     Sources need not share a grid, CRS or pixel size. A single-band
@@ -307,9 +313,14 @@ a5_read_raster(
   `"sd"` or `"majority"`. Each source's value is weighted by its valid
   pixel count in the cell, so a source that covers only a sliver of a
   cell (at a scene edge, or around masked cloud) carries little weight;
-  `"min"`, `"max"`, `"sum"` and `"count"` are unweighted. `"count"`
-  gives the number of sources with valid data in the cell, such as the
-  number of cloud-free captures. With `stat = "mean"`,
+  `"min"`, `"max"`, `"sum"` and `"count"` are unweighted. A `"majority"`
+  value is weighted by the pixels of its class alone. `"median"` is the
+  weighted median of the sources' values, and `"var"` and `"sd"` measure
+  the spread between the sources' values: they omit the spread within
+  each source, which only `composite = NULL` with `stat = "var"`
+  includes. `"count"` gives the number of sources with valid data in the
+  cell, such as the number of cloud-free captures, and `"sum"` and
+  `"count"` are 0 where no source has valid data. With `stat = "mean"`,
   `composite = "mean"` equals the pooled mean. Cells are the shared
   grid, so the sources need not be aligned. In centroid mode each
   source's sample has weight 1. Not available with `separate = TRUE`,

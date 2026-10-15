@@ -130,7 +130,9 @@ tag (falling back to <code>band_NN</code> when descriptions are absent).</p></li
 <dt id="arg-bbox">bbox<a class="anchor" aria-label="anchor" href="#arg-bbox"></a></dt>
 <dd><p>Optional spatial subset, as a numeric <code>c(xmin, ymin, xmax, ymax)</code> in WGS 84 lon/lat. When
 supplied, only tiles overlapping the bbox (in raster CRS) are fetched
-from the COG, and pixels outside the bbox are skipped. <code>NULL</code> (default)
+from the COG, and pixels outside the bbox are skipped. The bbox is
+half-open on its <code>xmax</code> / <code>ymax</code> edges, except at 180 and 90, so bboxes
+that share an edge take a pixel centred on it once. <code>NULL</code> (default)
 reads the whole raster.</p></dd>
 
 
@@ -309,7 +311,11 @@ exactly. Where sources overlap, every capture counts: <code>mean</code>, <code>m
 and <code>max</code> are over all observations, and <code>sum</code> and <code>count</code> include
 the overlap once per source, so <code>count</code> measures how many
 observations cover each cell. This differs from GDAL, where the last
-source wins.</p></li>
+source wins. Each band must also be stored with the same scale and
+offset in every source, unless <code>scoff</code> or <code>dequant</code> decodes the
+values first, and with <code>use_overviews</code> all sources read one overview
+pixel size: the coarsest suitable overview they all have, else full
+resolution.</p></li>
 <li><p><code>TRUE</code>: each source adds its bands, as <code>gdalbuildvrt -separate</code>.
 Sources need not share a grid, CRS or pixel size. A single-band
 source is named by its label and a multi-band source's bands are
@@ -331,8 +337,13 @@ across the sources: <code>"mean"</code>, <code>"median"</code>, <code>"min"</cod
 weighted by its valid pixel count in the cell, so a source that covers
 only a sliver of a cell (at a scene edge, or around masked cloud)
 carries little weight; <code>"min"</code>, <code>"max"</code>, <code>"sum"</code> and <code>"count"</code> are
-unweighted. <code>"count"</code> gives the number of sources with valid data in
-the cell, such as the number of cloud-free captures. With
+unweighted. A <code>"majority"</code> value is weighted by the pixels of its
+class alone. <code>"median"</code> is the weighted median of the sources' values,
+and <code>"var"</code> and <code>"sd"</code> measure the spread between the sources' values:
+they omit the spread within each source, which only <code>composite = NULL</code>
+with <code>stat = "var"</code> includes. <code>"count"</code> gives the number of sources with
+valid data in the cell, such as the number of cloud-free captures, and
+<code>"sum"</code> and <code>"count"</code> are 0 where no source has valid data. With
 <code>stat = "mean"</code>, <code>composite = "mean"</code> equals the pooled mean. Cells are
 the shared grid, so the sources need not be aligned. In centroid mode
 each source's sample has weight 1. Not available with
