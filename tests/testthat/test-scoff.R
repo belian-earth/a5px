@@ -106,7 +106,7 @@ test_that("scoff applies in overlay and centroid modes and the Arrow path", {
 test_that("scoff is a no-op on a source without scale or offset tags", {
   f <- ext("f32_nodata.tif")
   skip_if(f == "")
-  expect_equal(a5_read_raster(f, 12L, scoff = TRUE), a5_read_raster(f, 12L))
+  expect_equal(ord(a5_read_raster(f, 12L, scoff = TRUE)), ord(a5_read_raster(f, 12L)))
 })
 
 test_that("scoff rejects dequant and categorical stats", {
