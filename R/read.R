@@ -62,7 +62,11 @@
 #'     and `max` are over all observations, and `sum` and `count` include
 #'     the overlap once per source, so `count` measures how many
 #'     observations cover each cell. This differs from GDAL, where the last
-#'     source wins.
+#'     source wins. Each band must also be stored with the same scale and
+#'     offset in every source, unless `scoff` or `dequant` decodes the
+#'     values first, and with `use_overviews` all sources read one overview
+#'     pixel size: the coarsest suitable overview they all have, else full
+#'     resolution.
 #'   - `TRUE`: each source adds its bands, as `gdalbuildvrt -separate`.
 #'     Sources need not share a grid, CRS or pixel size. A single-band
 #'     source is named by its label and a multi-band source's bands are
@@ -82,8 +86,13 @@
 #'   weighted by its valid pixel count in the cell, so a source that covers
 #'   only a sliver of a cell (at a scene edge, or around masked cloud)
 #'   carries little weight; `"min"`, `"max"`, `"sum"` and `"count"` are
-#'   unweighted. `"count"` gives the number of sources with valid data in
-#'   the cell, such as the number of cloud-free captures. With
+#'   unweighted. A `"majority"` value is weighted by the pixels of its
+#'   class alone. `"median"` is the weighted median of the sources' values,
+#'   and `"var"` and `"sd"` measure the spread between the sources' values:
+#'   they omit the spread within each source, which only `composite = NULL`
+#'   with `stat = "var"` includes. `"count"` gives the number of sources with
+#'   valid data in the cell, such as the number of cloud-free captures, and
+#'   `"sum"` and `"count"` are 0 where no source has valid data. With
 #'   `stat = "mean"`, `composite = "mean"` equals the pooled mean. Cells are
 #'   the shared grid, so the sources need not be aligned. In centroid mode
 #'   each source's sample has weight 1. Not available with
@@ -123,7 +132,9 @@
 #' @param bbox Optional spatial subset, as a numeric `c(xmin, ymin, xmax,
 #'   ymax)` in WGS 84 lon/lat. When
 #'   supplied, only tiles overlapping the bbox (in raster CRS) are fetched
-#'   from the COG, and pixels outside the bbox are skipped. `NULL` (default)
+#'   from the COG, and pixels outside the bbox are skipped. The bbox is
+#'   half-open on its `xmax` / `ymax` edges, except at 180 and 90, so bboxes
+#'   that share an edge take a pixel centred on it once. `NULL` (default)
 #'   reads the whole raster.
 #' @param bbox_align How `bbox` selects pixels. `"pixel"` (default) keeps
 #'   every pixel whose centre lies in the bbox. `"block"` keeps every
@@ -485,21 +496,29 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
     }
     return(cells)
   }
-  if (is.null(bbox)) {
-    # the envelope of every source
-    env <- vapply(src, function(s) {
-      as.numeric(a5_raster_bbox_lonlat_rs(s, store$keys, store$values))
-    }, numeric(4))
-    bbox <- c(min(env[1, ]), min(env[2, ]), max(env[3, ]), max(env[4, ]))
+  # Candidates are taken per source, from the bbox cut to the source's
+  # envelope (padded in Rust past the bulge of its outline), so sources far
+  # apart do not enumerate the cells between them.
+  boxes <- if (length(src)) {
+    lapply(src, function(s) {
+      env <- as.numeric(a5_raster_bbox_lonlat_rs(s, store$keys, store$values))
+      if (is.null(bbox)) env else intersect_bbox(bbox, env)
+    })
+  } else {
+    list(bbox)
   }
+  boxes <- unique(Filter(Negate(is.null), boxes))
   # Cells whose centre lies in the bbox, at the requested resolution so each
   # cell gets one centroid sample. The candidates come from a covering of the
   # bbox padded past the covering's residual bulge.
-  candidates <- a5R::a5_uncompact(
-    bbox_covering(pad_bbox(bbox, bbox_pad_deg), resolution),
-    resolution = resolution
-  )
-  cells <- cells_centred_in(candidates, bbox)
+  cells <- lapply(boxes, function(b) {
+    candidates <- a5R::a5_uncompact(
+      bbox_covering(pad_bbox(b, bbox_pad_deg), resolution),
+      resolution = resolution
+    )
+    cells_centred_in(candidates, b)
+  })
+  cells <- vctrs::vec_unique(vctrs::vec_c(a5R::a5_cell(character()), !!!cells))
   if (length(cells) == 0L) {
     cli::cli_abort(
       "No A5 cells have centroids within the requested bbox at resolution {resolution}. Use a finer resolution or a larger bbox.",
@@ -509,12 +528,22 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
   cells
 }
 
-#' The cells of `cells` whose centre lies in a WGS 84 bbox.
+#' The intersection of two WGS 84 bboxes, or `NULL` when they do not meet.
+#' @noRd
+intersect_bbox <- function(a, b) {
+  out <- c(max(a[1], b[1]), max(a[2], b[2]), min(a[3], b[3]), min(a[4], b[4]))
+  if (out[1] < out[3] && out[2] < out[4]) out else NULL
+}
+
+#' The cells of `cells` whose centre lies in a WGS 84 bbox. The max edges
+#' are open, so bboxes that share an edge take each cell once, except at the
+#' globe's edge (180 E, 90 N), as for pixels in the Rust readers.
 #' @noRd
 cells_centred_in <- function(cells, bbox) {
   ll <- a5R::a5_cell_to_lonlat(cells, as_dataframe = TRUE)
-  cells[ll$lon >= bbox[1] & ll$lon <= bbox[3] &
-          ll$lat >= bbox[2] & ll$lat <= bbox[4]]
+  below_max <- function(v, hi, globe) if (hi >= globe) v <= hi else v < hi
+  cells[ll$lon >= bbox[1] & below_max(ll$lon, bbox[3], 180) &
+          ll$lat >= bbox[2] & below_max(ll$lat, bbox[4], 90)]
 }
 
 #' Degrees of padding that hold every cell centred in a bbox inside

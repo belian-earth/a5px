@@ -51,9 +51,11 @@ check_sources <- function(src, separate, stats, composite = NULL,
   if (!is.logical(separate) || length(separate) != 1L || is.na(separate)) {
     cli::cli_abort("{.arg separate} must be {.code TRUE} or {.code FALSE}.", call = call)
   }
-  labels <- names(src)
-  if (is.null(labels) || any(is.na(labels) | !nzchar(labels))) {
-    labels <- sub("\\.[^.]*$", "", basename(sub("[?#].*$", "", src)))
+  labels <- sub("\\.[^.]*$", "", basename(sub("[?#].*$", "", src)))
+  nm <- names(src)
+  if (!is.null(nm)) {
+    named <- !is.na(nm) & nzchar(nm)
+    labels[named] <- nm[named]
   }
   if (separate) {
     if ("npix" %in% stats) {

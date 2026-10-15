@@ -16,7 +16,10 @@ use async_tiff::TIFF;
 use proj4rs::Proj;
 
 use crate::error::{A5CogError, Result};
-use crate::geo::{build_src_proj, build_src_proj_described, extract_geotransform, parse_band_descriptions};
+use crate::geo::{
+    build_src_proj, build_src_proj_described, extract_geotransform, parse_band_descriptions,
+    parse_band_scale_offset,
+};
 use crate::store::{parse_src, StoreOpts};
 
 /// One source as passed from R: its path or URL and its label (the name in
@@ -291,6 +294,44 @@ pub(crate) fn check_same_pixel_size(sources: &[OpenedSource]) -> Result<()> {
                  resolution, or set `separate = TRUE` to read them as separate bands",
                 first.spec.src, size0.0, size0.1, s.spec.src, size.0, size.1,
             )));
+        }
+    }
+    Ok(())
+}
+
+/// Sources combined into one raster and read as stored values (no `scoff`
+/// or `dequant`) must store each selected band with the same scale and
+/// offset, or codes of different meaning would be pooled: Sentinel-2 L2A
+/// from processing baseline 04.00 on, for one, adds an offset of -1000.
+/// A missing tag counts as scale 1, offset 0.
+pub(crate) fn check_same_scale_offset(sources: &[OpenedSource], selected: &[Vec<usize>]) -> Result<()> {
+    if sources.len() < 2 {
+        return Ok(());
+    }
+    let tags = |s: &OpenedSource| {
+        let (scale, offset) = parse_band_scale_offset(&s.ifd0, s.n_bands);
+        let or = |v: f64, d: f64| if v.is_nan() { d } else { v };
+        (0..s.n_bands).map(|b| (or(scale[b], 1.0), or(offset[b], 0.0))).collect::<Vec<_>>()
+    };
+    let first = tags(&sources[0]);
+    for (s, sel) in sources.iter().zip(selected).skip(1) {
+        let t = tags(s);
+        for &b in sel {
+            if t[b] != first[b] {
+                return Err(A5CogError::Invalid(format!(
+                    "sources combined into one raster store band {} ({}) with different scale \
+                     and offset: {} has scale {} offset {}, {} has scale {} offset {}; set \
+                     `scoff = TRUE` to decode each source before pooling",
+                    b + 1,
+                    s.band_names[b],
+                    sources[0].spec.src,
+                    first[b].0,
+                    first[b].1,
+                    s.spec.src,
+                    t[b].0,
+                    t[b].1,
+                )));
+            }
         }
     }
     Ok(())

@@ -34,7 +34,9 @@ use proj4rs::transform::transform as proj_transform;
 use crate::error::{A5CogError, Result};
 use crate::geo::{build_src_proj, extract_geotransform, is_nodata, parse_nodata};
 use crate::composite::Reducer;
-use crate::sources::{check_same_pixel_size, open_sources, plan_bands, OpenedSource, SourceSpec};
+use crate::sources::{
+    check_same_pixel_size, check_same_scale_offset, open_sources, plan_bands, OpenedSource, SourceSpec,
+};
 
 /// Output mirrors the forward path so the R-side wrappers don't need to
 /// branch on mode.
@@ -207,9 +209,11 @@ pub(crate) async fn sample_at_cells_async(
     let plan = plan_bands(&opened, separate, &bands_idx, &bands_names)?;
     if !separate {
         check_same_pixel_size(&opened)?;
+        if !scoff && dequant.is_none() {
+            check_same_scale_offset(&opened, &plan.selected)?;
+        }
     }
     let n_out = plan.n_out();
-    let n_in = cells_in.len();
     // Sources sample concurrently; split the worker and fetch budgets so
     // the read as a whole stays within them.
     let n_src = plan.selected.iter().filter(|s| !s.is_empty()).count().max(1);
@@ -235,24 +239,41 @@ pub(crate) async fn sample_at_cells_async(
 
     // Each column is the mean of its valid samples (one per source in a
     // pooled read, at most one under `separate`), or their composite.
+    // Samples are grouped by cell through (cell, source, local index)
+    // references, sorted, so output cells keep the order of `cells_in`.
     let red = composite.unwrap_or(Reducer::Mean);
+    let mut refs: Vec<(u32, u32, u32)> = Vec::new();
+    for (k, (smp, _, _)) in per_source.iter().enumerate() {
+        for (j, &i) in smp.cells.iter().enumerate() {
+            refs.push((i, k as u32, j as u32));
+        }
+    }
+    refs.sort_unstable();
     let mut cells_out = Vec::new();
     let mut flat_out: Vec<f64> = Vec::new();
     let mut col_vals: Vec<Vec<(f64, f64)>> = vec![Vec::new(); n_out];
-    for i in 0..n_in {
+    let mut a = 0;
+    while a < refs.len() {
+        let i = refs[a].0;
+        let mut e = a;
+        while e < refs.len() && refs[e].0 == i {
+            e += 1;
+        }
         col_vals.iter_mut().for_each(Vec::clear);
-        for (vals, n_loc, slots) in &per_source {
+        for &(_, k, j) in &refs[a..e] {
+            let (smp, n_loc, slots) = &per_source[k as usize];
             for (b, &col) in slots.iter().enumerate() {
-                let v = vals[i * n_loc + b];
+                let v = smp.vals[j as usize * n_loc + b];
                 if !v.is_nan() {
                     col_vals[col].push((v, 1.0));
                 }
             }
         }
+        a = e;
         if col_vals.iter().all(Vec::is_empty) {
             continue;
         }
-        cells_out.push(cells_in[i]);
+        cells_out.push(cells_in[i as usize]);
         for v in col_vals.iter_mut() {
             flat_out.push(red.reduce(v));
         }
@@ -260,9 +281,17 @@ pub(crate) async fn sample_at_cells_async(
     Ok(CentroidOutput { cells: cells_out, flat: flat_out, n_bands: n_out, band_names: plan.names })
 }
 
+/// One source's samples: the indices into `cells_in` of the cells whose
+/// centre falls on its raster, and their values, `cells.len() *
+/// selected.len()` of them, cell-major, NaN where no sample is valid.
+struct SourceSamples {
+    cells: Vec<u32>,
+    vals: Vec<f64>,
+}
+
 /// Sample one source at the centres of `cells_in`, for its `selected`
-/// local bands. Returns `cells_in.len() * selected.len()` values, cell-major,
-/// NaN where the source has no valid sample.
+/// local bands. Memory scales with the cells on this raster, not with
+/// `cells_in`, which spans every source of the read.
 #[allow(clippy::too_many_arguments)]
 async fn sample_source(
     open: OpenedSource,
@@ -274,7 +303,7 @@ async fn sample_source(
     dequant: Option<Arc<crate::read::DequantLut>>,
     scoff: bool,
     interp: Interp,
-) -> Result<Vec<f64>> {
+) -> Result<SourceSamples> {
     let OpenedSource { reader, endianness, ifd0: ifd_owned, n_bands, .. } = open;
 
     if let Some(dq) = dequant.as_deref() {
@@ -370,19 +399,23 @@ async fn sample_source(
             })
             .collect()
     };
+    // cells on this raster, by local index
+    let mut on_raster: Vec<u32> = Vec::new();
     for (i, pl) in placed.iter().enumerate() {
         let Some((col, row, cx_lo, cx_hi, cy_lo, cy_hi)) = *pl else { continue };
+        let local = on_raster.len();
+        on_raster.push(i as u32);
         for ty in (cy_lo / tile_h)..=(cy_hi / tile_h) {
             for tx in (cx_lo / tile_w)..=(cx_hi / tile_w) {
-                buckets.entry((tx, ty)).or_default().push((i, col, row));
+                buckets.entry((tx, ty)).or_default().push((local, col, row));
             }
         }
     }
     drop(placed);
 
-    let n_in = cells_in.len();
+    let n_in = on_raster.len();
     if buckets.is_empty() {
-        return Ok(vec![f64::NAN; n_in * n_out]);
+        return Ok(SourceSamples { cells: Vec::new(), vals: Vec::new() });
     }
 
     let use_band_fetch = matches!(planar, PlanarConfiguration::Planar)
@@ -716,5 +749,5 @@ async fn sample_source(
             }
         }
     }
-    Ok(out)
+    Ok(SourceSamples { cells: on_raster, vals: out })
 }

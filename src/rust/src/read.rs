@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::cell_mask::{CellMask, MaskCache};
-use crate::grid_proj::{bbox_classify, ExactMap, GridProjector};
+use crate::grid_proj::{bbox_classify, in_bbox, ExactMap, GridProjector};
 use crate::locator::{a5_spherical, CellLocator, NO_CELL};
 use crate::cell_raw::{raw8_list_to_u64s, u64s_to_raw8_list};
 use crate::error::{A5CogError, Result};
@@ -28,7 +28,8 @@ use crate::geo::{
 };
 use crate::composite::Reducer;
 use crate::sources::{
-    check_same_pixel_size, open_sources, plan_bands, source_specs, OpenedSource, SourceSpec,
+    check_same_pixel_size, check_same_scale_offset, open_sources, plan_bands, source_specs,
+    OpenedSource, SourceSpec,
 };
 
 // stage timers (only emit if A5PX_PROFILE env var is set, e.g. A5PX_PROFILE=1)
@@ -679,6 +680,12 @@ fn cat_push(m: &mut ClassWeights, class: i32, w: f64) -> Result<()> {
 /// result is deterministic regardless of accumulation order. NaN when the
 /// cell/band saw no valid pixels.
 fn finalise_majority(m: &ClassWeights) -> f64 {
+    majority_and_weight(m).0
+}
+
+/// The majority class (as [`finalise_majority`]) and its weight; `(NaN, 0)`
+/// when the cell/band saw no valid pixels.
+fn majority_and_weight(m: &ClassWeights) -> (f64, f64) {
     let mut best: Option<(i32, f64)> = None;
     for &(c, w) in m {
         best = Some(match best {
@@ -693,8 +700,8 @@ fn finalise_majority(m: &ClassWeights) -> f64 {
         });
     }
     match best {
-        Some((c, _)) => c as f64,
-        None => f64::NAN,
+        Some((c, w)) => (c as f64, w),
+        None => (f64::NAN, 0.0),
     }
 }
 
@@ -842,6 +849,18 @@ impl<L: AccLayout> CellStore<L> {
         match stat {
             Stat::Majority => finalise_majority(&self.cat[idx]),
             _ => self.cont[idx].finalise(stat),
+        }
+    }
+
+    /// `stat` for local cell `i`, band `b`, with the weight it carries into
+    /// a composite: the valid pixel weight, or for `majority` the weight of
+    /// the majority class alone, so a source whose majority is narrow
+    /// counts for no more than the pixels that voted for it.
+    #[inline]
+    fn value_and_weight(&self, stat: Stat, i: usize, b: usize) -> (f64, f64) {
+        match stat {
+            Stat::Majority => majority_and_weight(&self.cat[i * self.n_out + b]),
+            _ => (self.value(stat, i, b), self.weight(i, b)),
         }
     }
 }
@@ -1328,7 +1347,7 @@ fn process_tile<L: AccLayout>(
                         exact_ll = Some(ll);
                         match ll {
                             Some((lon, lat)) => {
-                                lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3]
+                                in_bbox(lon, lat, &b)
                             }
                             None => false,
                         }
@@ -1592,7 +1611,7 @@ fn process_tile_overlay<L: AccLayout>(
                         let ll = map.lonlat(colf, rowf)?;
                         exact_ll = Some(ll);
                         match ll {
-                            Some((lon, lat)) => lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3],
+                            Some((lon, lat)) => in_bbox(lon, lat, &b),
                             None => false,
                         }
                     }
@@ -1664,10 +1683,10 @@ fn process_tile_overlay<L: AccLayout>(
     const CHUNK: usize = 1024;
     let mut pts: Vec<(f64, f64, f64)> = Vec::with_capacity(CHUNK.min(boundary.len()) * kk);
     let mut touched: Vec<(u64, u32)> = Vec::with_capacity(8);
-    let in_bbox = |lon: f64, lat: f64| -> bool {
+    let in_read_bbox = |lon: f64, lat: f64| -> bool {
         match bbox_lonlat {
             None => true,
-            Some(b) => lon >= b[0] && lon <= b[2] && lat >= b[1] && lat <= b[3],
+            Some(b) => in_bbox(lon, lat, &b),
         }
     };
     for chunk in boundary.chunks(CHUNK) {
@@ -1708,7 +1727,7 @@ fn process_tile_overlay<L: AccLayout>(
             for &(lon_o, lat_o, _) in &pts[pi * kk..(pi + 1) * kk] {
                 let lon = if dst_is_latlong { lon_o.to_degrees() } else { lon_o };
                 let lat = if dst_is_latlong { lat_o.to_degrees() } else { lat_o };
-                if !lon.is_finite() || !lat.is_finite() || !in_bbox(lon, lat) {
+                if !lon.is_finite() || !lat.is_finite() || !in_read_bbox(lon, lat) {
                     continue;
                 }
                 let id = locator.locate_exact(a5_spherical(lon, lat), &hints);
@@ -1866,7 +1885,7 @@ async fn read_raster_to_parquet_async(
 
 /// Composite per-source aggregates: for each cell and band, reduce each
 /// stat's per-source values, weighted by the source's valid pixel weight in
-/// that cell and band. Output cells are in first-seen order over the
+/// that cell and band (for `majority`, the weight of its majority class). Output cells are in first-seen order over the
 /// sources.
 fn composite_output<L: AccLayout>(aggs: Vec<Aggregate<L>>, red: Reducer) -> Output {
     let t_flatten = Instant::now();
@@ -1906,8 +1925,7 @@ fn composite_output<L: AccLayout>(aggs: Vec<Aggregate<L>>, red: Reducer) -> Outp
                 vals.clear();
                 for &(_, s, pi, i) in group {
                     let part = &aggs[s as usize].parts[pi as usize];
-                    let w = part.weight(i as usize, b);
-                    let v = part.value(stat, i as usize, b);
+                    let (v, w) = part.value_and_weight(stat, i as usize, b);
                     if w > 0.0 && v.is_finite() {
                         vals.push((v, w));
                     }
@@ -1984,6 +2002,7 @@ fn plan_source(
     open: OpenedSource,
     selected: Vec<usize>,
     slots: Vec<usize>,
+    level: Option<usize>,
     c: &PlanCommon,
 ) -> Result<Option<SourcePlan>> {
     let OpenedSource { spec, reader, tiff, endianness, ifd0, n_bands, .. } = open;
@@ -2020,7 +2039,8 @@ fn plan_source(
     // overview that still oversamples each cell yields a near-identical mean
     // for a fraction of the I/O and CPU. Returns 0 (full res) when disabled,
     // when there are no usable overviews, or when none is coarse enough.
-    let level = select_overview_level(
+    // Several pooled sources come with their shared level chosen.
+    let level = level.unwrap_or_else(|| select_overview_level(
         &tiff,
         full_w,
         full_h,
@@ -2028,7 +2048,7 @@ fn plan_source(
         &gt0,
         src_proj.is_latlong(),
         c.overview_target_m,
-    );
+    ));
     let ifd_owned = tiff
         .ifds()
         .get(level)
@@ -2093,7 +2113,7 @@ fn plan_source(
     // filter; `tile_bbox` (the AOI cells' envelope) only drives tile
     // selection when no user bbox is given, so AOI cells keep every pixel.
     let tiles: Vec<(usize, usize)> = if let Some(b) = c.bbox_lonlat.or(c.tile_bbox) {
-        let Some((tx_lo, ty_lo, tx_hi, ty_hi)) = projected_tile_range(
+        let Some((tx_lo, ty_lo, tx_hi, ty_hi)) = bbox_tile_range(
             b, &src_proj, c.dst_proj, &gt, width, height, tile_w, tile_h,
         )?
         else {
@@ -2194,6 +2214,9 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
     let bands = plan_bands(&opened, separate, &bands_idx, &bands_names)?;
     if !separate {
         check_same_pixel_size(&opened)?;
+        if !scoff && dequant.is_none() {
+            check_same_scale_offset(&opened, &bands.selected)?;
+        }
     }
     let n_out = bands.n_out();
     let band_names = bands.names.clone();
@@ -2217,12 +2240,19 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
         bbox_align_block,
         dst_proj: &dst_proj,
     };
+    let levels: Vec<Option<usize>> = if !separate && opened.len() > 1 {
+        common_overview_levels(&opened, overview_target_m)?.into_iter().map(Some).collect()
+    } else {
+        vec![None; opened.len()]
+    };
     let mut plans: Vec<SourcePlan> = Vec::with_capacity(opened.len());
-    for ((open, selected), slots) in opened.into_iter().zip(bands.selected).zip(bands.slots) {
+    for (((open, selected), slots), level) in
+        opened.into_iter().zip(bands.selected).zip(bands.slots).zip(levels)
+    {
         if selected.is_empty() {
             continue;
         }
-        if let Some(p) = plan_source(open, selected, slots, &common)? {
+        if let Some(p) = plan_source(open, selected, slots, level, &common)? {
             plans.push(p);
         }
     }
@@ -2787,30 +2817,15 @@ fn pixel_size_m(gt: &GeoTransform, is_latlong: bool, centre_lat_deg: f64) -> (f6
     }
 }
 
-/// Choose the IFD index to read for a forward mean aggregation. `target_m` is
-/// the A5 cell edge length in metres; `<= 0` disables overview use. Picks the
-/// coarsest overview whose pixel is still at least `OVERVIEW_MIN_OVERSAMPLE`x
-/// finer than the cell, else full resolution (level 0). Only reduced-resolution
-/// (non-mask), tiled IFDs with the full band count are considered.
-fn select_overview_level(
-    tiff: &TIFF,
-    full_w: usize,
-    full_h: usize,
-    n_bands: usize,
-    gt0: &GeoTransform,
-    src_is_latlong: bool,
-    target_m: f64,
-) -> usize {
-    if !(target_m > 0.0) || full_w == 0 || full_h == 0 {
-        return 0;
+/// The reduced-resolution levels a read may take instead of full
+/// resolution, as `(ifd index, x factor, y factor)`, the factors being the
+/// level's pixel size over full resolution's. Only reduced-resolution
+/// (non-mask), tiled IFDs with the full band count qualify.
+fn overview_levels(tiff: &TIFF, full_w: usize, full_h: usize, n_bands: usize) -> Vec<(usize, f64, f64)> {
+    let mut v = Vec::new();
+    if full_w == 0 || full_h == 0 {
+        return v;
     }
-    let centre_lat = gt0.0[3] + (full_h as f64 * 0.5) * gt0.0[5];
-    let (px0, py0) = pixel_size_m(gt0, src_is_latlong, centre_lat);
-    let budget = target_m / OVERVIEW_MIN_OVERSAMPLE;
-    let mut best = 0usize;
-    // coarsest pixel found so far that still fits the budget (full res never
-    // exceeds itself, so seed below it to force a real overview to win).
-    let mut best_px = f64::NEG_INFINITY;
     for (i, ifd) in tiff.ifds().iter().enumerate() {
         if i == 0 {
             continue;
@@ -2832,15 +2847,95 @@ fn select_overview_level(
         if ifd.tile_width().is_none() || ifd.tile_height().is_none() {
             continue;
         }
-        let px = px0 * (full_w as f64 / w as f64);
-        let py = py0 * (full_h as f64 / h as f64);
-        let pmax = px.max(py);
+        v.push((i, full_w as f64 / w as f64, full_h as f64 / h as f64));
+    }
+    v
+}
+
+/// Choose the IFD index to read for a forward mean aggregation. `target_m` is
+/// the A5 cell edge length in metres; `<= 0` disables overview use. Picks the
+/// coarsest overview whose pixel is still at least `OVERVIEW_MIN_OVERSAMPLE`x
+/// finer than the cell, else full resolution (level 0).
+fn select_overview_level(
+    tiff: &TIFF,
+    full_w: usize,
+    full_h: usize,
+    n_bands: usize,
+    gt0: &GeoTransform,
+    src_is_latlong: bool,
+    target_m: f64,
+) -> usize {
+    if !(target_m > 0.0) || full_w == 0 || full_h == 0 {
+        return 0;
+    }
+    let centre_lat = gt0.0[3] + (full_h as f64 * 0.5) * gt0.0[5];
+    let (px0, py0) = pixel_size_m(gt0, src_is_latlong, centre_lat);
+    let budget = target_m / OVERVIEW_MIN_OVERSAMPLE;
+    let mut best = 0usize;
+    // coarsest pixel found so far that still fits the budget (full res never
+    // exceeds itself, so seed below it to force a real overview to win).
+    let mut best_px = f64::NEG_INFINITY;
+    for (i, fx, fy) in overview_levels(tiff, full_w, full_h, n_bands) {
+        let pmax = (px0 * fx).max(py0 * fy);
         if pmax <= budget && pmax > best_px {
             best_px = pmax;
             best = i;
         }
     }
     best
+}
+
+/// Relative tolerance on the decimation factors of two sources' overviews
+/// taken as one level: overview sizes round up, so a 10981-pixel image
+/// halves to 5491 pixels, a factor of 1.9998.
+const OVERVIEW_FACTOR_TOL: f64 = 0.01;
+
+/// The level each source of a pooled or composite read takes. Pooled pixels
+/// must share one pixel size, or each source would count in proportion to
+/// its pixel density: GDAL's COG driver, for one, leaves overviews off
+/// small edge tiles of a mosaic. So the sources take the coarsest overview
+/// factor that every source has and that suits the cell (as
+/// [`select_overview_level`]), else full resolution.
+fn common_overview_levels(sources: &[OpenedSource], target_m: f64) -> Result<Vec<usize>> {
+    let full = vec![0usize; sources.len()];
+    if !(target_m > 0.0) {
+        return Ok(full);
+    }
+    let budget = target_m / OVERVIEW_MIN_OVERSAMPLE;
+    // per source: (level, fx, fy, coarser pixel edge in metres)
+    let mut per: Vec<Vec<(usize, f64, f64, f64)>> = Vec::with_capacity(sources.len());
+    for s in sources {
+        let geo = s.ifd0.geo_key_directory().ok_or(A5CogError::MissingGeoKey("GeoKeyDirectory"))?;
+        let latlong = build_src_proj(geo)?.is_latlong();
+        let gt0 = extract_geotransform(&s.ifd0)?;
+        let (w, h) = (s.ifd0.image_width() as usize, s.ifd0.image_height() as usize);
+        let centre_lat = gt0.0[3] + (h as f64 * 0.5) * gt0.0[5];
+        let (px0, py0) = pixel_size_m(&gt0, latlong, centre_lat);
+        per.push(
+            overview_levels(&s.tiff, w, h, s.n_bands)
+                .into_iter()
+                .map(|(i, fx, fy)| (i, fx, fy, (px0 * fx).max(py0 * fy)))
+                .collect(),
+        );
+    }
+    let close = |a: f64, b: f64| (a - b).abs() <= OVERVIEW_FACTOR_TOL * a.max(b);
+    let mut first: Vec<(usize, f64, f64, f64)> = per[0].clone();
+    first.sort_by(|a, b| b.3.total_cmp(&a.3));
+    'level: for &(i0, fx, fy, p) in &first {
+        if p > budget {
+            continue;
+        }
+        let mut levels = Vec::with_capacity(sources.len());
+        levels.push(i0);
+        for lv in &per[1..] {
+            match lv.iter().find(|l| close(l.1, fx) && close(l.2, fy) && l.3 <= budget) {
+                Some(l) => levels.push(l.0),
+                None => continue 'level,
+            }
+        }
+        return Ok(levels);
+    }
+    Ok(full)
 }
 
 /// Geotransform of an overview level, derived from IFD 0 by the dimension
@@ -2934,6 +3029,44 @@ fn rect_edge_samples(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(f64, f64)> {
         v.push((x0, y1 - t * (y1 - y0))); // left, top -> bottom
     }
     v
+}
+
+/// The inclusive tile-index range that may hold pixels in a WGS 84 bbox, or
+/// `Ok(None)` when none can. The bbox is first cut to the raster's
+/// footprint: projecting only a bbox's outline fails for a bbox far larger
+/// than the raster, since under transverse Mercator both poles and every
+/// meridian more than 90 degrees from the central one map to its central
+/// column, so the outline of a pole-to-pole bbox collapses onto that column.
+/// A bbox that holds the whole footprint takes every tile.
+#[allow(clippy::too_many_arguments)]
+fn bbox_tile_range(
+    bbox_lonlat: [f64; 4],
+    src_proj: &Proj,
+    dst_proj: &Proj,
+    gt: &GeoTransform,
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+) -> Result<Option<(usize, usize, usize, usize)>> {
+    let [xmin, ymin, xmax, ymax] = bbox_lonlat;
+    if !(xmin < xmax && ymin < ymax) {
+        return Err(A5CogError::Invalid(format!(
+            "bbox must satisfy xmin<xmax & ymin<ymax; got [{xmin}, {ymin}, {xmax}, {ymax}]"
+        )));
+    }
+    let Ok(fp) = footprint_lonlat(src_proj, dst_proj, gt, width, height) else {
+        return projected_tile_range(bbox_lonlat, src_proj, dst_proj, gt, width, height, tile_w, tile_h);
+    };
+    let fp = pad_footprint(fp);
+    if xmin <= fp[0] && ymin <= fp[1] && xmax >= fp[2] && ymax >= fp[3] {
+        return Ok(Some((0, 0, (width - 1) / tile_w, (height - 1) / tile_h)));
+    }
+    let cut = [xmin.max(fp[0]), ymin.max(fp[1]), xmax.min(fp[2]), ymax.min(fp[3])];
+    if !(cut[0] < cut[2] && cut[1] < cut[3]) {
+        return Ok(None);
+    }
+    projected_tile_range(cut, src_proj, dst_proj, gt, width, height, tile_w, tile_h)
 }
 
 /// Reproject a WGS84 lon/lat bbox into the raster CRS, take the axis-aligned
@@ -3732,8 +3865,10 @@ fn a5_sample_to_parquet_rs(
     Ok(dest.to_string())
 }
 
-/// WGS 84 envelope of a raster footprint: project the 4 corners + 4 edge
-/// midpoints of the projected extent and take the axis-aligned envelope.
+/// WGS 84 envelope of a raster footprint: the envelope of its densely
+/// sampled outline, widened to the full range of longitudes and to the pole
+/// when the raster contains a pole, whose latitude its outline never
+/// reaches.
 fn footprint_lonlat(
     src_proj: &Proj,
     dst_proj: &Proj,
@@ -3782,7 +3917,60 @@ fn footprint_lonlat(
             "could not project raster footprint into WGS84".into(),
         ));
     }
-    Ok([xmin, ymin, xmax, ymax])
+    let mut b = [xmin, ymin, xmax, ymax];
+    for lat in [90.0f64, -90.0] {
+        if raster_contains_lonlat(src_proj, dst_proj, gt, w, h, 0.0, lat) {
+            b[0] = -180.0;
+            b[2] = 180.0;
+            if lat > 0.0 { b[3] = 90.0 } else { b[1] = -90.0 }
+        }
+    }
+    Ok(b)
+}
+
+/// Whether a WGS 84 point falls inside the raster's grid.
+fn raster_contains_lonlat(
+    src_proj: &Proj,
+    dst_proj: &Proj,
+    gt: &GeoTransform,
+    w: f64,
+    h: f64,
+    lon: f64,
+    lat: f64,
+) -> bool {
+    if gt.0[2] != 0.0 || gt.0[4] != 0.0 {
+        return false;
+    }
+    let mut p = if dst_proj.is_latlong() {
+        (lon.to_radians(), lat.to_radians(), 0.0)
+    } else {
+        (lon, lat, 0.0)
+    };
+    if proj_transform(dst_proj, src_proj, &mut p).is_err() {
+        return false;
+    }
+    if src_proj.is_latlong() {
+        p.0 = p.0.to_degrees();
+        p.1 = p.1.to_degrees();
+    }
+    let col = (p.0 - gt.0[0]) / gt.0[1];
+    let row = (p.1 - gt.0[3]) / gt.0[5];
+    col.is_finite() && row.is_finite() && col >= 0.0 && col <= w && row >= 0.0 && row <= h
+}
+
+/// Degrees added to each side of a footprint used to select tiles or
+/// candidate cells: a little over 1% of its span, which covers the bulge of
+/// an outline edge between samples. Selecting extra is harmless, since the
+/// per-pixel test is exact.
+fn pad_footprint(b: [f64; 4]) -> [f64; 4] {
+    let px = 0.01 * (b[2] - b[0]) + 0.01;
+    let py = 0.01 * (b[3] - b[1]) + 0.01;
+    [
+        (b[0] - px).max(-180.0),
+        (b[1] - py).max(-90.0),
+        (b[2] + px).min(180.0),
+        (b[3] + py).min(90.0),
+    ]
 }
 
 /// Open `src` and read all IFDs.
@@ -3796,7 +3984,9 @@ async fn open_tiff(src: &str, store_opts: &StoreOpts) -> Result<TIFF> {
     Ok(TIFF::new(ifds, endianness))
 }
 
-/// Compute the WGS84 lon/lat bbox of the raster at `src`.
+/// The WGS84 lon/lat bbox of the raster at `src`, padded (as for tile
+/// selection) to hold every cell centre on the raster: centroid mode takes
+/// its candidate cells from it.
 /// @noRd
 /// @keywords internal
 #[extendr]
@@ -3823,7 +4013,7 @@ fn a5_raster_bbox_lonlat_rs(
             &src_proj, &dst_proj, &gt,
             ifd.image_width() as usize, ifd.image_height() as usize,
         )?;
-        Ok(b.to_vec())
+        Ok(pad_footprint(b).to_vec())
     })
 }
 

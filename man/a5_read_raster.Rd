@@ -75,7 +75,9 @@ tag (falling back to \code{band_NN} when descriptions are absent).
 
 \item{bbox}{Optional spatial subset, as a numeric \code{c(xmin, ymin, xmax, ymax)} in WGS 84 lon/lat. When
 supplied, only tiles overlapping the bbox (in raster CRS) are fetched
-from the COG, and pixels outside the bbox are skipped. \code{NULL} (default)
+from the COG, and pixels outside the bbox are skipped. The bbox is
+half-open on its \code{xmax} / \code{ymax} edges, except at 180 and 90, so bboxes
+that share an edge take a pixel centred on it once. \code{NULL} (default)
 reads the whole raster.}
 
 \item{bbox_align}{How \code{bbox} selects pixels. \code{"pixel"} (default) keeps
@@ -226,7 +228,11 @@ exactly. Where sources overlap, every capture counts: \code{mean}, \code{min}
 and \code{max} are over all observations, and \code{sum} and \code{count} include
 the overlap once per source, so \code{count} measures how many
 observations cover each cell. This differs from GDAL, where the last
-source wins.
+source wins. Each band must also be stored with the same scale and
+offset in every source, unless \code{scoff} or \code{dequant} decodes the
+values first, and with \code{use_overviews} all sources read one overview
+pixel size: the coarsest suitable overview they all have, else full
+resolution.
 \item \code{TRUE}: each source adds its bands, as \code{gdalbuildvrt -separate}.
 Sources need not share a grid, CRS or pixel size. A single-band
 source is named by its label and a multi-band source's bands are
@@ -248,8 +254,13 @@ across the sources: \code{"mean"}, \code{"median"}, \code{"min"}, \code{"max"}, 
 weighted by its valid pixel count in the cell, so a source that covers
 only a sliver of a cell (at a scene edge, or around masked cloud)
 carries little weight; \code{"min"}, \code{"max"}, \code{"sum"} and \code{"count"} are
-unweighted. \code{"count"} gives the number of sources with valid data in
-the cell, such as the number of cloud-free captures. With
+unweighted. A \code{"majority"} value is weighted by the pixels of its
+class alone. \code{"median"} is the weighted median of the sources' values,
+and \code{"var"} and \code{"sd"} measure the spread between the sources' values:
+they omit the spread within each source, which only \code{composite = NULL}
+with \code{stat = "var"} includes. \code{"count"} gives the number of sources with
+valid data in the cell, such as the number of cloud-free captures, and
+\code{"sum"} and \code{"count"} are 0 where no source has valid data. With
 \code{stat = "mean"}, \code{composite = "mean"} equals the pooled mean. Cells are
 the shared grid, so the sources need not be aligned. In centroid mode
 each source's sample has weight 1. Not available with
