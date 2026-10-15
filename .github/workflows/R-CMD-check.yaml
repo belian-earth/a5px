@@ -21,6 +21,8 @@ jobs:
         config:
           - {os: macos-latest,   r: 'release'}
           - {os: windows-latest, r: 'release'}
+          # no arrow binary for Windows ARM64; its tests skip
+          - {os: windows-11-arm, r: 'release', extra: 'arrow=?ignore'}
           - {os: ubuntu-latest,   r: 'devel', http-user-agent: 'release'}
           - {os: ubuntu-latest,   r: 'release'}
           - {os: ubuntu-latest,   r: 'oldrel-1'}
@@ -31,6 +33,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Add the Windows ARM64 Rust target
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        run: |
+          rustup target add aarch64-pc-windows-gnullvm
+          echo "_R_CHECK_FORCE_SUGGESTS_=false" >> $GITHUB_ENV
 
       - uses: r-lib/actions/setup-pandoc@v2
 
@@ -58,7 +66,9 @@ jobs:
 
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          extra-packages: any::rcmdcheck
+          extra-packages: |
+            any::rcmdcheck
+            ${{ matrix.config.extra }}
           needs: check
 
       - uses: r-lib/actions/check-r-package@v2
