@@ -64,18 +64,28 @@ check_aoi <- function(aoi, resolution, containment, call = rlang::caller_env()) 
 aoi_pad_edges <- 3
 
 #' WGS 84 bounding box of `aoi`, padded by `aoi_pad_edges` cell edges at
-#' `resolution` and clamped to the globe.
+#' `resolution` and clamped to the globe. Polygon edges are great circles,
+#' as in `a5R::a5_polygon_to_cells()`, and bulge poleward past their
+#' vertices (an edge along 60 N peaks at 63.4 N), so the box is
+#' `a5R::a5_bbox()`, not the vertices' envelope. A feature crossing the
+#' antimeridian widens the box to every longitude for now.
 #' @noRd
 aoi_tile_bbox <- function(aoi, resolution) {
-  bb <- unclass(wk::wk_bbox(aoi))
+  bb <- if (inherits(aoi, "a5_cell")) {
+    # cells: their own edges' bulge is well inside the padding
+    unclass(wk::wk_bbox(aoi))
+  } else {
+    unclass(a5R::a5_bbox(aoi))
+  }
+  crosses <- any(bb$xmin < -180 | bb$xmax > 180)
   pad_m <- aoi_pad_edges * a5_edge_metres(resolution)
   dlat <- pad_m / 111195 # metres per degree of latitude, authalic sphere
-  ymin <- max(bb$ymin - dlat, -90)
-  ymax <- min(bb$ymax + dlat, 90)
+  ymin <- max(min(bb$ymin) - dlat, -90)
+  ymax <- min(max(bb$ymax) + dlat, 90)
   coslat <- cos(max(abs(ymin), abs(ymax)) * pi / 180)
-  if (coslat < 1e-6) {
+  if (crosses || coslat < 1e-6) {
     return(c(-180, ymin, 180, ymax))
   }
   dlon <- dlat / coslat
-  c(max(bb$xmin - dlon, -180), ymin, min(bb$xmax + dlon, 180), ymax)
+  c(max(min(bb$xmin) - dlon, -180), ymin, min(max(bb$xmax) + dlon, 180), ymax)
 }

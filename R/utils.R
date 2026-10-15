@@ -107,18 +107,6 @@ check_sources <- function(src, separate, stats, composite = NULL,
        composite = composite)
 }
 
-#' Build an a5_cell vector from the b1..b8 raw fields returned by Rust.
-#' @noRd
-new_a5_cell_from_rs <- function(x) {
-  vctrs::new_rcrd(
-    list(
-      b1 = x$b1, b2 = x$b2, b3 = x$b3, b4 = x$b4,
-      b5 = x$b5, b6 = x$b6, b7 = x$b7, b8 = x$b8
-    ),
-    class = "a5_cell"
-  )
-}
-
 #' Validate a user-supplied bbox.
 #' @noRd
 check_bbox <- function(bbox, call = rlang::caller_env()) {

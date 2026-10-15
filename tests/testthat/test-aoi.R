@@ -149,3 +149,43 @@ test_that("an aoi covering the globe selects every cell", {
     expect_equal(out, full, ignore_attr = TRUE, info = mode)
   }
 })
+
+test_that("the AOI tile box holds the bulge of great-circle edges", {
+  # a 20 degree wide band: its top edge, a great circle, peaks at 61.37 N
+  aoi <- wk::wkt("POLYGON((-10 59, 10 59, 10 61, -10 61, -10 59))",
+                 crs = wk::wk_crs_longlat())
+  bb <- a5px:::aoi_tile_bbox(aoi, 11L)
+  expect_gt(bb[4], 61.37)
+  # every cell of the covering has its centre inside the tile box
+  cells <- a5R::a5_uncompact(a5R::a5_polygon_to_cells(aoi, resolution = 8L), resolution = 8L)
+  ll <- a5R::a5_cell_to_lonlat(cells, as_dataframe = TRUE)
+  bb8 <- a5px:::aoi_tile_bbox(aoi, 8L)
+  expect_true(all(ll$lat >= bb8[2] & ll$lat <= bb8[4] & ll$lon >= bb8[1] & ll$lon <= bb8[3]))
+})
+
+test_that("an AOI across the antimeridian widens the tile box to every longitude", {
+  aoi <- wk::wkt("POLYGON((179 -0.5, 181 -0.5, 181 0.5, 179 0.5, 179 -0.5))",
+                 crs = wk::wk_crs_longlat())
+  bb <- a5px:::aoi_tile_bbox(aoi, 9L)
+  expect_equal(bb[c(1, 3)], c(-180, 180))
+})
+
+test_that("an AOI band whose edges bulge past its vertices keeps every covering cell", {
+  skip_if_not_installed("terra")
+  # raster lon -10..10, lat 58..62; the AOI's top edge peaks at 61.37 N
+  r <- terra::rast(nrows = 400, ncols = 2000, crs = "EPSG:4326",
+                   extent = terra::ext(-10, 10, 58, 62))
+  terra::values(r) <- 1
+  names(r) <- "v"
+  f <- withr::local_tempfile(fileext = ".tif")
+  terra::writeRaster(r, f, gdal = c("TILED=YES", "BLOCKXSIZE=256", "BLOCKYSIZE=256"))
+  aoi <- wk::wkt("POLYGON((-10 59, 10 59, 10 61, -10 61, -10 59))",
+                 crs = wk::wk_crs_longlat())
+  got <- a5_read_raster(f, 9L, aoi = aoi, stat = "count")
+  covering <- a5R::a5_uncompact(a5R::a5_polygon_to_cells(aoi, resolution = 9L), resolution = 9L)
+  ll <- a5R::a5_cell_to_lonlat(covering, as_dataframe = TRUE)
+  # covering cells centred on the raster all come back
+  on_raster <- covering[ll$lon > -10 & ll$lon < 10 & ll$lat > 58 & ll$lat < 62]
+  expect_true(all(a5R::a5_u64_to_hex(on_raster) %in% a5R::a5_u64_to_hex(got$cell)))
+  expect_gt(max(a5R::a5_cell_to_lonlat(got$cell, as_dataframe = TRUE)$lat), 61.1)
+})

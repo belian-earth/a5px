@@ -1,8 +1,8 @@
 use extendr_api::prelude::*;
 
+mod a5r_api;
 mod band_fetch;
 mod cell_mask;
-mod cell_raw;
 mod composite;
 mod error;
 mod geo;
@@ -21,4 +21,5 @@ extendr_module! {
     mod a5px;
     use read;
     use range_cache;
+    use a5r_api;
 }

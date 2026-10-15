@@ -21,7 +21,7 @@ use std::time::Instant;
 use crate::cell_mask::{CellMask, MaskCache};
 use crate::grid_proj::{bbox_classify, in_bbox, ExactMap, GridProjector};
 use crate::locator::{a5_spherical, CellLocator, NO_CELL};
-use crate::cell_raw::{raw8_list_to_u64s, u64s_to_raw8_list};
+use crate::a5r_api::{cells_from_u64, cells_to_u64};
 use crate::error::{A5CogError, Result};
 use crate::geo::{
     GeoTransform, build_src_proj, extract_geotransform, is_nodata, parse_band_descriptions,
@@ -3243,7 +3243,7 @@ fn projected_tile_range(
 ///   starting at `dequant_min`; empty = no dequantization.
 /// @param dequant_min First code covered by `dequant_lut`.
 /// @param scoff Apply the file's per-band scale and offset before aggregation.
-/// @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
+/// @returns A list with `cell` (an `a5_cell` vector), `bands` (named numeric
 ///   vectors; key form is `<band>` for length-1 stats and `<band>__<stat>`
 ///   for length>1), `band_names`, and `stats` (character).
 /// @noRd
@@ -3271,7 +3271,7 @@ fn a5_read_raster_rs(
     cell_edge_m: f64,
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
-    aoi_covering: List,
+    aoi_covering: Robj,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -3303,7 +3303,7 @@ fn a5_read_raster_rs(
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
-    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_covering)).map(Arc::new);
+    let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(ReadArgs {
         sources: source_specs(src, src_labels)?,
@@ -3330,7 +3330,7 @@ fn a5_read_raster_rs(
     }))?;
 
     let t_rout = Instant::now();
-    let cell_list = u64s_to_raw8_list(&out.cells);
+    let cell_list = cells_from_u64(&out.cells);
 
     // de-interleave each per-stat flat buffer into one Vec<f64> per band per stat
     let n_cells = out.cells.len();
@@ -3413,7 +3413,7 @@ fn a5_read_raster_rs(
 /// @param overview_target_m A5 cell edge length in metres; when > 0 a COG
 ///   overview that still oversamples the cell is read instead of full
 ///   resolution. 0 disables overview use (always read IFD 0).
-/// @returns A list with `cell` (b1..b8 raw), `value_flat` (named list of
+/// @returns A list with `cell` (an `a5_cell` vector), `value_flat` (named list of
 ///   numeric vectors, one per stat in `stats` order, each of length
 ///   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
 /// @noRd
@@ -3441,7 +3441,7 @@ fn a5_read_raster_flat_rs(
     cell_edge_m: f64,
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
-    aoi_covering: List,
+    aoi_covering: Robj,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -3478,7 +3478,7 @@ fn a5_read_raster_flat_rs(
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
-    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_covering)).map(Arc::new);
+    let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(ReadArgs {
         sources: source_specs(src, src_labels)?,
@@ -3505,7 +3505,7 @@ fn a5_read_raster_flat_rs(
     }))?;
 
     let t_rout = Instant::now();
-    let cell_list = u64s_to_raw8_list(&out.cells);
+    let cell_list = cells_from_u64(&out.cells);
     let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
     let n_bands = out.n_bands as i32;
     let stats_out: Vec<&str> = out.stats.iter().map(|s| s.as_str()).collect();
@@ -3593,7 +3593,7 @@ fn a5_raster_to_parquet_rs(
     cell_edge_m: f64,
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
-    aoi_covering: List,
+    aoi_covering: Robj,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<String> {
@@ -3632,7 +3632,7 @@ fn a5_raster_to_parquet_rs(
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
-    let mask = CellMask::from_cells(&raw8_list_to_u64s(&aoi_covering)).map(Arc::new);
+    let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
 
     runtime.block_on(read_raster_to_parquet_async(
@@ -3675,11 +3675,11 @@ fn a5_raster_to_parquet_rs(
 /// Sample one pixel value per A5 cell. Inverse / cell-driven path.
 ///
 /// @param src Path or URL string.
-/// @param cells_raw a5R-style cell list (b1..b8 raw fields).
+/// @param cells The `a5_cell` vector to sample.
 /// @param bands_idx,bands_names Band selection.
 /// @param src_nodata Length-1 vec or empty for no override.
 /// @param threads,io_concurrency See `a5_read_raster_rs`.
-/// @returns A list with `cell` (b1..b8 raw), `bands` (named numeric), and
+/// @returns A list with `cell` (an `a5_cell` vector), `bands` (named numeric), and
 ///   `band_names`.
 /// @noRd
 /// @keywords internal
@@ -3692,7 +3692,7 @@ fn run_sample_at_cells(
     separate: bool,
     composite: &str,
     store_opts: StoreOpts,
-    cells_raw: List,
+    cells: Robj,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     src_nodata: Vec<f64>,
@@ -3713,7 +3713,7 @@ fn run_sample_at_cells(
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let interp_e = crate::sample::Interp::parse(interp)?;
-    let cells_in = raw8_list_to_u64s(&cells_raw);
+    let cells_in = cells_to_u64(&cells)?;
 
     let runtime = crate::runtime::shared_runtime()?;
 
@@ -3740,7 +3740,7 @@ fn a5_sample_at_cells_rs(
     src_labels: Vec<String>,
     separate: bool,
     composite: &str,
-    cells_raw: List,
+    cells: Robj,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     src_nodata: Vec<f64>,
@@ -3760,7 +3760,7 @@ fn a5_sample_at_cells_rs(
         separate,
         composite,
         store_opts,
-        cells_raw,
+        cells,
         bands_idx,
         bands_names,
         src_nodata,
@@ -3772,7 +3772,7 @@ fn a5_sample_at_cells_rs(
         interp,
     )?;
 
-    let cell_list = u64s_to_raw8_list(&out.cells);
+    let cell_list = cells_from_u64(&out.cells);
     let n_cells = out.cells.len();
     let n_bands = out.n_bands;
     let mut band_pairs: Vec<(String, Robj)> = Vec::with_capacity(n_bands);
@@ -3800,7 +3800,7 @@ fn a5_sample_at_cells_flat_rs(
     src_labels: Vec<String>,
     separate: bool,
     composite: &str,
-    cells_raw: List,
+    cells: Robj,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     src_nodata: Vec<f64>,
@@ -3820,7 +3820,7 @@ fn a5_sample_at_cells_flat_rs(
         separate,
         composite,
         store_opts,
-        cells_raw,
+        cells,
         bands_idx,
         bands_names,
         src_nodata,
@@ -3832,7 +3832,7 @@ fn a5_sample_at_cells_flat_rs(
         interp,
     )?;
 
-    let cell_list = u64s_to_raw8_list(&out.cells);
+    let cell_list = cells_from_u64(&out.cells);
     let band_names: Vec<&str> = out.band_names.iter().map(|s| s.as_str()).collect();
     let n_bands = out.n_bands as i32;
     let value_flat = List::from_pairs(vec![("centroid".to_string(), Robj::from(out.flat))]);
@@ -3861,7 +3861,7 @@ fn a5_sample_to_parquet_rs(
     composite: &str,
     dest: &str,
     resolution: i32,
-    cells_raw: List,
+    cells: Robj,
     bands_idx: Vec<i32>,
     bands_names: Vec<String>,
     src_nodata: Vec<f64>,
@@ -3886,7 +3886,7 @@ fn a5_sample_to_parquet_rs(
         separate,
         composite,
         store_opts,
-        cells_raw,
+        cells,
         bands_idx,
         bands_names,
         src_nodata,
