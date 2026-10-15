@@ -1,7 +1,7 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# a5px
+# a5px <a href="https://belian-earth.github.io/a5px/"><img src="man/figures/logo.png" align="right" height="200" alt="a5px website" /></a>
 
 <!-- badges: start -->
 

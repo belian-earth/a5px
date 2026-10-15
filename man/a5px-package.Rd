@@ -6,116 +6,131 @@
 \alias{a5px-package}
 \title{a5px: Read Raster Data as A5 Cells via Pixel-Driven Aggregation}
 \description{
-Rust-backed reader that streams (Cloud-Optimised) GeoTIFF rasters from
-local files or cloud object stores and aggregates pixels into \href{https://a5geo.org/}{A5 pentagonal DGGS} cells in one pass. Produced output is
-interoperable with \link[a5R:a5R-package]{a5R} cell vectors and can be returned
-as a tibble, an Arrow table, or written straight to Parquet from Rust.
+a5px aggregates raster pixels into \href{https://a5geo.org/}{A5} cells. A5 is a
+discrete global grid system that divides the globe into equal-area
+pentagonal cells at 31 resolutions. a5px streams GeoTIFF and
+Cloud-Optimised GeoTIFF files from local disk or cloud object stores and
+computes per-cell statistics in a single pass, in Rust. Results are keyed
+by \link[a5R:a5R-package]{a5R} cells and come back as a tibble, an Arrow
+table or a Parquet file.
 
-"px" reflects the input domain: pixels in, cells out. The forward
-(pixel-driven) algorithm is appropriate when the raster pixel size is
-similar to or smaller than the target A5 cell area; for the inverse case
-use a vector / cell-driven workflow (not yet implemented in a5px).
+"px" reflects the direction of the default algorithm: pixels in, cells
+out. Each pixel goes to the cell containing its centre, which suits cells
+larger than pixels. For cells smaller than pixels, \code{mode = "centroid"}
+samples the raster at each cell centre instead.
 }
 \section{Reading rasters}{
 
 \itemize{
-\item \code{\link[=a5_read_raster]{a5_read_raster()}} --- aggregate to a tibble keyed by \code{a5R::a5_cell}
-\item \code{\link[=a5_read_raster_arrow]{a5_read_raster_arrow()}} --- same engine, returns an \link[arrow:Table]{arrow::Table} with
-a \verb{FixedSizeList<float, n_bands>} value column suitable for direct
-Parquet writes
-\item \code{\link[=a5_raster_to_parquet]{a5_raster_to_parquet()}} --- read and write Parquet entirely in Rust,
-bypassing the R-side Arrow round-trip (preferred for large embedding
-rasters)
+\item \code{\link[=a5_read_raster]{a5_read_raster()}}: a tibble keyed by \code{a5R::a5_cell}.
+\item \code{\link[=a5_read_raster_arrow]{a5_read_raster_arrow()}}: the same engine, returning an
+\link[arrow:Table]{arrow::Table} with a \verb{FixedSizeList<float, n_bands>} value column.
+\item \code{\link[=a5_raster_to_parquet]{a5_raster_to_parquet()}}: reads and writes Parquet entirely in Rust,
+without the R-side Arrow round trip; best for large embedding rasters.
 }
 
-All three readers share the same \code{as_vector} switch: \code{FALSE} (default)
-returns one column per band, \code{TRUE} returns a single fixed-length list /
-\code{FixedSizeList} value column.
+\code{as_vector = FALSE} (default) returns one column per band;
+\code{as_vector = TRUE} returns one fixed-length list column per stat.
+}
+
+\section{Sampling modes}{
+
+\itemize{
+\item \code{"forward"} (default): each pixel goes wholly to the cell containing
+its centre.
+\item \code{"overlay"}: each pixel is shared between the cells it overlaps, in
+proportion to area, so \code{sum} conserves totals.
+\item \code{"centroid"}: one value per cell, sampled at its centre with the
+\code{interp} kernel; for cells smaller than pixels.
+}
+}
+
+\section{Several files}{
+
+\code{src} takes several files, read in one pass with a shared fetch queue
+and worker pool. \code{separate = TRUE} makes each file's bands columns, for
+bands stored one per file. Otherwise the files are pieces of one raster
+with the same bands and pixel size: every valid pixel enters its cell
+once, so cells on a seam combine exactly, and where files overlap every
+capture counts. \code{composite} instead computes \code{stat} per file and reduces
+across files per cell, weighted by each file's valid pixel count.
 }
 
 \section{Aggregating to coarser cells}{
 
-\itemize{
-\item \code{\link[=a5_aggregate]{a5_aggregate()}} --- pure-R aggregator that lifts an existing
-\code{a5_cell}-keyed tibble to a coarser resolution, grouping each cell by
-the coarse cell containing its centre
-(\code{\link[a5R:a5_cell_to_supercell]{a5R::a5_cell_to_supercell()}}). Avoids re-reading the
-source raster when you already have a high-resolution result and want
-it summarised. Handles both wide (one column per band) and list-column
-layouts; list columns are reduced element-wise. Same \code{stat} vocabulary
-as the readers.
-}
+\code{\link[=a5_aggregate]{a5_aggregate()}} summarises an existing \code{a5_cell}-keyed result at a
+coarser resolution without re-reading the raster. Each cell goes to the
+coarse cell that contains its centre (\code{\link[a5R:a5_cell_to_supercell]{a5R::a5_cell_to_supercell()}}).
+It handles both the wide and the list-column layout, with the same
+\code{stat} vocabulary as the readers.
 }
 
 \section{Writing}{
 
-\itemize{
-\item \code{\link[=a5_write_parquet]{a5_write_parquet()}} --- write a tibble or Arrow table to Parquet, with
-a schema tailored to A5 cell + value lists
-}
+\code{\link[=a5_write_parquet]{a5_write_parquet()}} writes a tibble or Arrow table from the readers to
+Parquet, with a schema for A5 cells and value lists.
 }
 
 \section{Inspecting sources}{
 
 \itemize{
-\item \code{\link[=a5_raster_info]{a5_raster_info()}} --- dimensions, data type, block grid, overview
-levels, CRS and WGS 84 envelope without reading pixels
-\item \code{\link[=a5_store_config]{a5_store_config()}} --- the resolved object store configuration for a
-remote \code{src}
+\item \code{\link[=a5_raster_info]{a5_raster_info()}}: dimensions, data type, block grid, overview levels,
+CRS, band scale and offset, and the WGS 84 envelope, without reading
+pixels.
+\item \code{\link[=a5_store_config]{a5_store_config()}}: the object store configuration a remote \code{src}
+resolves to.
 }
 }
 
 \section{Areas of interest}{
 
 \code{aoi} restricts a read to the A5 cells selected from a polygon by
-\code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}}, with \code{containment = "centre"} (cells whose
-centre is inside) or \code{"overlapping"} (every cell the polygon touches).
-Selection is at the cell level: an included cell gets the statistics of
-all its valid pixels, including any outside the polygon. This is the
-DGGS-native reading of zonal extraction, distinct from tools such as
-exactextract that clip pixels to the polygon; if you need clipped-pixel
-semantics, aggregate the cells afterwards with the polygon coverage
-fractions of your choice.
+\code{\link[a5R:a5_polygon_to_cells]{a5R::a5_polygon_to_cells()}}: \code{containment = "centre"} keeps cells whose
+centre is inside, \code{"overlapping"} every cell the polygon touches.
+Selection is by cell: an included cell gets the statistics of all its
+valid pixels, including any outside the polygon. Tools such as
+exactextract instead clip pixels to the polygon; for that, aggregate the
+cells afterwards with coverage fractions of your choice.
 }
 
 \section{Chunked reads}{
 
-Accumulators hold every touched cell in memory (roughly 4.5 GB per
-million cells with 64 bands and \code{stat = c("mean", "count")}), so very
-large reads are chunked by \code{bbox}. Pass \code{bbox_align = "block"} so each
-chunk takes whole COG blocks and no block is fetched twice; read
-\code{stat = c("sum", "count")} so per-cell partials from adjacent chunks add
-exactly, and derive means afterwards. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the
-block grid and envelope to build the chunk grid from.
+The accumulators hold every touched cell in memory (about 4.5 GB per
+million cells with 64 bands and \code{stat = c("mean", "count")}), so split
+very large reads by \code{bbox}. With \code{bbox_align = "block"} each chunk takes
+whole COG blocks, so no block is fetched twice; with
+\code{stat = c("sum", "count")} the per-cell partials of adjacent chunks add
+up exactly, and means follow. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the block grid
+and envelope to build the chunks from.
 }
 
 \section{Configuration}{
 
-\itemize{
-\item \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}} / \code{\link[=a5px_get_concurrency]{a5px_get_concurrency()}} --- two-knob control
-over the CPU consumer pool (\code{cpu_workers}) and the maximum in-flight
-tile fetches (\code{io_concurrency}). Independent of \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}.
-}
+\code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}} and \code{\link[=a5px_get_concurrency]{a5px_get_concurrency()}} set the session
+defaults for the worker pool (\code{cpu_workers}) and the number of tile
+fetches in flight (\code{io_concurrency}). They are independent of
+\code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}. Remote reads are usually limited by latency,
+so a higher \code{io_concurrency} often helps.
 }
 
 \section{Common arguments}{
 
 All readers accept the same core arguments:
 \itemize{
-\item \code{src} --- path or URL. Schemes: local path, \verb{file://}, \verb{http(s)://},
-\verb{s3://}, \verb{gs://}, \verb{az://}. Cloud reads stream byte ranges; the full file
-is never materialised. See "Remote sources" for client configuration
-and the \code{store_opts} argument.
-\item \code{resolution} --- A5 cell resolution (0--30); see \code{\link[a5R:a5_cell_area]{a5R::a5_cell_area()}}.
-\item \code{stat} --- one or more of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"}, \code{"max"},
-\code{"var"}, \code{"sd"}. A character vector emits one column per (band, stat)
-pair. \code{var} / \code{sd} use Welford's online algorithm and the sample formula
-(divisor n - 1); cells with a single pixel return \code{NA}.
-\item \code{bands} --- \code{NULL} (all), integer vector (1-based), or character vector
-matched against the GDAL \code{DESCRIPTION} tag. For planar-layout TIFFs the
-reader fetches only the byte ranges of the selected bands.
-\item \code{cpu_workers}, \code{io_concurrency} --- tile-level concurrency knobs; see
-\code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.
+\item \code{src}: one or more paths or URLs: local, \verb{file://}, \verb{http(s)://},
+\verb{s3://}, \verb{gs://} or \verb{az://}. Remote reads fetch byte ranges and never
+download the whole file; see "Remote sources".
+\item \code{resolution}: A5 resolution, 0 to 30; \code{\link[a5R:a5_cell_area]{a5R::a5_cell_area()}} gives the
+cell area at each.
+\item \code{stat}: one or more of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"}, \code{"max"},
+\code{"var"}, \code{"sd"}, \code{"majority"}, \code{"fractions"} and \code{"npix"}. Several give
+one column per band and stat. \code{var} and \code{sd} use the sample formula
+(divisor n - 1), so a cell with one pixel returns \code{NA}.
+\item \code{bands}: \code{NULL} (all), 1-based indices, or names matched against the
+GDAL \code{DESCRIPTION} band tag. For band-interleaved files only the
+selected bands are fetched.
+\item \code{scoff}, \code{dequant}: decode stored values per pixel before aggregation.
+\item \code{cpu_workers}, \code{io_concurrency}: see \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.
 }
 }
 
@@ -135,8 +150,8 @@ request.
 \code{AWS_WEB_IDENTITY_TOKEN_FILE}, plus GDAL's \code{AWS_NO_SIGN_REQUEST=YES}
 for public buckets (mapped to \code{aws_skip_signature}). Without static,
 container or web-identity credentials the client falls back to
-instance metadata, which off-AWS costs a long timeout before failing,
-so set \code{AWS_NO_SIGN_REQUEST} or \code{store_opts = c(aws_skip_signature = "true")} for public data. The shared credentials file
+instance metadata, which off AWS waits for a long timeout before
+failing, so set \code{AWS_NO_SIGN_REQUEST} or \code{store_opts = c(aws_skip_signature = "true")} for public data. The shared credentials file
 (\verb{~/.aws/credentials}) and \code{AWS_PROFILE} are not read. With no region
 the client assumes \code{us-east-1} and a bucket elsewhere fails, so set
 \code{AWS_REGION} or \code{aws_region}. Path-style
@@ -154,35 +169,32 @@ such as \code{timeout}, \code{connect_timeout} and \code{allow_http}.
 }
 }
 
-\section{Supported formats and CRSes}{
+\section{Supported formats and CRSs}{
 
 \itemize{
-\item Tiled GeoTIFF / Cloud-Optimised GeoTIFF (\code{async-tiff} 0.3, supports
-ZSTD, Deflate, LZW, JPEG and packbits/none). Strip-based TIFFs are not
-yet supported.
-\item CRS resolution tries, in order: EPSG code, WKT in a citation field
-(\code{proj4wkt}), and explicit GeoKey reconstruction (\code{+proj=laea}-style
-custom projections written by GDAL with no EPSG number). Reprojection
-uses pure-Rust \code{proj4rs}.
-\item NoData: dataset-wide \code{TIFFTAG_GDAL_NODATA} is honoured with NaN-safe
-comparison. Per-band nodata in GeoTIFF is a spec limitation; VRT
-support would unlock it.
+\item Tiled GeoTIFF and COG with ZSTD, Deflate, LZW, JPEG, PackBits or no
+compression. Strip-based TIFFs are not yet supported.
+\item CRSs are resolved from an EPSG code, else WKT in a citation field
+(\code{proj4wkt}), else the GeoKey parameters, which covers custom
+projections written by GDAL without an EPSG code, such as a centred
+Lambert azimuthal equal-area. Reprojection uses pure-Rust \code{proj4rs}.
+\item NoData: the dataset-wide \code{TIFFTAG_GDAL_NODATA}, compared safely for
+NaN. GeoTIFF does not store per-band NoData; reading bands from
+separate files with \code{separate = TRUE} gives each its own.
 }
 }
 
 \section{Performance}{
 
-Pixel-major streaming with an A5-cell containment cache cuts
-\code{a5::lonlat_to_cell} overhead ~3x for dense scans. On a 12-band 26 M-pixel
-Sentinel-2 COG the package is roughly 7x faster than \verb{gdal raster zonal-stats} (CLI plus polygon prep) and 11x faster than a hand-rolled
-\code{terra} + \code{dplyr} pipeline.
+On a 12-band, 26-million-pixel Sentinel-2 COG, a5px is about 7 times
+faster end to end than \verb{gdal raster zonal-stats} (including polygon
+preparation) and 11 times faster than a \code{terra} and \code{dplyr} pipeline.
 }
 
 \section{Profiling}{
 
-Set \code{A5PX_PROFILE=1} to print stage and sub-stage timings (io fetch,
-decode, build points, proj transform, a5 indexing, hashmap lookup,
-accumulator push, merge) summed across tile workers.
+Set \code{A5PX_PROFILE=1} to print stage timings (fetch, decode, projection,
+cell indexing, accumulation, merge) summed across workers.
 }
 
 \seealso{

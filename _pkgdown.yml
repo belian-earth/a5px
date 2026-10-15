@@ -24,46 +24,33 @@ navbar:
       aria-label: GitHub
 reference:
 - title: Reading rasters
-  desc: >
-    Stream a (Cloud-Optimised) GeoTIFF and aggregate pixels into A5 cells in
-    one pass. All three readers share the same `stat`, `bands`, `bbox`,
-    `bbox_align`, `aoi`, `containment`, `src_nodata`, `mode`, `cpu_workers`,
-    `io_concurrency`, `dequant`, `as_vector`, `use_overviews` and
-    `store_opts` arguments; they differ only in output type (tibble, Arrow
-    Table, or a Parquet file written direct from Rust). `dequant_aef()`
-    decodes Alpha Earth Foundations int8 codes ahead of aggregation via the
-    `dequant` argument.
+  desc: Aggregate GeoTIFF and COG pixels into A5 cells, from one file or several.
   contents:
   - a5_read_raster
   - a5_read_raster_arrow
   - a5_raster_to_parquet
+- title: Decoding
+  desc: Decode quantized values before aggregation.
+  contents:
   - dequant_aef
 - title: Inspecting sources
-  desc: >
-    Metadata without pixel reads: the raster's block grid, overviews, CRS
-    and envelope for planning chunked reads, and the object store
-    configuration a remote `src` resolves to.
+  desc: Raster metadata and object store configuration, without reading pixels.
   contents:
   - a5_raster_info
   - a5_store_config
-- title: Aggregating to coarser cells
-  desc: >
-    Lift an existing `a5_cell`-keyed tibble to a coarser resolution via the
-    A5-native centroid hierarchy. Avoids re-reading the source raster.
+- title: Coarser resolutions
+  desc: Summarise A5-keyed results at a coarser resolution without re-reading.
   contents:
   - a5_aggregate
 - title: Writing
-  desc: >
-    Write A5-keyed values to Parquet. Accepts the tibble from
-    `a5_read_raster()` or the Arrow Table from `a5_read_raster_arrow()`.
+  desc: Write A5-keyed results to Parquet.
   contents:
   - a5_write_parquet
 - title: Configuration
-  desc: >
-    Two-knob concurrency control: a CPU consumer pool for tile decoding and
-    aggregation, and an in-flight cap on tile fetches.
+  desc: Worker and fetch concurrency.
   contents:
   - a5px_set_concurrency
 - title: Package overview
+  desc: Common arguments, remote sources and supported formats.
   contents:
   - a5px-package

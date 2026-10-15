@@ -17,7 +17,7 @@ knitr::opts_chunk$set(
 )
 ```
 
-# a5px
+# a5px <a href="https://belian-earth.github.io/a5px/"><img src="man/figures/logo.png" align="right" height="200" alt="a5px website" /></a>
 
 <!-- badges: start -->
 [![Lifecycle: experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)

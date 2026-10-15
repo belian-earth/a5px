@@ -1,91 +1,105 @@
 #' @title a5px: Read Raster Data as A5 Cells via Pixel-Driven Aggregation
 #'
 #' @description
-#' Rust-backed reader that streams (Cloud-Optimised) GeoTIFF rasters from
-#' local files or cloud object stores and aggregates pixels into [A5
-#' pentagonal DGGS](https://a5geo.org/) cells in one pass. Produced output is
-#' interoperable with [a5R][a5R::a5R-package] cell vectors and can be returned
-#' as a tibble, an Arrow table, or written straight to Parquet from Rust.
+#' a5px aggregates raster pixels into [A5](https://a5geo.org/) cells. A5 is a
+#' discrete global grid system that divides the globe into equal-area
+#' pentagonal cells at 31 resolutions. a5px streams GeoTIFF and
+#' Cloud-Optimised GeoTIFF files from local disk or cloud object stores and
+#' computes per-cell statistics in a single pass, in Rust. Results are keyed
+#' by [a5R][a5R::a5R-package] cells and come back as a tibble, an Arrow
+#' table or a Parquet file.
 #'
-#' "px" reflects the input domain: pixels in, cells out. The forward
-#' (pixel-driven) algorithm is appropriate when the raster pixel size is
-#' similar to or smaller than the target A5 cell area; for the inverse case
-#' use a vector / cell-driven workflow (not yet implemented in a5px).
+#' "px" reflects the direction of the default algorithm: pixels in, cells
+#' out. Each pixel goes to the cell containing its centre, which suits cells
+#' larger than pixels. For cells smaller than pixels, `mode = "centroid"`
+#' samples the raster at each cell centre instead.
 #'
 #' @section Reading rasters:
-#' - [a5_read_raster()] --- aggregate to a tibble keyed by `a5R::a5_cell`
-#' - [a5_read_raster_arrow()] --- same engine, returns an [arrow::Table] with
-#'   a `FixedSizeList<float, n_bands>` value column suitable for direct
-#'   Parquet writes
-#' - [a5_raster_to_parquet()] --- read and write Parquet entirely in Rust,
-#'   bypassing the R-side Arrow round-trip (preferred for large embedding
-#'   rasters)
+#' - [a5_read_raster()]: a tibble keyed by `a5R::a5_cell`.
+#' - [a5_read_raster_arrow()]: the same engine, returning an
+#'   [arrow::Table] with a `FixedSizeList<float, n_bands>` value column.
+#' - [a5_raster_to_parquet()]: reads and writes Parquet entirely in Rust,
+#'   without the R-side Arrow round trip; best for large embedding rasters.
 #'
-#' All three readers share the same `as_vector` switch: `FALSE` (default)
-#' returns one column per band, `TRUE` returns a single fixed-length list /
-#' `FixedSizeList` value column.
+#' `as_vector = FALSE` (default) returns one column per band;
+#' `as_vector = TRUE` returns one fixed-length list column per stat.
+#'
+#' @section Sampling modes:
+#' - `"forward"` (default): each pixel goes wholly to the cell containing
+#'   its centre.
+#' - `"overlay"`: each pixel is shared between the cells it overlaps, in
+#'   proportion to area, so `sum` conserves totals.
+#' - `"centroid"`: one value per cell, sampled at its centre with the
+#'   `interp` kernel; for cells smaller than pixels.
+#'
+#' @section Several files:
+#' `src` takes several files, read in one pass with a shared fetch queue
+#' and worker pool. `separate = TRUE` makes each file's bands columns, for
+#' bands stored one per file. Otherwise the files are pieces of one raster
+#' with the same bands and pixel size: every valid pixel enters its cell
+#' once, so cells on a seam combine exactly, and where files overlap every
+#' capture counts. `composite` instead computes `stat` per file and reduces
+#' across files per cell, weighted by each file's valid pixel count.
 #'
 #' @section Aggregating to coarser cells:
-#' - [a5_aggregate()] --- pure-R aggregator that lifts an existing
-#'   `a5_cell`-keyed tibble to a coarser resolution, grouping each cell by
-#'   the coarse cell containing its centre
-#'   ([a5R::a5_cell_to_supercell()]). Avoids re-reading the
-#'   source raster when you already have a high-resolution result and want
-#'   it summarised. Handles both wide (one column per band) and list-column
-#'   layouts; list columns are reduced element-wise. Same `stat` vocabulary
-#'   as the readers.
+#' [a5_aggregate()] summarises an existing `a5_cell`-keyed result at a
+#' coarser resolution without re-reading the raster. Each cell goes to the
+#' coarse cell that contains its centre ([a5R::a5_cell_to_supercell()]).
+#' It handles both the wide and the list-column layout, with the same
+#' `stat` vocabulary as the readers.
 #'
 #' @section Writing:
-#' - [a5_write_parquet()] --- write a tibble or Arrow table to Parquet, with
-#'   a schema tailored to A5 cell + value lists
+#' [a5_write_parquet()] writes a tibble or Arrow table from the readers to
+#' Parquet, with a schema for A5 cells and value lists.
 #'
 #' @section Inspecting sources:
-#' - [a5_raster_info()] --- dimensions, data type, block grid, overview
-#'   levels, CRS and WGS 84 envelope without reading pixels
-#' - [a5_store_config()] --- the resolved object store configuration for a
-#'   remote `src`
+#' - [a5_raster_info()]: dimensions, data type, block grid, overview levels,
+#'   CRS, band scale and offset, and the WGS 84 envelope, without reading
+#'   pixels.
+#' - [a5_store_config()]: the object store configuration a remote `src`
+#'   resolves to.
 #'
 #' @section Areas of interest:
 #' `aoi` restricts a read to the A5 cells selected from a polygon by
-#' [a5R::a5_polygon_to_cells()], with `containment = "centre"` (cells whose
-#' centre is inside) or `"overlapping"` (every cell the polygon touches).
-#' Selection is at the cell level: an included cell gets the statistics of
-#' all its valid pixels, including any outside the polygon. This is the
-#' DGGS-native reading of zonal extraction, distinct from tools such as
-#' exactextract that clip pixels to the polygon; if you need clipped-pixel
-#' semantics, aggregate the cells afterwards with the polygon coverage
-#' fractions of your choice.
+#' [a5R::a5_polygon_to_cells()]: `containment = "centre"` keeps cells whose
+#' centre is inside, `"overlapping"` every cell the polygon touches.
+#' Selection is by cell: an included cell gets the statistics of all its
+#' valid pixels, including any outside the polygon. Tools such as
+#' exactextract instead clip pixels to the polygon; for that, aggregate the
+#' cells afterwards with coverage fractions of your choice.
 #'
 #' @section Chunked reads:
-#' Accumulators hold every touched cell in memory (roughly 4.5 GB per
-#' million cells with 64 bands and `stat = c("mean", "count")`), so very
-#' large reads are chunked by `bbox`. Pass `bbox_align = "block"` so each
-#' chunk takes whole COG blocks and no block is fetched twice; read
-#' `stat = c("sum", "count")` so per-cell partials from adjacent chunks add
-#' exactly, and derive means afterwards. [a5_raster_info()] reports the
-#' block grid and envelope to build the chunk grid from.
+#' The accumulators hold every touched cell in memory (about 4.5 GB per
+#' million cells with 64 bands and `stat = c("mean", "count")`), so split
+#' very large reads by `bbox`. With `bbox_align = "block"` each chunk takes
+#' whole COG blocks, so no block is fetched twice; with
+#' `stat = c("sum", "count")` the per-cell partials of adjacent chunks add
+#' up exactly, and means follow. [a5_raster_info()] reports the block grid
+#' and envelope to build the chunks from.
 #'
 #' @section Configuration:
-#' - [a5px_set_concurrency()] / [a5px_get_concurrency()] --- two-knob control
-#'   over the CPU consumer pool (`cpu_workers`) and the maximum in-flight
-#'   tile fetches (`io_concurrency`). Independent of [a5R::a5_set_threads()].
+#' [a5px_set_concurrency()] and [a5px_get_concurrency()] set the session
+#' defaults for the worker pool (`cpu_workers`) and the number of tile
+#' fetches in flight (`io_concurrency`). They are independent of
+#' [a5R::a5_set_threads()]. Remote reads are usually limited by latency,
+#' so a higher `io_concurrency` often helps.
 #'
 #' @section Common arguments:
 #' All readers accept the same core arguments:
-#' - `src` --- path or URL. Schemes: local path, `file://`, `http(s)://`,
-#'   `s3://`, `gs://`, `az://`. Cloud reads stream byte ranges; the full file
-#'   is never materialised. See "Remote sources" for client configuration
-#'   and the `store_opts` argument.
-#' - `resolution` --- A5 cell resolution (0--30); see [a5R::a5_cell_area()].
-#' - `stat` --- one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`,
-#'   `"var"`, `"sd"`. A character vector emits one column per (band, stat)
-#'   pair. `var` / `sd` use Welford's online algorithm and the sample formula
-#'   (divisor n - 1); cells with a single pixel return `NA`.
-#' - `bands` --- `NULL` (all), integer vector (1-based), or character vector
-#'   matched against the GDAL `DESCRIPTION` tag. For planar-layout TIFFs the
-#'   reader fetches only the byte ranges of the selected bands.
-#' - `cpu_workers`, `io_concurrency` --- tile-level concurrency knobs; see
-#'   [a5px_set_concurrency()].
+#' - `src`: one or more paths or URLs: local, `file://`, `http(s)://`,
+#'   `s3://`, `gs://` or `az://`. Remote reads fetch byte ranges and never
+#'   download the whole file; see "Remote sources".
+#' - `resolution`: A5 resolution, 0 to 30; [a5R::a5_cell_area()] gives the
+#'   cell area at each.
+#' - `stat`: one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`,
+#'   `"var"`, `"sd"`, `"majority"`, `"fractions"` and `"npix"`. Several give
+#'   one column per band and stat. `var` and `sd` use the sample formula
+#'   (divisor n - 1), so a cell with one pixel returns `NA`.
+#' - `bands`: `NULL` (all), 1-based indices, or names matched against the
+#'   GDAL `DESCRIPTION` band tag. For band-interleaved files only the
+#'   selected bands are fetched.
+#' - `scoff`, `dequant`: decode stored values per pixel before aggregation.
+#' - `cpu_workers`, `io_concurrency`: see [a5px_set_concurrency()].
 #'
 #' @section Remote sources:
 #' `src` may be an `s3://`, `gs://`, `az://` or `http(s)://` URL; reads are
@@ -102,8 +116,8 @@
 #'   `AWS_WEB_IDENTITY_TOKEN_FILE`, plus GDAL's `AWS_NO_SIGN_REQUEST=YES`
 #'   for public buckets (mapped to `aws_skip_signature`). Without static,
 #'   container or web-identity credentials the client falls back to
-#'   instance metadata, which off-AWS costs a long timeout before failing,
-#'   so set `AWS_NO_SIGN_REQUEST` or `store_opts = c(aws_skip_signature =
+#'   instance metadata, which off AWS waits for a long timeout before
+#'   failing, so set `AWS_NO_SIGN_REQUEST` or `store_opts = c(aws_skip_signature =
 #'   "true")` for public data. The shared credentials file
 #'   (`~/.aws/credentials`) and `AWS_PROFILE` are not read. With no region
 #'   the client assumes `us-east-1` and a bucket elsewhere fails, so set
@@ -120,29 +134,25 @@
 #' - Plain HTTP(S): no authentication. `store_opts` accepts client keys
 #'   such as `timeout`, `connect_timeout` and `allow_http`.
 #'
-#' @section Supported formats and CRSes:
-#' - Tiled GeoTIFF / Cloud-Optimised GeoTIFF (`async-tiff` 0.3, supports
-#'   ZSTD, Deflate, LZW, JPEG and packbits/none). Strip-based TIFFs are not
-#'   yet supported.
-#' - CRS resolution tries, in order: EPSG code, WKT in a citation field
-#'   (`proj4wkt`), and explicit GeoKey reconstruction (`+proj=laea`-style
-#'   custom projections written by GDAL with no EPSG number). Reprojection
-#'   uses pure-Rust `proj4rs`.
-#' - NoData: dataset-wide `TIFFTAG_GDAL_NODATA` is honoured with NaN-safe
-#'   comparison. Per-band nodata in GeoTIFF is a spec limitation; VRT
-#'   support would unlock it.
+#' @section Supported formats and CRSs:
+#' - Tiled GeoTIFF and COG with ZSTD, Deflate, LZW, JPEG, PackBits or no
+#'   compression. Strip-based TIFFs are not yet supported.
+#' - CRSs are resolved from an EPSG code, else WKT in a citation field
+#'   (`proj4wkt`), else the GeoKey parameters, which covers custom
+#'   projections written by GDAL without an EPSG code, such as a centred
+#'   Lambert azimuthal equal-area. Reprojection uses pure-Rust `proj4rs`.
+#' - NoData: the dataset-wide `TIFFTAG_GDAL_NODATA`, compared safely for
+#'   NaN. GeoTIFF does not store per-band NoData; reading bands from
+#'   separate files with `separate = TRUE` gives each its own.
 #'
 #' @section Performance:
-#' Pixel-major streaming with an A5-cell containment cache cuts
-#' `a5::lonlat_to_cell` overhead ~3x for dense scans. On a 12-band 26 M-pixel
-#' Sentinel-2 COG the package is roughly 7x faster than `gdal raster
-#' zonal-stats` (CLI plus polygon prep) and 11x faster than a hand-rolled
-#' `terra` + `dplyr` pipeline.
+#' On a 12-band, 26-million-pixel Sentinel-2 COG, a5px is about 7 times
+#' faster end to end than `gdal raster zonal-stats` (including polygon
+#' preparation) and 11 times faster than a `terra` and `dplyr` pipeline.
 #'
 #' @section Profiling:
-#' Set `A5PX_PROFILE=1` to print stage and sub-stage timings (io fetch,
-#' decode, build points, proj transform, a5 indexing, hashmap lookup,
-#' accumulator push, merge) summed across tile workers.
+#' Set `A5PX_PROFILE=1` to print stage timings (fetch, decode, projection,
+#' cell indexing, accumulation, merge) summed across workers.
 #'
 #' @import a5R
 #' @keywords internal
