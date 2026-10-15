@@ -90,7 +90,7 @@ a5_read_raster_flat_rs <- function(src, src_labels, separate, composite, resolut
 #' @returns The destination path (character scalar) on success.
 #' @noRd
 #' @keywords internal
-a5_raster_to_parquet_rs <- function(src, src_labels, separate, composite, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, scoff, overlay, subsamples, cell_edge_m, bbox_align_block, tile_bbox, aoi_covering, store_keys, store_values) .Call(wrap__a5_raster_to_parquet_rs, src, src_labels, separate, composite, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, scoff, overlay, subsamples, cell_edge_m, bbox_align_block, tile_bbox, aoi_covering, store_keys, store_values)
+a5_raster_to_parquet_rs <- function(src, src_labels, separate, composite, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, scoff, overlay, subsamples, cell_edge_m, bbox_align_block, tile_bbox, aoi_covering, meta_keys, meta_values, store_keys, store_values) .Call(wrap__a5_raster_to_parquet_rs, src, src_labels, separate, composite, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, scoff, overlay, subsamples, cell_edge_m, bbox_align_block, tile_bbox, aoi_covering, meta_keys, meta_values, store_keys, store_values)
 
 a5_sample_at_cells_rs <- function(src, src_labels, separate, composite, cells, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_at_cells_rs, src, src_labels, separate, composite, cells, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
 
@@ -109,7 +109,7 @@ a5_sample_at_cells_flat_rs <- function(src, src_labels, separate, composite, cel
 #' (`as_vector = false`) or a single `value` FixedSizeList.
 #' @noRd
 #' @keywords internal
-a5_sample_to_parquet_rs <- function(src, src_labels, separate, composite, dest, resolution, cells, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_to_parquet_rs, src, src_labels, separate, composite, dest, resolution, cells, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
+a5_sample_to_parquet_rs <- function(src, src_labels, separate, composite, dest, resolution, cells, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, meta_keys, meta_values, store_keys, store_values) .Call(wrap__a5_sample_to_parquet_rs, src, src_labels, separate, composite, dest, resolution, cells, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, meta_keys, meta_values, store_keys, store_values)
 
 #' The WGS84 lon/lat footprint of the raster at `src`, padded (as for tile
 #' selection) to hold every cell centre on the raster, as boxes flattened
@@ -165,5 +165,10 @@ a5px_a5r_api_version_rs <- function() .Call(wrap__a5px_a5r_api_version_rs)
 #' @noRd
 #' @keywords internal
 a5px_lonlat_to_cells_rs <- function(lon, lat, resolution) .Call(wrap__a5px_lonlat_to_cells_rs, lon, lat, resolution)
+
+#' The a5 crate version a5px is built with, recorded in output metadata.
+#' @noRd
+#' @keywords internal
+a5px_a5_crate_version_rs <- function() .Call(wrap__a5px_a5_crate_version_rs)
 
 # nolint end

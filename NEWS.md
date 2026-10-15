@@ -34,6 +34,25 @@
   aggregated mean matches a direct read at the coarse resolution. Input
   cells must share one resolution.
 
+* Reads return rows in ascending cell id, whatever the worker count,
+  in tibbles, Arrow tables and Parquet files, so row order is
+  reproducible (sums of floating-point values can still differ in the
+  last bit between runs with more than one worker).
+
+* A read can be interrupted from R (Ctrl-C, or Esc in an IDE): it stops
+  within a quarter of a second with an `a5px_error_interrupted` error,
+  where it ran to completion.
+
+* Internal mask bands (GDAL's `GDAL_TIFF_INTERNAL_MASK`, common in JPEG
+  COGs and orthophotos) are applied: masked pixels are missing data in
+  forward, overlay and centroid reads, where every pixel counted.
+
+* Arrow and Parquet outputs record the read's provenance in their
+  metadata: `a5_index` (the A5 index version of the cell ids),
+  `a5_crate`, `a5px_version`, `a5px_mode`, `a5px_decode`,
+  `a5px_overviews` and `a5px_src_nodata`, so an id from A5 0.x can no
+  longer pass for a 1.0 id.
+
 * The antimeridian is handled throughout:
   - a raster stored in longitudes 0 to 360 meets bboxes west of 0, in
     forward and centroid reads (a bbox of the western hemisphere read

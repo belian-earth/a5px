@@ -48,6 +48,14 @@ An \link[arrow:Table]{arrow::Table} with two columns:
 the band names so dimension order is preserved when the table is
 written to Parquet and read back in another language.
 }
+
+The schema metadata records the layout (\code{a5px_band_names},
+\code{a5px_resolution}, \code{a5px_stats}, \code{a5px_layout}) and the read's
+provenance: \code{a5_index} (the A5 index version of the cell ids, \code{"1.0"}),
+\code{a5_crate} (the a5 crate version), \code{a5px_version}, \code{a5px_mode},
+\code{a5px_decode} (\code{"none"}, \code{"scoff"} or \code{"dequant"}), \code{a5px_overviews}
+(\code{"allowed"} or \code{"off"}) and \code{a5px_src_nodata} (the override, or
+\code{"file"}). \code{\link[=a5_raster_to_parquet]{a5_raster_to_parquet()}} writes the same keys.
 }
 \description{
 Same engine as \code{\link[=a5_read_raster]{a5_read_raster()}} but returns an Arrow \code{Table} whose value

@@ -35,6 +35,9 @@ pub enum A5CogError {
     #[error("parquet/arrow error: {0}")]
     Parquet(String),
 
+    #[error("interrupted: the read was stopped by the user")]
+    Interrupted,
+
     #[error("url parse error: {0}")]
     Url(#[from] url::ParseError),
 }
