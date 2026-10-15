@@ -37,7 +37,7 @@ reference:
   desc: Raster metadata and object store configuration, without reading pixels.
   contents:
   - a5_raster_info
-  - a5_store_config
+  - a5px_store_config
 - title: Coarser resolutions
   desc: Summarise A5-keyed results at a coarser resolution without re-reading.
   contents:
@@ -45,7 +45,7 @@ reference:
 - title: Writing
   desc: Write A5-keyed results to Parquet.
   contents:
-  - a5_write_parquet
+  - a5px_write_parquet
 - title: Configuration
   desc: Worker and fetch concurrency, and the session cache of remote reads.
   contents:

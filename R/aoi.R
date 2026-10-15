@@ -8,6 +8,8 @@
 #' boundaries would need the covering expanded to full resolution.
 #' @noRd
 check_aoi <- function(aoi, resolution, containment, call = rlang::caller_env()) {
+  # a5-js spells it "center"
+  if (identical(containment, "center")) containment <- "centre"
   containment <- rlang::arg_match(containment, c("centre", "overlapping"),
                                   error_call = call)
   empty <- list(cells = NULL, covering_stored = a5R::a5_cell(character()),
@@ -30,14 +32,16 @@ check_aoi <- function(aoi, resolution, containment, call = rlang::caller_env()) 
       cli::cli_abort(
         c("{.arg aoi} could not be converted to A5 cells.",
           "x" = conditionMessage(e)),
-        call = call
+        call = call,
+        class = c("a5px_error_geometry", "a5px_error_input", "a5px_error")
       )
     }
   )
   if (a5R::a5_count(cells) == 0) {
     cli::cli_abort(
       "No A5 cells selected by {.arg aoi} at resolution {resolution} with {.code containment = \"{containment}\"}.",
-      call = call
+      call = call,
+      class = c("a5px_error_geometry", "a5px_error_input", "a5px_error")
     )
   }
   stored <- a5R::a5_covering_stored(cells)

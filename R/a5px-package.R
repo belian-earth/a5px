@@ -49,14 +49,14 @@
 #' `stat` vocabulary as the readers.
 #'
 #' @section Writing:
-#' [a5_write_parquet()] writes a tibble or Arrow table from the readers to
+#' [a5px_write_parquet()] writes a tibble or Arrow table from the readers to
 #' Parquet, with a schema for A5 cells and value lists.
 #'
 #' @section Inspecting sources:
 #' - [a5_raster_info()]: dimensions, data type, block grid, overview levels,
 #'   CRS, band scale and offset, and the WGS 84 envelope, without reading
 #'   pixels.
-#' - [a5_store_config()]: the object store configuration a remote `src`
+#' - [a5px_store_config()]: the object store configuration a remote `src`
 #'   resolves to.
 #'
 #' @section Areas of interest:
@@ -94,8 +94,8 @@
 #' - `src`: one or more paths or URLs: local, `file://`, `http(s)://`,
 #'   `s3://`, `gs://` or `az://`. Remote reads fetch byte ranges and never
 #'   download the whole file; see "Remote sources".
-#' - `resolution`: A5 resolution, 0 to 30; [a5R::a5_cell_area()] gives the
-#'   cell area at each.
+#' - `resolution`: A5 resolution, 0 to 29 (30 is not yet supported);
+#'   [a5R::a5_cell_area()] gives the cell area at each.
 #' - `stat`: one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`,
 #'   `"var"`, `"sd"`, `"majority"`, `"fractions"` and `"npix"`. Several give
 #'   one column per band and stat. `var` and `sd` use the sample formula
@@ -111,7 +111,7 @@
 #' byte-range requests and the file is never downloaded whole. Cloud
 #' clients are configured from the environment first and from the readers'
 #' `store_opts` argument second, so an explicit option always wins.
-#' [a5_store_config()] shows the resolved configuration without making a
+#' [a5px_store_config()] shows the resolved configuration without making a
 #' request.
 #'
 #' - S3: every `AWS_*` variable `object_store` understands, including

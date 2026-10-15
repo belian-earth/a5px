@@ -19,11 +19,12 @@ License: Apache License (>= 2)
 URL: https://github.com/belian-earth/a5px, https://belian-earth.github.io/a5px/
 BugReports: https://github.com/belian-earth/a5px/issues
 Depends:
-    R (>= 4.2),
-    a5R (>= 0.9.9.9001)
+    R (>= 4.2)
 Imports:
+    a5R (>= 0.9.9.9001),
     cli,
     rlang (>= 1.1.0),
+    stats,
     tibble,
     tidyselect,
     vctrs (>= 0.6.0),
@@ -32,6 +33,7 @@ Suggests:
     a5view,
     arrow,
     exactextractr,
+    parallel,
     sf,
     terra,
     testthat (>= 3.0.0),

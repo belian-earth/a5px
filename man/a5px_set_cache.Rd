@@ -35,8 +35,10 @@ The cache assumes remote files do not change during the session. Clear
 it after a source is rewritten in place, or after pointing a URL at
 another endpoint through environment variables.
 
-The default budget is 512 MiB, or the value of the environment variable
-\code{A5PX_CACHE_MB} when the first remote read starts.
+The default budget is 512 MiB, held to an eighth of the memory limit of
+the process's cgroup (a container, a Batch task or a systemd scope), so
+a task limited to 2 GiB caches at most 256 MiB. The environment variable
+\code{A5PX_CACHE_MB}, read when the first remote read starts, overrides it.
 }
 \examples{
 a5px_set_cache(1024)

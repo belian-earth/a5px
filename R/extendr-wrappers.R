@@ -22,7 +22,7 @@ a5_store_config_rs <- function(src, store_keys, store_values) .Call(wrap__a5_sto
 #'   pooling the sources as one raster.
 #' @param composite Reducer across sources' per-cell values ("mean",
 #'   "median", ...); empty pools the sources' pixels.
-#' @param resolution A5 resolution (0--30).
+#' @param resolution A5 resolution (0--29).
 #' @param stats Character vector of stats: subset of "mean", "sum", "count",
 #'   "min", "max". Length-1 behaves identically to the previous scalar API.
 #' @param bands_idx 1-based band indices to read. Empty = all (unless
@@ -50,7 +50,7 @@ a5_read_raster_rs <- function(src, src_labels, separate, composite, resolution, 
 #' Arrow `FixedSizeList<float64, n_bands>` array on the R side.
 #'
 #' @param src Path or URL string.
-#' @param resolution A5 resolution (0--30).
+#' @param resolution A5 resolution (0--29).
 #' @param stats Character vector of stats (any non-"fractions" subset of the
 #'   stats accepted by `a5_read_raster`).
 #' @param bands_idx 1-based band indices to read (empty for all unless
@@ -76,7 +76,7 @@ a5_read_raster_flat_rs <- function(src, src_labels, separate, composite, resolut
 #'
 #' @param src Path or URL string.
 #' @param dest Output Parquet path.
-#' @param resolution A5 resolution (0--30).
+#' @param resolution A5 resolution (0--29).
 #' @param stats Character vector of stats (any non-"fractions" subset of the
 #'   stats accepted by `a5_read_raster`).
 #' @param bands_idx,bands_names Band selection (see `a5_read_raster_rs`).
@@ -148,5 +148,10 @@ a5px_cache_clear_rs <- function() .Call(wrap__a5px_cache_clear_rs)
 #' @noRd
 #' @keywords internal
 a5px_cache_info_rs <- function() .Call(wrap__a5px_cache_info_rs)
+
+#' CPUs available to this process, for the default `cpu_workers`.
+#' @noRd
+#' @keywords internal
+a5px_available_cpus_rs <- function() .Call(wrap__a5px_available_cpus_rs)
 
 # nolint end

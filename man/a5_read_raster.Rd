@@ -36,7 +36,8 @@ for how cloud clients are configured. Several sources are read in one
 pass: their tiles share \code{io_concurrency} and \code{cpu_workers}. \code{separate}
 sets how they combine; names of \code{src} label the sources.}
 
-\item{resolution}{Integer scalar A5 resolution (0--30).}
+\item{resolution}{Integer scalar A5 resolution (0--29). Resolution 30 is
+refused for now: A5 returns resolution-29 cells for some points at 30.}
 
 \item{stat}{Aggregation. One of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"},
 \code{"max"}, \code{"var"}, \code{"sd"}, \code{"majority"}, \code{"fractions"}, \code{"npix"}, or any
@@ -118,8 +119,8 @@ the polygon boundary touches, for gap-free coverage. Only used with
 
 \item{src_nodata}{Optional numeric scalar overriding the source nodata.
 Use this when the file's \code{TIFFTAG_GDAL_NODATA} tag is missing or wrong;
-it takes precedence over the metadata value when set. \code{NULL} (default)
-uses whatever \code{async-tiff} exposes.}
+it takes precedence over the metadata value when set. \code{NaN} and
+infinities are accepted. \code{NULL} (default) uses the file's tag.}
 
 \item{mode}{Sampling mode. \code{"forward"} (default) aggregates pixels into
 cells by their centres; \code{"overlay"} aggregates with pixel-cell overlap
@@ -150,13 +151,14 @@ error otherwise.}
 \item{cpu_workers}{Number of CPU threads for decoding and indexing
 (each decoded block is indexed as row stripes across all workers).
 \code{NULL} (default) resolves from \code{getOption("a5px.cpu_workers")}, env
-\code{A5PX_CPU_WORKERS}, then \code{\link[parallel:detectCores]{parallel::detectCores()}}.}
+\code{A5PX_CPU_WORKERS}, then the CPUs available to the R process, which
+respects container and cgroup CPU limits.}
 
 \item{io_concurrency}{Maximum in-flight fetch tasks the producer issues
 to the I/O stage; each task carries one block, or a run of up to four
 adjacent blocks on files without a predictor. \code{NULL} (default) resolves from
 \code{getOption("a5px.io_concurrency")}, env \code{A5PX_IO_CONCURRENCY}, then
-\code{min(32, max(cpu_workers, 8))}. Bump this for cloud reads of multi-band
+\code{min(16, max(cpu_workers, 8))}. Bump this for cloud reads of multi-band
 embedding rasters where the network can absorb more parallelism than
 the CPU pool. See \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.}
 
@@ -184,8 +186,9 @@ The function is evaluated once over the full integer code domain to
 build a lookup table applied on the Rust side, which restricts
 \code{dequant} to sources with an integer data type of 16 bits or fewer
 (int8 / uint8 / int16 / uint16); other dtypes error at read time.
-nodata is matched against the raw code, before decoding. \code{NULL}
-(default) reads raw values.}
+nodata is matched against the raw code, before decoding, and a code
+the function maps to \code{NA} is skipped like nodata. \code{NULL} (default)
+reads raw values.}
 
 \item{as_vector}{Logical. If \code{TRUE}, collapse the (selected) bands into
 list columns of fixed-length numeric vectors -- one per stat. Single
@@ -215,7 +218,7 @@ keys for the provider, e.g. \code{aws_region}, \code{aws_skip_signature},
 \code{aws_endpoint}, \code{aws_virtual_hosted_style_request}, the \verb{google_*} /
 \verb{azure_*} equivalents, and for plain HTTP(S) the client keys such as
 \code{timeout} or \code{allow_http}. Unknown keys, and any key given with a
-local path, are errors. Inspect the result with \code{\link[=a5_store_config]{a5_store_config()}}.}
+local path, are errors. Inspect the result with \code{\link[=a5px_store_config]{a5px_store_config()}}.}
 
 \item{separate}{How several sources combine.
 \itemize{
@@ -262,7 +265,8 @@ with \code{stat = "var"} includes. \code{"count"} gives the number of sources wi
 valid data in the cell, such as the number of cloud-free captures, and
 \code{"sum"} and \code{"count"} are 0 where no source has valid data. With
 \code{stat = "mean"}, \code{composite = "mean"} equals the pooled mean. Cells are
-the shared grid, so the sources need not be aligned. In centroid mode
+the shared grid, so the sources' pixel grids need not be aligned,
+though they must have the same pixel size. In centroid mode
 each source's sample has weight 1. Not available with
 \code{separate = TRUE}, \code{"fractions"} or \code{"npix"}.}
 }
@@ -321,9 +325,11 @@ returned values are in the raster's native domain. Set \code{scoff = TRUE} to
 apply them per pixel before aggregation. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the
 values a file declares.
 
-\strong{NoData:} the dataset-level GDAL \code{NODATA_VALUE} tag (when present) is
-used to skip per-band samples. Per-band nodata via \code{GDAL_METADATA} XML is
-not yet supported.
+\strong{NoData:} a pixel's band value is skipped when it equals the
+dataset-wide nodata value (GDAL's \code{TIFFTAG_GDAL_NODATA}, or
+\code{src_nodata}), when it is \code{NaN}, whatever the nodata value, and when
+\code{dequant} maps it to \code{NA}. GeoTIFF has no per-band nodata; bands read
+from separate files with \code{separate = TRUE} each keep their file's.
 }
 \examples{
 \dontrun{

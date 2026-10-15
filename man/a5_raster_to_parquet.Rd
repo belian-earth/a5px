@@ -53,7 +53,7 @@ One of \code{"zstd"} (default), \code{"snappy"}, \code{"none"}.}
 }
 \description{
 Same engine and on-disk schema as \code{\link[=a5_read_raster_arrow]{a5_read_raster_arrow()}} +
-\code{\link[=a5_write_parquet]{a5_write_parquet()}}, but skips the R/Arrow round-trip entirely:
+\code{\link[=a5px_write_parquet]{a5px_write_parquet()}}, but skips the R/Arrow round-trip entirely:
 the Rust side aggregates pixels into A5 cells, builds the
 \code{cell:uint64} + \verb{value:FixedSizeList<float, n_bands>} RecordBatch
 from its existing flat buffer, and writes Parquet via the

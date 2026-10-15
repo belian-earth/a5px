@@ -6,17 +6,19 @@
 \usage{
 a5_aggregate(
   x,
-  to_resolution,
+  resolution,
   ...,
-  stat = c("mean", "sum", "count", "min", "max", "var", "sd")
+  stat = c("mean", "sum", "count", "min", "max", "var", "sd"),
+  weights = NULL
 )
 }
 \arguments{
 \item{x}{A tibble or data.frame with exactly one column of class
 \link[a5R:a5_cell]{a5R::a5_cell}.}
 
-\item{to_resolution}{Integer scalar. The coarser target resolution.
-Must be strictly less than the input cells' resolution.}
+\item{resolution}{Integer scalar. The coarser target resolution.
+Must be strictly less than the input cells' resolution, which must be
+the same for every row.}
 
 \item{...}{<\code{\link[tidyselect:language]{tidy-select}}> columns to aggregate.
 Defaults to every non-cell numeric or list-of-numeric column.}
@@ -26,14 +28,19 @@ Defaults to every non-cell numeric or list-of-numeric column.}
 non-\code{NA} source values per group. \code{"var"} / \code{"sd"} use the sample
 formula (divisor n - 1) to match R's \code{\link[stats:var]{stats::var()}} / \code{\link[stats:sd]{stats::sd()}};
 single-row groups are returned as \code{NA}.}
+
+\item{weights}{Name of a numeric column of row weights for \code{"mean"}, or
+\code{NULL} (default) to use \code{npix} when \code{x} has it and equal weights
+otherwise. Rows with weight 0 or \code{NA} do not count. The weights column
+is summed, like \code{npix}.}
 }
 \value{
-A tibble keyed by supercells at \code{to_resolution}, with the
+A tibble keyed by supercells at \code{resolution}, with the
 selected columns reduced. The cell column retains its original name
 and the \link[a5R:a5_cell]{a5R::a5_cell} class.
 }
 \description{
-Lifts each row's A5 cell to its supercell at \code{to_resolution} via
+Lifts each row's A5 cell to its supercell at \code{resolution} via
 \code{\link[a5R:a5_cell_to_supercell]{a5R::a5_cell_to_supercell()}} and reduces
 the selected value columns within each supercell group. Avoids re-reading
 the source raster when you already have a high-resolution result and
@@ -50,6 +57,14 @@ conservative aggregation (counts that must sum exactly), use a higher
 input resolution so boundary error is small relative to cell area.
 Locating centres runs in parallel under \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}.
 
+A cell's mean summarises its pixels, so \code{"mean"} is weighted by each
+row's pixel count: the \code{npix} column when \code{x} has one (read with
+\code{stat = c("mean", "npix")}), or the column named by \code{weights}. The
+result then equals a direct read at the coarse resolution, up to cells
+straddling coarse-cell boundaries. Without weights every row counts
+once. The \code{npix} column itself is always summed. \code{"var"} and \code{"sd"} are
+unweighted, over the rows' values.
+
 Both layouts produced by \code{\link[=a5_read_raster]{a5_read_raster()}} are supported:
 \itemize{
 \item wide: one numeric column per band (default).
@@ -59,8 +74,8 @@ Reduced element-wise.
 }
 \examples{
 \dontrun{
-  fine <- a5_read_raster(path, resolution = 14L)
-  coarse <- a5_aggregate(fine, to_resolution = 10L)
+  fine <- a5_read_raster(path, resolution = 14L, stat = c("mean", "npix"))
+  coarse <- a5_aggregate(fine, resolution = 10L)
 
   # explicit column selection + sum reducer
   a5_aggregate(fine, 10L, B02, B03, stat = "sum")

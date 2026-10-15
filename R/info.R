@@ -50,7 +50,7 @@
 a5_raster_info <- function(src, store_opts = NULL) {
   check_scalar_string(src, "src")
   store <- check_store_opts(store_opts)
-  r <- a5_raster_info_rs(src, store$keys, store$values)
+  r <- rs_call(a5_raster_info_rs(src, store$keys, store$values))
   list(
     width = as.integer(r$width),
     height = as.integer(r$height),

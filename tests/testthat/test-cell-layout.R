@@ -26,6 +26,7 @@ test_that("known cell ids round-trip through the Rust cell encoding", {
 # Under A5 1.0 this id is a res-30 cell in quintant 31 (a 5-bit quintant
 # field), near 98.8 E, 22.1 N; a5R's own test uses the same id.
 test_that("res-30 cells whose top byte is 0xFC are not read as NA", {
+  skip("resolution 30 is refused until the a5 crate returns resolution-30 cells there")
   id <- a5R::a5_cell("fc9529c9c837d6e7")
   ll <- a5R::a5_cell_to_lonlat(id, as_dataframe = TRUE)
   f <- tiny_tif_at(ll$lon, ll$lat)

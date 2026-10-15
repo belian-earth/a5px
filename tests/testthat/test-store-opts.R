@@ -37,8 +37,8 @@ test_that("check_store_opts rejects malformed input", {
 test_that("local sources report provider local and refuse store options", {
   f <- local_tif()
   skip_if(f == "")
-  expect_equal(a5_store_config(f), c(provider = "local"))
-  expect_error(a5_store_config(f, c(aws_region = "us-west-2")), "local path")
+  expect_equal(a5px_store_config(f), c(provider = "local"))
+  expect_error(a5px_store_config(f, c(aws_region = "us-west-2")), "local path")
   expect_error(
     a5_read_raster(f, 10L, store_opts = c(aws_region = "us-west-2")),
     "local path"
@@ -52,7 +52,7 @@ test_that("local sources report provider local and refuse store options", {
 test_that("S3 config comes from env, then store_opts, and AWS_NO_SIGN_REQUEST maps to skip_signature", {
   withr::local_envvar(aws_env_clear)
 
-  cfg <- a5_store_config(s3_url)
+  cfg <- a5px_store_config(s3_url)
   expect_equal(cfg[["provider"]], "s3")
   expect_equal(cfg[["host"]], "us-west-2.opendata.source.coop")
   expect_equal(cfg[["region"]], "")
@@ -60,29 +60,29 @@ test_that("S3 config comes from env, then store_opts, and AWS_NO_SIGN_REQUEST ma
   expect_equal(cfg[["static_credentials"]], "false")
 
   withr::local_envvar(AWS_REGION = "eu-west-1", AWS_NO_SIGN_REQUEST = "yes")
-  cfg <- a5_store_config(s3_url)
+  cfg <- a5px_store_config(s3_url)
   expect_equal(cfg[["region"]], "eu-west-1")
   expect_equal(cfg[["skip_signature"]], "true")
 
   # explicit options override the environment
-  cfg <- a5_store_config(s3_url, c(aws_region = "us-west-2", aws_skip_signature = "false"))
+  cfg <- a5px_store_config(s3_url, c(aws_region = "us-west-2", aws_skip_signature = "false"))
   expect_equal(cfg[["region"]], "us-west-2")
   expect_equal(cfg[["skip_signature"]], "false")
 
   # GDAL-style falsy value leaves signing on
   withr::local_envvar(AWS_NO_SIGN_REQUEST = "NO")
-  expect_equal(a5_store_config(s3_url)[["skip_signature"]], "false")
+  expect_equal(a5px_store_config(s3_url)[["skip_signature"]], "false")
 
   # static credentials are reported as a flag, never echoed
   withr::local_envvar(AWS_ACCESS_KEY_ID = "AKIAEXAMPLE", AWS_SECRET_ACCESS_KEY = "secret")
-  cfg <- a5_store_config(s3_url)
+  cfg <- a5px_store_config(s3_url)
   expect_equal(cfg[["static_credentials"]], "true")
   expect_false(any(grepl("AKIAEXAMPLE|secret", cfg)))
 })
 
 test_that("S3-shaped https URLs resolve to the S3 provider with the URL's region", {
   withr::local_envvar(aws_env_clear)
-  cfg <- a5_store_config(
+  cfg <- a5px_store_config(
     "https://s3.us-west-2.amazonaws.com/us-west-2.opendata.source.coop/tge-labs/x.tiff",
     c(aws_skip_signature = "true")
   )
@@ -93,14 +93,14 @@ test_that("S3-shaped https URLs resolve to the S3 provider with the URL's region
 
 test_that("unknown store options error per provider", {
   withr::local_envvar(aws_env_clear)
-  expect_error(a5_store_config(s3_url, c(bogus = "1")), "unknown option \"bogus\" for S3")
-  expect_error(a5_store_config("gs://bucket/x.tiff", c(aws_region = "x")), "for GCS")
+  expect_error(a5px_store_config(s3_url, c(bogus = "1")), "unknown option \"bogus\" for S3")
+  expect_error(a5px_store_config("gs://bucket/x.tiff", c(aws_region = "x")), "for GCS")
   expect_error(
-    a5_store_config("https://data.source.coop/x.tiff", c(aws_region = "x")),
+    a5px_store_config("https://data.source.coop/x.tiff", c(aws_region = "x")),
     "for HTTP"
   )
   expect_equal(
-    a5_store_config("https://data.source.coop/x.tiff", c(timeout = "30s"))[["provider"]],
+    a5px_store_config("https://data.source.coop/x.tiff", c(timeout = "30s"))[["provider"]],
     "http"
   )
 })

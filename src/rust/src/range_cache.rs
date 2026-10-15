@@ -24,7 +24,9 @@ use async_tiff::reader::{AsyncFileReader, ObjectReader};
 use bytes::Bytes;
 use extendr_api::prelude::*;
 
-/// Default budget in MiB, overridden by `A5PX_CACHE_MB` at first use.
+/// Default budget in MiB, overridden by `A5PX_CACHE_MB` at first use, and
+/// held to an eighth of a cgroup memory limit (a container or a systemd
+/// scope), so a 2 GiB task caches at most 256 MiB.
 const DEFAULT_BUDGET_MB: u64 = 512;
 
 type Key = (Arc<str>, u64, u64);
@@ -80,18 +82,61 @@ impl RangeCache {
 }
 
 static CACHE: LazyLock<Mutex<RangeCache>> = LazyLock::new(|| {
-    let mb = std::env::var("A5PX_CACHE_MB")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(DEFAULT_BUDGET_MB);
+    let budget = match std::env::var("A5PX_CACHE_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(mb) => mb.saturating_mul(1 << 20),
+        None => {
+            let d = DEFAULT_BUDGET_MB << 20;
+            cgroup_memory_limit().map_or(d, |lim| d.min(lim / 8))
+        }
+    };
     Mutex::new(RangeCache {
         map: HashMap::new(),
         order: BTreeMap::new(),
         tick: 0,
         bytes: 0,
-        budget: mb.saturating_mul(1 << 20),
+        budget,
     })
 });
+
+/// The memory limit of this process's cgroup in bytes, the smallest set on
+/// it or an ancestor (cgroup v2), or the v1 memory controller's; `None`
+/// without one or off Linux.
+fn cgroup_memory_limit() -> Option<u64> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let parse = |s: String| s.trim().parse::<u64>().ok();
+    let mut best: Option<u64> = None;
+    for line in own.lines() {
+        let mut f = line.splitn(3, ':');
+        let (_, ctrl, path) = (f.next()?, f.next()?, f.next()?);
+        if ctrl.is_empty() {
+            // v2: walk from this cgroup to the root
+            let mut p = std::path::PathBuf::from("/sys/fs/cgroup").join(path.trim_start_matches('/'));
+            loop {
+                if let Some(v) = std::fs::read_to_string(p.join("memory.max")).ok().and_then(parse) {
+                    best = Some(best.map_or(v, |b| b.min(v)));
+                }
+                if p == std::path::Path::new("/sys/fs/cgroup") || !p.pop() {
+                    break;
+                }
+            }
+        } else if ctrl.split(',').any(|c| c == "memory") {
+            let p = std::path::PathBuf::from("/sys/fs/cgroup/memory")
+                .join(path.trim_start_matches('/'))
+                .join("memory.limit_in_bytes");
+            // v1 reports "no limit" as a huge page-rounded value
+            if let Some(v) = std::fs::read_to_string(p).ok().and_then(parse).filter(|&v| v < (1u64 << 60)) {
+                best = Some(best.map_or(v, |b| b.min(v)));
+            }
+        }
+    }
+    best
+}
+
+/// CPUs this process may use: `std::thread::available_parallelism`, which
+/// honours affinity masks and cgroup CPU quotas on Linux.
+pub(crate) fn available_cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
 
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
@@ -215,6 +260,14 @@ fn a5px_cache_clear_rs() {
     clear();
 }
 
+/// CPUs available to this process, for the default `cpu_workers`.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5px_available_cpus_rs() -> i32 {
+    available_cpus() as i32
+}
+
 /// Cache state: entries, size and budget in MiB, hits and misses.
 /// @noRd
 /// @keywords internal
@@ -236,6 +289,7 @@ extendr_module! {
     fn a5px_cache_set_rs;
     fn a5px_cache_clear_rs;
     fn a5px_cache_info_rs;
+    fn a5px_available_cpus_rs;
 }
 
 #[cfg(test)]

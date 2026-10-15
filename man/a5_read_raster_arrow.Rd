@@ -63,11 +63,11 @@ rasters destined for Parquet.
     "https://data.source.coop/.../tile.tiff",
     resolution = 14L, bands = 1:8, value_type = "float32"
   )
-  a5_write_parquet(tbl, "embeddings.parquet")
+  a5px_write_parquet(tbl, "embeddings.parquet")
 }
 \dontshow{\}) # examplesIf}
 }
 \seealso{
-\code{\link[=a5_write_parquet]{a5_write_parquet()}} to write the result to Parquet,
+\code{\link[=a5px_write_parquet]{a5px_write_parquet()}} to write the result to Parquet,
 \code{\link[=a5_read_raster]{a5_read_raster()}} for the tibble path.
 }

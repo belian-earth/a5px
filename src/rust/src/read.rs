@@ -243,6 +243,9 @@ impl AccCfg {
 pub(crate) struct DequantLut {
     pub lut: Vec<f64>,
     pub min: i64,
+    /// Whether some code decodes to NaN (`NA` from the R function), which
+    /// then marks the pixel missing like nodata.
+    pub has_nan: bool,
 }
 
 impl DequantLut {
@@ -275,6 +278,13 @@ pub(crate) enum BandDecode<'a> {
 }
 
 impl Decode {
+    /// Whether decoding can turn a valid code into NaN. Only a LUT can: an
+    /// affine decode of a finite value stays finite.
+    #[inline]
+    pub fn may_yield_nan(&self) -> bool {
+        matches!(self, Decode::Lut(d) if d.has_nan)
+    }
+
     #[inline]
     pub fn band(&self, out_b: usize) -> BandDecode<'_> {
         match self {
@@ -341,6 +351,7 @@ pub(crate) fn parse_dequant_arg(lut: Vec<f64>, min: f64) -> Option<DequantLut> {
         None
     } else {
         Some(DequantLut {
+            has_nan: lut.iter().any(|v| v.is_nan()),
             lut,
             min: min as i64,
         })
@@ -1035,9 +1046,9 @@ fn read_pixel_chunky(data: &TypedArray, idx: usize) -> f64 {
 // typed pixel access
 
 /// Append the valid values of `n` pixels starting at `base` with stride
-/// `stride` to `out`: nodata pixels are skipped and the band's decode (when
-/// present) applied, matching the array type once per run rather than per
-/// pixel.
+/// `stride` to `out`: NaN and nodata pixels are skipped and the band's
+/// decode (when present) applied, skipping values it decodes to NaN,
+/// matching the array type once per run rather than per pixel.
 #[inline]
 fn read_run_values(
     data: &TypedArray,
@@ -1053,15 +1064,16 @@ fn read_run_values(
             let v = $v;
             for k in 0..n {
                 let x: f64 = $conv(v[base + k * stride]);
-                if let Some(nd) = nodata {
-                    if is_nodata(x, nd) {
-                        continue;
-                    }
+                if is_missing(x, nodata) {
+                    continue;
                 }
-                out.push(match dequant {
+                let y = match dequant {
                     Some(d) => d.apply(x),
                     None => x,
-                });
+                };
+                if !y.is_nan() {
+                    out.push(y);
+                }
             }
         }};
     }
@@ -1080,19 +1092,39 @@ fn read_run_values(
     }
 }
 
-/// Mark `valid[c] = true` for pixels `c < n` whose value at
-/// `base + c * stride` is not `nodata`; returns how many became valid.
+/// Whether a stored value is missing: NaN, or the nodata value.
 #[inline]
-fn mark_valid(data: &TypedArray, base: usize, stride: usize, n: usize, nodata: f64, valid: &mut [bool]) -> usize {
+fn is_missing(x: f64, nodata: Option<f64>) -> bool {
+    x.is_nan() || nodata.is_some_and(|nd| is_nodata(x, nd))
+}
+
+/// Mark `valid[c] = true` for pixels `c < n` whose value at
+/// `base + c * stride` is not missing ([`is_missing`]), nor decoded to NaN
+/// by `decode` when given; returns how many became valid.
+#[inline]
+fn mark_valid(
+    data: &TypedArray,
+    base: usize,
+    stride: usize,
+    n: usize,
+    nodata: Option<f64>,
+    decode: Option<BandDecode<'_>>,
+    valid: &mut [bool],
+) -> usize {
     let mut newly = 0usize;
     macro_rules! run {
         ($v:expr, $conv:expr) => {{
             let v = $v;
             for c in 0..n {
-                if !valid[c] && !is_nodata($conv(v[base + c * stride]), nodata) {
-                    valid[c] = true;
-                    newly += 1;
+                if valid[c] {
+                    continue;
                 }
+                let x: f64 = $conv(v[base + c * stride]);
+                if is_missing(x, nodata) || decode.is_some_and(|d| d.apply(x).is_nan()) {
+                    continue;
+                }
+                valid[c] = true;
+                newly += 1;
             }
         }};
     }
@@ -1296,6 +1328,11 @@ fn process_tile<L: AccLayout>(
     let mut locator = CellLocator::new(resolution, ctx.px_per_cell);
     let mut prev_row: Vec<u64> = vec![NO_CELL; actual_w];
     let mut any_valid: Vec<bool> = vec![true; actual_w];
+    // Pixels need a validity pass when some can be missing: a nodata value,
+    // a float type (NaN), or a LUT that decodes some codes to NaN.
+    let decode_nan = dequant.is_some_and(|d| d.may_yield_nan());
+    let float_data = matches!(data, TypedArray::Float32(_) | TypedArray::Float64(_));
+    let check_valid = nodata.is_some() || float_data || decode_nan;
     let mut row_slot: Vec<u32> = vec![NO_SLOT; actual_w];
     let mut runs: Vec<(u32, usize, usize)> = Vec::with_capacity(actual_w / 2 + 1);
     let mut vals: Vec<f64> = Vec::with_capacity(actual_w);
@@ -1311,11 +1348,12 @@ fn process_tile<L: AccLayout>(
 
         // --- pass 1: which pixels have at least one valid band
         let t = if prof { Some(Instant::now()) } else { None };
-        if let Some(nd) = nodata {
+        if check_valid {
             any_valid.iter_mut().for_each(|v| *v = false);
             let mut n_valid = 0usize;
-            for &src_b in tile.band_offsets {
-                n_valid += mark_valid(data, row_base + src_b * b_stride, w_stride, actual_w, nd, &mut any_valid);
+            for (out_b, &src_b) in tile.band_offsets.iter().enumerate() {
+                let d = if decode_nan { dequant.map(|d| d.band(out_b)) } else { None };
+                n_valid += mark_valid(data, row_base + src_b * b_stride, w_stride, actual_w, nodata, d, &mut any_valid);
                 if n_valid == actual_w {
                     break;
                 }
@@ -1329,7 +1367,7 @@ fn process_tile<L: AccLayout>(
         let rowf = (ty * tile_h + r) as f64 + 0.5;
         for c in 0..actual_w {
             row_slot[c] = NO_SLOT;
-            if nodata.is_some() && !any_valid[c] {
+            if check_valid && !any_valid[c] {
                 continue;
             }
             let p = gp.point(c, jj);
@@ -1445,8 +1483,9 @@ fn process_tile<L: AccLayout>(
 // overlay (area-weighted) tile processing
 
 /// Read one pixel's selected-band values and validity into the caller's
-/// buffers. nodata is compared against the raw code; the decode (when
-/// present) is applied after, matching the forward path.
+/// buffers. NaN and nodata are tested on the raw code; the decode (when
+/// present) is applied after, and a value it decodes to NaN is missing too,
+/// matching the forward path.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn gather_bands(
@@ -1463,14 +1502,12 @@ fn gather_bands(
     for (out_b, &src_b) in offsets.iter().enumerate() {
         let off = pixel_base + src_b * b_stride;
         let raw = read_pixel_chunky(data, off);
-        let valid = match nodata {
-            Some(nd) => !is_nodata(raw, nd),
-            None => true,
-        };
-        band_vals[out_b] = match dequant {
+        let v = match dequant {
             Some(d) => d.band(out_b).apply(raw),
             None => raw,
         };
+        let valid = !is_missing(raw, nodata) && !v.is_nan();
+        band_vals[out_b] = v;
         band_valid[out_b] = valid;
         any_valid |= valid;
     }
@@ -2777,8 +2814,14 @@ fn parse_bbox_arg(v: Vec<f64>) -> Result<Option<[f64; 4]>> {
     opt_f64_arg::<4>(v, "bbox")
 }
 
+/// `src_nodata`: empty for none. NaN and infinities are allowed, since
+/// float rasters use them as nodata.
 fn parse_src_nodata_arg(v: Vec<f64>) -> Result<Option<f64>> {
-    opt_f64_arg::<1>(v, "src_nodata").map(|opt| opt.map(|a| a[0]))
+    match v.len() {
+        0 => Ok(None),
+        1 => Ok(Some(v[0])),
+        n => Err(A5CogError::Invalid(format!("src_nodata must be length 1 (or NULL); got len {n}"))),
+    }
 }
 
 fn parse_overlay_args(
@@ -3184,7 +3227,7 @@ fn projected_tile_range(
 ///   pooling the sources as one raster.
 /// @param composite Reducer across sources' per-cell values ("mean",
 ///   "median", ...); empty pools the sources' pixels.
-/// @param resolution A5 resolution (0--30).
+/// @param resolution A5 resolution (0--29).
 /// @param stats Character vector of stats: subset of "mean", "sum", "count",
 ///   "min", "max". Length-1 behaves identically to the previous scalar API.
 /// @param bands_idx 1-based band indices to read. Empty = all (unless
@@ -3358,7 +3401,7 @@ fn a5_read_raster_rs(
 /// Arrow `FixedSizeList<float64, n_bands>` array on the R side.
 ///
 /// @param src Path or URL string.
-/// @param resolution A5 resolution (0--30).
+/// @param resolution A5 resolution (0--29).
 /// @param stats Character vector of stats (any non-"fractions" subset of the
 ///   stats accepted by `a5_read_raster`).
 /// @param bands_idx 1-based band indices to read (empty for all unless
@@ -3509,7 +3552,7 @@ impl From<A5CogError> for extendr_api::Error {
 ///
 /// @param src Path or URL string.
 /// @param dest Output Parquet path.
-/// @param resolution A5 resolution (0--30).
+/// @param resolution A5 resolution (0--29).
 /// @param stats Character vector of stats (any non-"fractions" subset of the
 ///   stats accepted by `a5_read_raster`).
 /// @param bands_idx,bands_names Band selection (see `a5_read_raster_rs`).
