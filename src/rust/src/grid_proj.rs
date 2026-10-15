@@ -319,16 +319,37 @@ fn bilinear(c: &[(f64, f64); 4], u: f64, v: f64) -> (f64, f64) {
     )
 }
 
-/// Bbox membership of a point known to within `margin` degrees.
-/// `Some(in)` when decided, `None` when the point is within the margin of
-/// an edge and needs the exact position.
+/// Whether a point lies in a WGS 84 bbox. The max edges are open, so
+/// bboxes that share an edge, as chunks of one read do, take each pixel
+/// once; at the globe's edge (180 E, 90 N) they are closed, so a bbox
+/// reaching it still holds pixels there.
+#[inline]
+pub(crate) fn in_bbox(lon: f64, lat: f64, b: &[f64; 4]) -> bool {
+    lon >= b[0] && lat >= b[1] && !past_max(lon, b[2], 180.0) && !past_max(lat, b[3], 90.0)
+}
+
+/// Whether `v` is beyond a bbox's max edge `hi` (see [`in_bbox`]).
+#[inline]
+fn past_max(v: f64, hi: f64, globe: f64) -> bool {
+    if hi >= globe { v > hi } else { v >= hi }
+}
+
+/// Bbox membership (as [`in_bbox`]) of a point known to within `margin`
+/// degrees. `Some(in)` when decided, `None` when the point is within the
+/// margin of an edge and needs the exact position.
 #[inline]
 pub(crate) fn bbox_classify(lon: f64, lat: f64, margin: f64, b: &[f64; 4]) -> Option<bool> {
-    let inside = lon >= b[0] + margin && lon <= b[2] - margin && lat >= b[1] + margin && lat <= b[3] - margin;
+    let inside = lon - margin >= b[0]
+        && lat - margin >= b[1]
+        && !past_max(lon + margin, b[2], 180.0)
+        && !past_max(lat + margin, b[3], 90.0);
     if inside {
         return Some(true);
     }
-    let outside = lon < b[0] - margin || lon > b[2] + margin || lat < b[1] - margin || lat > b[3] + margin;
+    let outside = lon + margin < b[0]
+        || lat + margin < b[1]
+        || past_max(lon - margin, b[2], 180.0)
+        || past_max(lat - margin, b[3], 90.0);
     if outside {
         return Some(false);
     }

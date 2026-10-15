@@ -41,7 +41,9 @@ test_that("a5_raster_info describes the fixture", {
   expect_length(info$bbox, 4L)
   expect_lt(info$bbox[1], info$bbox[3])
   expect_lt(info$bbox[2], info$bbox[4])
-  expect_equal(info$bbox, as.numeric(a5px:::a5_raster_bbox_lonlat_rs(f, character(), character())))
+  # the envelope centroid mode enumerates cells from is the bbox, padded
+  padded <- as.numeric(a5px:::a5_raster_bbox_lonlat_rs(f, character(), character()))
+  expect_true(all(padded[1:2] < info$bbox[1:2]) && all(padded[3:4] > info$bbox[3:4]))
   expect_true(is.na(info$nodata))
   expect_equal(info$interleave, "pixel")
 })

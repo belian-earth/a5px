@@ -42,12 +42,12 @@ impl Reducer {
     }
 
     /// Reduce `(value, weight)` pairs, all with a positive weight and a
-    /// finite value. NaN when there are none (or, for `var` / `sd`, fewer
-    /// than two). Reorders `vals`.
+    /// finite value. With none, `count` and `sum` are 0, as for a pooled
+    /// read, and the rest NaN; `var` and `sd` need two. Reorders `vals`.
     pub fn reduce(self, vals: &mut [(f64, f64)]) -> f64 {
         if vals.is_empty() {
             return match self {
-                Reducer::Count => 0.0,
+                Reducer::Count | Reducer::Sum => 0.0,
                 _ => f64::NAN,
             };
         }
@@ -159,6 +159,7 @@ mod tests {
     fn empty_and_single_inputs() {
         assert!(r(Reducer::Mean, &[]).is_nan());
         assert_eq!(r(Reducer::Count, &[]), 0.0);
+        assert_eq!(r(Reducer::Sum, &[]), 0.0);
         assert!(r(Reducer::Sd, &[(1.0, 4.0)]).is_nan());
     }
 }

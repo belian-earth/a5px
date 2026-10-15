@@ -11,9 +11,26 @@
   instead computes `stat` per file and reduces across files per cell
   (`"mean"`, `"median"`, `"min"`, `"max"`, `"sum"`, `"count"`, `"var"`,
   `"sd"`, `"majority"`), weighting each file by its valid pixel count in
-  the cell; `composite = "count"` counts the captures of each cell. Errors
+  the cell; `composite = "count"` counts the captures of each cell. Pooled
+  files must store each band with the same scale and offset unless
+  `scoff` or `dequant` decodes them, and with `use_overviews` they all read
+  one overview pixel size, the coarsest suitable one they share, so a
+  mosaic whose small edge tiles lack overviews is not mixed with coarser
+  pixels. In centroid mode each file samples only the cells on it. Errors
   from a worker are now reported instead of "consumer pool dropped
   channel".
+
+* A `bbox` far larger than the raster, up to the whole globe, now reads the
+  whole raster. Tiles were chosen by projecting only the bbox's outline,
+  which collapses under transverse Mercator (both poles and every meridian
+  over 90 degrees from the central one map to the central column), so a
+  UTM raster returned no rows or part of its cells. The bbox is now cut to
+  the raster's footprint first, and a footprint that contains a pole
+  reaches it.
+
+* A pixel centred exactly on a `bbox` edge shared by two chunks of a read
+  is now counted in one of them: the bbox is half-open on its `xmax` and
+  `ymax` edges, except at 180 and 90.
 
 * a5px now uses A5 1.0: the a5 Rust crate 1.0.0-beta.3 and a5R >= 0.9.9.9001.
   A5 1.0 introduces permanent cell ids with a new space-filling curve and
