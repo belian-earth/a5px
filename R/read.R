@@ -376,10 +376,10 @@ a5_read_raster <- function(src,
     cell_edge_m = cell_edge_metres(mode, resolution),
     bbox_align_block = bbox_align_block,
     tile_bbox = aoi_v$tile_bbox,
-    aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
+    aoi_covering = aoi_v$covering_stored
   ))
 
-  cells <- new_a5_cell_from_rs(out$cell)
+  cells <- out$cell
 
   if ("fractions" %in% stats) {
     # ragged CSR from Rust -> one list-column of named share vectors per band
@@ -456,7 +456,7 @@ read_raster_centroid <- function(srcs, resolution, bands_idx, bands_names,
     composite = srcs$composite,
     store_keys = store$keys,
     store_values = store$values,
-    cells_raw = vctrs::vec_data(cells),
+    cells = cells,
     bands_idx = bands_idx,
     bands_names = bands_names,
     src_nodata = src_nodata,
@@ -467,7 +467,7 @@ read_raster_centroid <- function(srcs, resolution, bands_idx, bands_names,
     scoff = dequant_v$scoff,
     interp = interp
   ))
-  cells_out <- new_a5_cell_from_rs(out$cell)
+  cells_out <- out$cell
   bands <- out$bands
   names(bands) <- as.character(out$band_names)
 

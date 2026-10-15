@@ -38,7 +38,7 @@ a5_store_config_rs <- function(src, store_keys, store_values) .Call(wrap__a5_sto
 #'   starting at `dequant_min`; empty = no dequantization.
 #' @param dequant_min First code covered by `dequant_lut`.
 #' @param scoff Apply the file's per-band scale and offset before aggregation.
-#' @returns A list with `cell` (b1..b8 raw fields), `bands` (named numeric
+#' @returns A list with `cell` (an `a5_cell` vector), `bands` (named numeric
 #'   vectors; key form is `<band>` for length-1 stats and `<band>__<stat>`
 #'   for length>1), `band_names`, and `stats` (character).
 #' @noRd
@@ -62,7 +62,7 @@ a5_read_raster_rs <- function(src, src_labels, separate, composite, resolution, 
 #' @param overview_target_m A5 cell edge length in metres; when > 0 a COG
 #'   overview that still oversamples the cell is read instead of full
 #'   resolution. 0 disables overview use (always read IFD 0).
-#' @returns A list with `cell` (b1..b8 raw), `value_flat` (named list of
+#' @returns A list with `cell` (an `a5_cell` vector), `value_flat` (named list of
 #'   numeric vectors, one per stat in `stats` order, each of length
 #'   `n_cells * n_bands` cell-major), `band_names`, `stats`, `n_bands`.
 #' @noRd
@@ -92,7 +92,7 @@ a5_read_raster_flat_rs <- function(src, src_labels, separate, composite, resolut
 #' @keywords internal
 a5_raster_to_parquet_rs <- function(src, src_labels, separate, composite, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, scoff, overlay, subsamples, cell_edge_m, bbox_align_block, tile_bbox, aoi_covering, store_keys, store_values) .Call(wrap__a5_raster_to_parquet_rs, src, src_labels, separate, composite, dest, resolution, stats, bands_idx, bands_names, bbox, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, overview_target_m, dequant_lut, dequant_min, scoff, overlay, subsamples, cell_edge_m, bbox_align_block, tile_bbox, aoi_covering, store_keys, store_values)
 
-a5_sample_at_cells_rs <- function(src, src_labels, separate, composite, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_at_cells_rs, src, src_labels, separate, composite, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
+a5_sample_at_cells_rs <- function(src, src_labels, separate, composite, cells, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_at_cells_rs, src, src_labels, separate, composite, cells, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
 
 #' Flat-output variant of `a5_sample_at_cells_rs`: same sampler, but the
 #' result mirrors the `a5_read_raster_flat_rs` shape (cell-major flat buffer
@@ -100,7 +100,7 @@ a5_sample_at_cells_rs <- function(src, src_labels, separate, composite, cells_ra
 #' shared across modes.
 #' @noRd
 #' @keywords internal
-a5_sample_at_cells_flat_rs <- function(src, src_labels, separate, composite, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_at_cells_flat_rs, src, src_labels, separate, composite, cells_raw, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
+a5_sample_at_cells_flat_rs <- function(src, src_labels, separate, composite, cells, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_at_cells_flat_rs, src, src_labels, separate, composite, cells, bands_idx, bands_names, src_nodata, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
 
 #' Centroid samples straight to Parquet: same sampler as
 #' `a5_sample_at_cells_rs`, with the RecordBatch built from the flat buffer
@@ -109,7 +109,7 @@ a5_sample_at_cells_flat_rs <- function(src, src_labels, separate, composite, cel
 #' (`as_vector = false`) or a single `value` FixedSizeList.
 #' @noRd
 #' @keywords internal
-a5_sample_to_parquet_rs <- function(src, src_labels, separate, composite, dest, resolution, cells_raw, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_to_parquet_rs, src, src_labels, separate, composite, dest, resolution, cells_raw, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
+a5_sample_to_parquet_rs <- function(src, src_labels, separate, composite, dest, resolution, cells, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_to_parquet_rs, src, src_labels, separate, composite, dest, resolution, cells, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
 
 #' The WGS84 lon/lat bbox of the raster at `src`, padded (as for tile
 #' selection) to hold every cell centre on the raster: centroid mode takes
@@ -153,5 +153,16 @@ a5px_cache_info_rs <- function() .Call(wrap__a5px_cache_info_rs)
 #' @noRd
 #' @keywords internal
 a5px_available_cpus_rs <- function() .Call(wrap__a5px_available_cpus_rs)
+
+#' The version of a5R's C API, checked when a5px loads.
+#' @noRd
+#' @keywords internal
+a5px_a5r_api_version_rs <- function() .Call(wrap__a5px_a5r_api_version_rs)
+
+#' Cells of lon/lat points at `resolution`, by a5px's own a5 crate, for
+#' the load-time check that a5px and a5R agree on cell ids.
+#' @noRd
+#' @keywords internal
+a5px_lonlat_to_cells_rs <- function(lon, lat, resolution) .Call(wrap__a5px_lonlat_to_cells_rs, lon, lat, resolution)
 
 # nolint end

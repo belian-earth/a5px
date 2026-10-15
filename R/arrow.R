@@ -98,7 +98,7 @@ a5_read_raster_arrow <- function(src,
       composite = srcs$composite,
       store_keys = store$keys,
       store_values = store$values,
-      cells_raw = vctrs::vec_data(cells_in),
+      cells = cells_in,
       bands_idx = band_sel$idx,
       bands_names = band_sel$names,
       src_nodata = src_nodata_v,
@@ -134,11 +134,11 @@ a5_read_raster_arrow <- function(src,
       cell_edge_m = cell_edge_metres(mode, resolution),
       bbox_align_block = bbox_align_block,
       tile_bbox = aoi_v$tile_bbox,
-      aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
+      aoi_covering = aoi_v$covering_stored
     ))
   }
 
-  cells <- new_a5_cell_from_rs(out$cell)
+  cells <- out$cell
   band_names <- as.character(out$band_names)
   n_bands <- as.integer(out$n_bands)
   stats_out <- as.character(out$stats)
@@ -295,7 +295,7 @@ a5_raster_to_parquet <- function(src,
       store_values = store$values,
       dest = dest,
       resolution = resolution,
-      cells_raw = vctrs::vec_data(cells_in),
+      cells = cells_in,
       bands_idx = band_sel$idx,
       bands_names = band_sel$names,
       src_nodata = src_nodata_v,
@@ -339,7 +339,7 @@ a5_raster_to_parquet <- function(src,
     cell_edge_m = cell_edge_metres(mode, resolution),
     bbox_align_block = bbox_align_block,
     tile_bbox = aoi_v$tile_bbox,
-    aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
+    aoi_covering = aoi_v$covering_stored
   )))
 }
 
