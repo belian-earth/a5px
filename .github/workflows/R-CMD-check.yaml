@@ -21,8 +21,9 @@ jobs:
         config:
           - {os: macos-latest,   r: 'release'}
           - {os: windows-latest, r: 'release'}
-          # no arrow binary for Windows ARM64; its tests skip
-          - {os: windows-11-arm, r: 'release', extra: 'arrow=?ignore'}
+          # no arrow binary for Windows ARM64, nor a5view, which imports it;
+          # their tests skip
+          - {os: windows-11-arm, r: 'release', extra: 'arrow=?ignore, a5view=?ignore'}
           - {os: ubuntu-latest,   r: 'devel', http-user-agent: 'release'}
           - {os: ubuntu-latest,   r: 'release'}
           - {os: ubuntu-latest,   r: 'oldrel-1'}
