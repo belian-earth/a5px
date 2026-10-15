@@ -155,6 +155,11 @@ a5px_cache_info_rs <- function() .Call(wrap__a5px_cache_info_rs)
 #' @keywords internal
 a5px_available_cpus_rs <- function() .Call(wrap__a5px_available_cpus_rs)
 
+#' Return memory a finished read freed to the operating system.
+#' @noRd
+#' @keywords internal
+a5px_release_memory_rs <- function() .Call(wrap__a5px_release_memory_rs)
+
 #' The version of a5R's C API, checked when a5px loads.
 #' @noRd
 #' @keywords internal

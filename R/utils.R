@@ -389,6 +389,8 @@ parse_bands_arg <- function(bands, call = rlang::caller_env()) {
 #' Every class also carries `a5px_error`.
 #' @noRd
 rs_call <- function(expr, call = rlang::caller_env()) {
+  # once R holds the output, hand the memory the read freed back to the OS
+  on.exit(a5px_release_memory_rs(), add = TRUE)
   tryCatch(expr, error = function(e) {
     msg <- conditionMessage(e)
     cls <- rs_error_class(msg)

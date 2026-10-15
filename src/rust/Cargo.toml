@@ -29,6 +29,10 @@ num_cpus = '1'
 bytes = '1'
 ahash = '0.8'
 thiserror = '2'
+# zlib-rs decodes deflate faster than flate2's default miniz_oxide; with
+# the feature on, flate2 uses it for async-tiff too
+flate2 = { version = '1', default-features = false, features = ['zlib-rs'] }
+libc = '0.2'
 url = '2'
 arrow-array = '60'
 arrow-buffer = '60'

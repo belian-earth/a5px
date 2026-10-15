@@ -202,8 +202,9 @@ impl PointEval<'_> {
 /// the previous hit and caches of tested cells' geometry.
 pub struct CellLocator {
     resolution: i32,
-    /// Below the first Hilbert resolution `spherical_to_cell` is an exact
-    /// O(1) estimate, so the candidate tests are skipped.
+    /// Below the first curve resolution `spherical_to_cell` is an exact
+    /// O(1) estimate, and with pixels larger than cells the neighbours
+    /// rarely hit, so the candidate tests are skipped.
     direct: bool,
     /// Parent resolution for the children stage, or `None` below res 4.
     parent_res: Option<i32>,
@@ -229,7 +230,11 @@ impl CellLocator {
         };
         Self {
             resolution,
-            direct: resolution < FIRST_CURVE_RESOLUTION,
+            // Pixels larger than cells rarely share a cell with their
+            // neighbours, so the neighbour and children tests nearly always
+            // miss before the direct search: at 30 m pixels and resolution
+            // 18 they made a pixel cost 2.7 us against about 1 us direct.
+            direct: resolution < FIRST_CURVE_RESOLUTION || px_per_cell < 1.0,
             parent_res,
             geoms: AHashMap::with_capacity(1024),
             kids: AHashMap::with_capacity(256),

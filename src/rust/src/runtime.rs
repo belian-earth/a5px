@@ -81,3 +81,16 @@ pub(crate) fn block_on_interruptible<T>(fut: impl std::future::Future<Output = R
         }
     })
 }
+
+/// Hand memory freed by a read back to the operating system; the R
+/// wrappers call it once a read's output has been copied into R. glibc keeps
+/// freed heap in its per-thread arenas, so a long-lived R session that
+/// makes many reads (a worker reading tile after tile) grew from 290 to
+/// 895 MB over nine reads; `malloc_trim` returns what the arenas no longer
+/// use. Elsewhere the allocator returns memory itself.
+pub(crate) fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
