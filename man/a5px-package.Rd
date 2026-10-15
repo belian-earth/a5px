@@ -67,7 +67,7 @@ It handles both the wide and the list-column layout, with the same
 
 \section{Writing}{
 
-\code{\link[=a5_write_parquet]{a5_write_parquet()}} writes a tibble or Arrow table from the readers to
+\code{\link[=a5px_write_parquet]{a5px_write_parquet()}} writes a tibble or Arrow table from the readers to
 Parquet, with a schema for A5 cells and value lists.
 }
 
@@ -77,7 +77,7 @@ Parquet, with a schema for A5 cells and value lists.
 \item \code{\link[=a5_raster_info]{a5_raster_info()}}: dimensions, data type, block grid, overview levels,
 CRS, band scale and offset, and the WGS 84 envelope, without reading
 pixels.
-\item \code{\link[=a5_store_config]{a5_store_config()}}: the object store configuration a remote \code{src}
+\item \code{\link[=a5px_store_config]{a5px_store_config()}}: the object store configuration a remote \code{src}
 resolves to.
 }
 }
@@ -97,10 +97,13 @@ cells afterwards with coverage fractions of your choice.
 
 The accumulators hold every touched cell in memory (about 4.5 GB per
 million cells with 64 bands and \code{stat = c("mean", "count")}), so split
-very large reads by \code{bbox}. With \code{bbox_align = "block"} each chunk takes
-whole COG blocks, so no block is fetched twice; with
-\code{stat = c("sum", "count")} the per-cell partials of adjacent chunks add
-up exactly, and means follow. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the block grid
+very large reads by \code{bbox}. A pixel centred on an edge two chunks share
+belongs to one of them, so with \code{stat = c("sum", "count")} the per-cell
+partials of adjacent chunks add up exactly, and means follow. A remote
+block that several chunks touch is fetched once and then served from the
+session cache (\code{\link[=a5px_set_cache]{a5px_set_cache()}}), as long as the cache holds it. With
+\code{bbox_align = "block"} each chunk takes whole COG blocks instead, so no
+chunk reads a block another chunk owns. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the block grid
 and envelope to build the chunks from.
 }
 
@@ -110,7 +113,9 @@ and envelope to build the chunks from.
 defaults for the worker pool (\code{cpu_workers}) and the number of tile
 fetches in flight (\code{io_concurrency}). They are independent of
 \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}. Remote reads are usually limited by latency,
-so a higher \code{io_concurrency} often helps.
+so a higher \code{io_concurrency} often helps. Remote reads keep the byte
+ranges they fetch in a session cache, so reads split into \code{bbox} chunks
+fetch each block once; \code{\link[=a5px_set_cache]{a5px_set_cache()}} sets its budget.
 }
 
 \section{Common arguments}{
@@ -120,8 +125,8 @@ All readers accept the same core arguments:
 \item \code{src}: one or more paths or URLs: local, \verb{file://}, \verb{http(s)://},
 \verb{s3://}, \verb{gs://} or \verb{az://}. Remote reads fetch byte ranges and never
 download the whole file; see "Remote sources".
-\item \code{resolution}: A5 resolution, 0 to 30; \code{\link[a5R:a5_cell_area]{a5R::a5_cell_area()}} gives the
-cell area at each.
+\item \code{resolution}: A5 resolution, 0 to 29 (30 is not yet supported);
+\code{\link[a5R:a5_cell_area]{a5R::a5_cell_area()}} gives the cell area at each.
 \item \code{stat}: one or more of \code{"mean"}, \code{"sum"}, \code{"count"}, \code{"min"}, \code{"max"},
 \code{"var"}, \code{"sd"}, \code{"majority"}, \code{"fractions"} and \code{"npix"}. Several give
 one column per band and stat. \code{var} and \code{sd} use the sample formula
@@ -140,7 +145,7 @@ selected bands are fetched.
 byte-range requests and the file is never downloaded whole. Cloud
 clients are configured from the environment first and from the readers'
 \code{store_opts} argument second, so an explicit option always wins.
-\code{\link[=a5_store_config]{a5_store_config()}} shows the resolved configuration without making a
+\code{\link[=a5px_store_config]{a5px_store_config()}} shows the resolved configuration without making a
 request.
 \itemize{
 \item S3: every \verb{AWS_*} variable \code{object_store} understands, including

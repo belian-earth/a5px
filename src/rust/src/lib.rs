@@ -10,6 +10,7 @@ mod grid_proj;
 pub mod locator;
 mod meta_cache;
 mod parquet_write;
+mod range_cache;
 mod read;
 mod runtime;
 mod sample;
@@ -19,4 +20,5 @@ mod store;
 extendr_module! {
     mod a5px;
     use read;
+    use range_cache;
 }

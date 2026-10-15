@@ -70,6 +70,20 @@ fn reject_opts(what: &str, opts: &StoreOpts) -> Result<()> {
 /// Anything that parses as a URL with a multi-character scheme is remote
 /// (single-letter "schemes" are Windows drive letters). Everything else is
 /// a local path, which must exist.
+/// The session cache key of `src`: the URL and the store options, which
+/// can point one URL at another endpoint. `None` for a local file (no URL
+/// scheme, or `file`), which the cache skips.
+pub(crate) fn cache_key(src: &str, opts: &StoreOpts) -> Option<String> {
+    match url::Url::parse(src) {
+        Ok(u) if u.scheme().len() > 1 && u.scheme() != "file" => {
+            let mut opts: Vec<String> = opts.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            opts.sort();
+            Some(format!("{src}\n{}", opts.join("\n")))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_src(src: &str, opts: &StoreOpts) -> Result<(Arc<dyn ObjectStore>, ObjPath)> {
     if let Ok(url) = url::Url::parse(src) {
         if url.scheme().len() > 1 {

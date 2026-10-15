@@ -51,7 +51,7 @@
 #'   `aws_endpoint`, `aws_virtual_hosted_style_request`, the `google_*` /
 #'   `azure_*` equivalents, and for plain HTTP(S) the client keys such as
 #'   `timeout` or `allow_http`. Unknown keys, and any key given with a
-#'   local path, are errors. Inspect the result with [a5_store_config()].
+#'   local path, are errors. Inspect the result with [a5px_store_config()].
 #' @param separate How several sources combine.
 #'   - `FALSE` (default): the sources are pieces of one raster, such as
 #'     adjacent tiles of a mosaic or captures of one area on different
@@ -94,10 +94,12 @@
 #'   valid data in the cell, such as the number of cloud-free captures, and
 #'   `"sum"` and `"count"` are 0 where no source has valid data. With
 #'   `stat = "mean"`, `composite = "mean"` equals the pooled mean. Cells are
-#'   the shared grid, so the sources need not be aligned. In centroid mode
+#'   the shared grid, so the sources' pixel grids need not be aligned,
+#'   though they must have the same pixel size. In centroid mode
 #'   each source's sample has weight 1. Not available with
 #'   `separate = TRUE`, `"fractions"` or `"npix"`.
-#' @param resolution Integer scalar A5 resolution (0--30).
+#' @param resolution Integer scalar A5 resolution (0--29). Resolution 30 is
+#'   refused for now: A5 returns resolution-29 cells for some points at 30.
 #' @param stat Aggregation. One of `"mean"`, `"sum"`, `"count"`, `"min"`,
 #'   `"max"`, `"var"`, `"sd"`, `"majority"`, `"fractions"`, `"npix"`, or any
 #'   non-duplicated subset of those (except `"fractions"`, which must be
@@ -171,8 +173,8 @@
 #'   `aoi`.
 #' @param src_nodata Optional numeric scalar overriding the source nodata.
 #'   Use this when the file's `TIFFTAG_GDAL_NODATA` tag is missing or wrong;
-#'   it takes precedence over the metadata value when set. `NULL` (default)
-#'   uses whatever `async-tiff` exposes.
+#'   it takes precedence over the metadata value when set. `NaN` and
+#'   infinities are accepted. `NULL` (default) uses the file's tag.
 #' @param mode Sampling mode. `"forward"` (default) aggregates pixels into
 #'   cells by their centres; `"overlay"` aggregates with pixel-cell overlap
 #'   weights; `"centroid"` samples one pixel per cell at the cell centroid.
@@ -199,12 +201,13 @@
 #' @param cpu_workers Number of CPU threads for decoding and indexing
 #'   (each decoded block is indexed as row stripes across all workers).
 #'   `NULL` (default) resolves from `getOption("a5px.cpu_workers")`, env
-#'   `A5PX_CPU_WORKERS`, then [parallel::detectCores()].
+#'   `A5PX_CPU_WORKERS`, then the CPUs available to the R process, which
+#'   respects container and cgroup CPU limits.
 #' @param io_concurrency Maximum in-flight fetch tasks the producer issues
 #'   to the I/O stage; each task carries one block, or a run of up to four
 #'   adjacent blocks on files without a predictor. `NULL` (default) resolves from
 #'   `getOption("a5px.io_concurrency")`, env `A5PX_IO_CONCURRENCY`, then
-#'   `min(32, max(cpu_workers, 8))`. Bump this for cloud reads of multi-band
+#'   `min(16, max(cpu_workers, 8))`. Bump this for cloud reads of multi-band
 #'   embedding rasters where the network can absorb more parallelism than
 #'   the CPU pool. See [a5px_set_concurrency()].
 #' @param scoff Logical. If `TRUE`, apply the scale and offset the file
@@ -230,8 +233,9 @@
 #'   build a lookup table applied on the Rust side, which restricts
 #'   `dequant` to sources with an integer data type of 16 bits or fewer
 #'   (int8 / uint8 / int16 / uint16); other dtypes error at read time.
-#'   nodata is matched against the raw code, before decoding. `NULL`
-#'   (default) reads raw values.
+#'   nodata is matched against the raw code, before decoding, and a code
+#'   the function maps to `NA` is skipped like nodata. `NULL` (default)
+#'   reads raw values.
 #' @param as_vector Logical. If `TRUE`, collapse the (selected) bands into
 #'   list columns of fixed-length numeric vectors -- one per stat. Single
 #'   stat returns a single column `value`; multi-stat returns
@@ -264,9 +268,11 @@
 #' apply them per pixel before aggregation. [a5_raster_info()] reports the
 #' values a file declares.
 #'
-#' **NoData:** the dataset-level GDAL `NODATA_VALUE` tag (when present) is
-#' used to skip per-band samples. Per-band nodata via `GDAL_METADATA` XML is
-#' not yet supported.
+#' **NoData:** a pixel's band value is skipped when it equals the
+#' dataset-wide nodata value (GDAL's `TIFFTAG_GDAL_NODATA`, or
+#' `src_nodata`), when it is `NaN`, whatever the nodata value, and when
+#' `dequant` maps it to `NA`. GeoTIFF has no per-band nodata; bands read
+#' from separate files with `separate = TRUE` each keep their file's.
 #'
 #' @export
 #' @examples
@@ -346,7 +352,7 @@ a5_read_raster <- function(src,
     ))
   }
 
-  out <- a5_read_raster_rs(
+  out <- rs_call(a5_read_raster_rs(
     src = srcs$src,
     src_labels = srcs$labels,
     separate = srcs$separate,
@@ -371,7 +377,7 @@ a5_read_raster <- function(src,
     bbox_align_block = bbox_align_block,
     tile_bbox = aoi_v$tile_bbox,
     aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
-  )
+  ))
 
   cells <- new_a5_cell_from_rs(out$cell)
 
@@ -443,7 +449,7 @@ read_raster_centroid <- function(srcs, resolution, bands_idx, bands_names,
                                  aoi_cells = NULL) {
   warn_centroid_stat(stats)
   cells <- centroid_cells(srcs$src, resolution, bbox, store, aoi_cells)
-  out <- a5_sample_at_cells_rs(
+  out <- rs_call(a5_sample_at_cells_rs(
     src = srcs$src,
     src_labels = srcs$labels,
     separate = srcs$separate,
@@ -460,7 +466,7 @@ read_raster_centroid <- function(srcs, resolution, bands_idx, bands_names,
     dequant_min = dequant_v$min,
     scoff = dequant_v$scoff,
     interp = interp
-  )
+  ))
   cells_out <- new_a5_cell_from_rs(out$cell)
   bands <- out$bands
   names(bands) <- as.character(out$band_names)
@@ -501,7 +507,7 @@ centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL)
   # apart do not enumerate the cells between them.
   boxes <- if (length(src)) {
     lapply(src, function(s) {
-      env <- as.numeric(a5_raster_bbox_lonlat_rs(s, store$keys, store$values))
+      env <- as.numeric(rs_call(a5_raster_bbox_lonlat_rs(s, store$keys, store$values)))
       if (is.null(bbox)) env else intersect_bbox(bbox, env)
     })
   } else {

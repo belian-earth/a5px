@@ -20,7 +20,7 @@ keys for the provider, e.g. \code{aws_region}, \code{aws_skip_signature},
 \code{aws_endpoint}, \code{aws_virtual_hosted_style_request}, the \verb{google_*} /
 \verb{azure_*} equivalents, and for plain HTTP(S) the client keys such as
 \code{timeout} or \code{allow_http}. Unknown keys, and any key given with a
-local path, are errors. Inspect the result with \code{\link[=a5_store_config]{a5_store_config()}}.}
+local path, are errors. Inspect the result with \code{\link[=a5px_store_config]{a5px_store_config()}}.}
 }
 \value{
 A list with elements:

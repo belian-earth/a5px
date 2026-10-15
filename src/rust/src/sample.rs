@@ -357,7 +357,13 @@ async fn sample_source(
     // Per-cell centroid -> fractional pixel coordinate and stencil extent,
     // computed in parallel (the projection dominates for millions of cells);
     // the bucket build below is a cheap serial pass over the results.
-    let placed: Vec<Option<(f64, f64, usize, usize, usize, usize)>> = {
+    // On a pool of the read's own: rayon's global pool, like any thread
+    // pool, does not survive into a forked child.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(cpu_workers.max(1))
+        .build()
+        .map_err(|e| A5CogError::Internal(format!("rayon pool: {e}")))?;
+    let placed: Vec<Option<(f64, f64, usize, usize, usize, usize)>> = pool.install(|| {
         use rayon::prelude::*;
         cells_in
             .par_iter()
@@ -398,7 +404,7 @@ async fn sample_source(
                 Some((col, row, cx_lo, cx_hi, cy_lo, cy_hi))
             })
             .collect()
-    };
+    });
     // cells on this raster, by local index
     let mut on_raster: Vec<u32> = Vec::new();
     for (i, pl) in placed.iter().enumerate() {
@@ -588,19 +594,19 @@ async fn sample_source(
                             for (out_b, &src_b) in offsets_arc.iter().enumerate() {
                                 let off = pixel_base + src_b * b_stride;
                                 let raw = crate::read::read_pixel_chunky_pub(&data, off);
-                                // nodata compares the raw code; dequant
-                                // decodes each stencil pixel BEFORE the
-                                // kernel (nonlinear decodes do not commute
-                                // with interpolation)
-                                let valid_v = match nodata {
-                                    Some(nd) => !is_nodata(raw, nd),
-                                    None => true,
+                                // NaN and nodata are tested on the raw code;
+                                // dequant decodes each stencil pixel BEFORE
+                                // the kernel (nonlinear decodes do not
+                                // commute with interpolation), and a value it
+                                // decodes to NaN is missing too
+                                let v = match dequant_c.as_deref() {
+                                    Some(d) => d.band(out_b).apply(raw),
+                                    None => raw,
                                 };
+                                let valid_v = !raw.is_nan()
+                                    && !nodata.is_some_and(|nd| is_nodata(raw, nd))
+                                    && !v.is_nan();
                                 if valid_v {
-                                    let v = match dequant_c.as_deref() {
-                                        Some(d) => d.band(out_b).apply(raw),
-                                        None => raw,
-                                    };
                                     ks[out_b] += wgt * v;
                                     kw[out_b] += wgt;
                                     if fw != 0.0 {
@@ -678,9 +684,20 @@ async fn sample_source(
             .try_collect::<Vec<()>>();
         // tx_chan moved in; end-of-scope drops it and closes the channel.
         let producer_result = producer.await;
+        // As in read.rs: stop the consumers, and when the producer failed
+        // because they had already stopped, report their error, the cause.
         if let Err(e) = producer_result {
             for h in &consumer_handles {
                 h.abort();
+            }
+            for h in consumer_handles {
+                match h.await {
+                    Ok(Err(inner)) => return Err(inner),
+                    Err(join_err) if join_err.is_panic() => {
+                        return Err(A5CogError::WorkerJoin(format!("centroid-consumer worker: {join_err}")));
+                    }
+                    _ => {}
+                }
             }
             return Err(e);
         }

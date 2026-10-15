@@ -3,13 +3,23 @@ NULL
 
 check_resolution <- function(resolution,
                              min = 0L,
-                             max = 30L,
+                             max = 29L,
                              call = rlang::caller_env()) {
+  if (any(resolution == 30L, na.rm = TRUE)) {
+    # the a5 crate (1.0.0-beta.3) returns resolution-29 cells for some
+    # points at 30, so a read's cells would mix resolutions
+    cli::cli_abort(
+      "Resolution 30 is not supported yet: A5 returns resolution-29 cells for some points at 30. Use resolution 29 or less.",
+      call = call,
+      class = c("a5px_error_resolution", "a5px_error_input", "a5px_error")
+    )
+  }
   bad <- !is.na(resolution) & (resolution < min | resolution > max)
   if (any(bad)) {
     cli::cli_abort(
       "{.arg resolution} must be between {min} and {max}, not {resolution[which(bad)[1]]}.",
-      call = call
+      call = call,
+      class = c("a5px_error_resolution", "a5px_error_input", "a5px_error")
     )
   }
   invisible(resolution)
@@ -119,13 +129,22 @@ check_bbox <- function(bbox, call = rlang::caller_env()) {
   if (length(v) != 4L || anyNA(v)) {
     cli::cli_abort(
       "{.arg bbox} must be a length-4 numeric {.code c(xmin, ymin, xmax, ymax)} in WGS 84.",
-      call = call
+      call = call,
+      class = c("a5px_error_geometry", "a5px_error_input", "a5px_error")
     )
   }
   if (v[1] >= v[3] || v[2] >= v[4]) {
     cli::cli_abort(
       "{.arg bbox} must satisfy {.code xmin < xmax} and {.code ymin < ymax}.",
-      call = call
+      call = call,
+      class = c("a5px_error_geometry", "a5px_error_input", "a5px_error")
+    )
+  }
+  if (v[1] < -180 || v[3] > 180 || v[2] < -90 || v[4] > 90) {
+    cli::cli_abort(
+      "{.arg bbox} must lie within longitudes -180 to 180 and latitudes -90 to 90.",
+      call = call,
+      class = c("a5px_error_geometry", "a5px_error_input", "a5px_error")
     )
   }
   v
@@ -306,6 +325,12 @@ parse_bands_arg <- function(bands, call = rlang::caller_env()) {
   if (is.null(bands)) {
     return(list(idx = integer(), names = character()))
   }
+  if (anyDuplicated(bands)) {
+    cli::cli_abort(
+      "{.arg bands} must not repeat a band; {.val {unique(bands[duplicated(bands)])}} appears more than once.",
+      call = call
+    )
+  }
   if (is.character(bands)) {
     if (anyNA(bands) || !length(bands)) {
       cli::cli_abort("{.arg bands} character vector must be non-empty and contain no NAs.",
@@ -324,5 +349,50 @@ parse_bands_arg <- function(bands, call = rlang::caller_env()) {
   cli::cli_abort(
     "{.arg bands} must be {.code NULL}, an integer vector, or a character vector.",
     call = call
+  )
+}
+
+#' Run a call into Rust and re-raise its error as a classed condition, so
+#' callers (an HTTP service, say) can tell a bad source from bad input:
+#' - `a5px_error_source`: the file or object store: missing, unreadable,
+#'   an unsupported TIFF layout, or a network failure;
+#' - `a5px_error_geometry` (also `a5px_error_input`): a bbox, AOI or CRS
+#'   that cannot be used;
+#' - `a5px_error_input`: other invalid arguments or sources, such as files
+#'   that cannot be pooled;
+#' - `a5px_error_internal`: a fault in a5px.
+#' Every class also carries `a5px_error`.
+#' @noRd
+rs_call <- function(expr, call = rlang::caller_env()) {
+  tryCatch(expr, error = function(e) {
+    msg <- conditionMessage(e)
+    cls <- rs_error_class(msg)
+    if (is.null(cls)) stop(e)
+    rlang::abort(msg, class = c(cls, "a5px_error"), call = call)
+  })
+}
+
+#' Condition classes for a message from the Rust error type, by its
+#' prefix; `NULL` for anything else (an R error raised during the call).
+#' @noRd
+rs_error_class <- function(msg) {
+  pre <- sub(":.*$", "", msg)
+  switch(pre,
+    "io error" = , "object_store error" = , "async-tiff error" = ,
+    "missing geokey" = , "unsupported configuration" = ,
+    "url parse error" = "a5px_error_source",
+    "proj error" = c("a5px_error_geometry", "a5px_error_input"),
+    "invalid input" = {
+      if (grepl("file not found|not found:|no IFDs", msg)) {
+        "a5px_error_source"
+      } else if (grepl("bbox|reproject|footprint|geotransform", msg)) {
+        c("a5px_error_geometry", "a5px_error_input")
+      } else {
+        "a5px_error_input"
+      }
+    },
+    "internal error" = , "worker task failed" = , "parquet/arrow error" = ,
+    "a5 error" = "a5px_error_internal",
+    NULL
   )
 }

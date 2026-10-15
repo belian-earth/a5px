@@ -20,6 +20,61 @@
   from a worker are now reported instead of "consumer pool dropped
   channel".
 
+* **Breaking:** `a5_store_config()` is now `a5px_store_config()`,
+  `a5_write_parquet()` is now `a5px_write_parquet()`, and
+  `a5_aggregate()` takes `resolution` in place of `to_resolution`. The
+  `a5px_` prefix marks package machinery (configuration, cache, store,
+  writer); `a5_` stays on the verbs that turn rasters into A5 cells. a5R
+  moves from Depends to Imports, so attach it yourself to call its
+  functions unqualified.
+
+* **Breaking:** `a5_aggregate()` weights `"mean"` by each row's pixel
+  count, the `npix` column when present or a column named by the new
+  `weights` argument, and sums `npix` rather than averaging it, so an
+  aggregated mean matches a direct read at the coarse resolution. Input
+  cells must share one resolution.
+
+* NaN pixels are missing data whatever the nodata tag: they counted as
+  valid unless the nodata value was itself NaN, giving NaN means and
+  inflated counts. Codes a `dequant` function maps to `NA` are missing
+  too, and a bilinear or cubic centroid sample renormalises over the
+  valid pixels around a NaN. `src_nodata` accepts `NaN` and infinities.
+
+* A process forked after a read (`parallel::mcparallel()`, `mclapply()`)
+  could hang forever on its first read, since the shared runtime's
+  threads do not exist in the child. Each process now builds its own.
+
+* Resolution 30 is refused for now: the a5 crate returns resolution-29
+  cells for about 30% of points at 30, so a read's cells mixed
+  resolutions.
+
+* The default `cpu_workers` is the number of CPUs available to the
+  process, honouring container and cgroup CPU quotas, rather than every
+  core of the host.
+
+* Errors carry condition classes: `a5px_error_source` (missing or
+  unreadable sources, unsupported layouts, store and network failures),
+  `a5px_error_input` with its subclasses `a5px_error_geometry` and
+  `a5px_error_resolution`, and `a5px_error_internal`, all also
+  `a5px_error`.
+
+* `containment = "center"` is accepted beside `"centre"`. A `bbox` outside
+  longitudes -180 to 180 or latitudes -90 to 90, and repeated `bands`,
+  are errors.
+
+* Remote reads keep the byte ranges they fetch (header chunks and
+  compressed blocks) in a session cache, so a read split into `bbox`
+  chunks, or repeated, fetches each block once: a 1 km AEF box over HTTPS
+  read in 25 chunks took about 15 s, as one read does, against about 400
+  s before. `a5px_set_cache()` sets the budget (512 MiB by default, at
+  most an eighth of a cgroup memory limit, or `A5PX_CACHE_MB`; 0 disables
+  it), `a5px_cache_info()` reports it and `a5px_clear_cache()` empties
+  it. Local files bypass the cache.
+
+* A read that finds no pixels keeps the `npix` column when it was asked
+  for, so its tibble, Arrow table or Parquet file has the same schema as
+  any other read.
+
 * A `bbox` far larger than the raster, up to the whole globe, now reads the
   whole raster. Tiles were chosen by projecting only the bbox's outline,
   which collapses under transverse Mercator (both poles and every meridian

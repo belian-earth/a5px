@@ -34,7 +34,7 @@ make_listcol <- function(seed = 1L) {
 
 test_that("wide aggregate (mean) reduces to coarser cells with band cols intact", {
   fine <- make_wide()
-  out  <- a5_aggregate(fine, to_resolution = 5L)
+  out  <- a5_aggregate(fine, resolution = 5L)
 
   expect_s3_class(out, "tbl_df")
   expect_s3_class(out$cell, "a5_cell")
@@ -52,8 +52,8 @@ test_that("wide aggregate (mean) reduces to coarser cells with band cols intact"
 
 test_that("wide aggregate respects stat = sum / count", {
   fine <- make_wide()
-  s <- a5_aggregate(fine, to_resolution = 5L, stat = "sum")
-  c_ <- a5_aggregate(fine, to_resolution = 5L, stat = "count")
+  s <- a5_aggregate(fine, resolution = 5L, stat = "sum")
+  c_ <- a5_aggregate(fine, resolution = 5L, stat = "count")
 
   expect_setequal(names(s),  c("cell", "B02", "B03", "B04"))
   expect_setequal(names(c_), c("cell", "B02", "B03", "B04"))
@@ -66,8 +66,8 @@ test_that("wide aggregate respects stat = sum / count", {
 
 test_that("wide aggregate respects stat = min / max", {
   fine <- make_wide()
-  mn <- a5_aggregate(fine, to_resolution = 5L, stat = "min")
-  mx <- a5_aggregate(fine, to_resolution = 5L, stat = "max")
+  mn <- a5_aggregate(fine, resolution = 5L, stat = "min")
+  mx <- a5_aggregate(fine, resolution = 5L, stat = "max")
   expect_true(min(mn$B02) >= min(fine$B02) - 1e-12)
   expect_true(max(mx$B02) <= max(fine$B02) + 1e-12)
   # element-wise: every parent's min <= max
@@ -76,8 +76,8 @@ test_that("wide aggregate respects stat = min / max", {
 
 test_that("wide aggregate var / sd match per-group stats::var / stats::sd", {
   fine <- make_wide()
-  vv <- a5_aggregate(fine, to_resolution = 5L, stat = "var")
-  ss <- a5_aggregate(fine, to_resolution = 5L, stat = "sd")
+  vv <- a5_aggregate(fine, resolution = 5L, stat = "var")
+  ss <- a5_aggregate(fine, resolution = 5L, stat = "sd")
 
   parents <- a5R::a5_cell_to_supercell(fine$cell, resolution = 5L)
   ref_var <- tapply(fine$B02, a5R::a5_u64_to_hex(parents), function(x) {
@@ -94,8 +94,8 @@ test_that("var / sd are NA for single-observation groups", {
   testthat::skip_if(length(cells) == 0L)
   one <- vctrs::vec_slice(cells, 1L)
   fine <- tibble::tibble(cell = one, B02 = 42)
-  vv <- a5_aggregate(fine, to_resolution = 5L, stat = "var")
-  ss <- a5_aggregate(fine, to_resolution = 5L, stat = "sd")
+  vv <- a5_aggregate(fine, resolution = 5L, stat = "var")
+  ss <- a5_aggregate(fine, resolution = 5L, stat = "sd")
   expect_equal(nrow(vv), 1L)
   expect_true(is.na(vv$B02))
   expect_true(is.na(ss$B02))
@@ -103,7 +103,7 @@ test_that("var / sd are NA for single-observation groups", {
 
 test_that("list-column var reduces element-wise per band", {
   fine <- make_listcol()
-  out <- a5_aggregate(fine, to_resolution = 5L, stat = "var")
+  out <- a5_aggregate(fine, resolution = 5L, stat = "var")
   expect_setequal(names(out), c("cell", "value"))
   expect_true(all(lengths(out$value) == 3L))
 
@@ -127,7 +127,7 @@ test_that("tidy-select picks a subset of columns", {
 
 test_that("list-column aggregate reduces element-wise", {
   fine <- make_listcol()
-  out <- a5_aggregate(fine, to_resolution = 5L)
+  out <- a5_aggregate(fine, resolution = 5L)
 
   expect_setequal(names(out), c("cell", "value"))
   expect_true(is.list(out$value))
@@ -146,7 +146,7 @@ test_that("list-column aggregate reduces element-wise", {
 
 test_that("list-column count is per-band non-NA count", {
   fine <- make_listcol()
-  out <- a5_aggregate(fine, to_resolution = 5L, stat = "count")
+  out <- a5_aggregate(fine, resolution = 5L, stat = "count")
   expect_setequal(names(out), c("cell", "value"))
   expect_equal(sum(unlist(out$value)), nrow(fine) * 3L)
 })
@@ -162,7 +162,7 @@ test_that("errors: multiple a5_cell columns", {
   expect_error(a5_aggregate(fine2, 5L), "expected exactly one")
 })
 
-test_that("errors: to_resolution >= current resolution", {
+test_that("errors: resolution >= current resolution", {
   fine <- make_wide()  # res 8
   expect_error(a5_aggregate(fine, 8L), "strictly less")
   expect_error(a5_aggregate(fine, 9L), "strictly less")
@@ -195,8 +195,44 @@ test_that("on a real reader output the result resolves cleanly", {
   skip_if_not(file.exists(path), "exe_cog.tif missing")
 
   fine <- a5_read_raster(path, resolution = 14L, bands = 1:3)
-  coarse <- a5_aggregate(fine, to_resolution = 11L)
+  coarse <- a5_aggregate(fine, resolution = 11L)
   expect_lt(nrow(coarse), nrow(fine))
   expect_equal(unique(a5R::a5_get_resolution(coarse$cell)), 11L)
   expect_setequal(names(coarse), c("cell", "B02", "B03", "B04"))
+})
+
+test_that("mean is weighted by npix, and npix is summed", {
+  fine <- make_wide()
+  fine$npix <- rep(c(1, 3, 6), length.out = nrow(fine))
+  out <- a5_aggregate(fine, 5L)
+  parents <- a5R::a5_u64_to_hex(a5R::a5_cell_to_supercell(fine$cell, resolution = 5L))
+  wmean <- tapply(fine$B02 * fine$npix, parents, sum) / tapply(fine$npix, parents, sum)
+  keys <- a5R::a5_u64_to_hex(out$cell)
+  expect_equal(out$B02[match(names(wmean), keys)], as.numeric(wmean), tolerance = 1e-12)
+  expect_equal(out$npix[match(names(wmean), keys)], as.numeric(tapply(fine$npix, parents, sum)))
+  # equal weights without npix
+  fine$npix <- NULL
+  expect_equal(a5_aggregate(fine, 5L)$B02, a5_aggregate(cbind(fine, w = 1), 5L, weights = "w")$B02)
+})
+
+test_that("weights apply element-wise to list columns", {
+  fine <- make_listcol()
+  fine$npix <- rep(c(2, 5), length.out = nrow(fine))
+  out <- a5_aggregate(fine, 5L)
+  parents <- a5R::a5_u64_to_hex(a5R::a5_cell_to_supercell(fine$cell, resolution = 5L))
+  b1 <- vapply(fine$value, `[`, numeric(1), 1)
+  wmean <- tapply(b1 * fine$npix, parents, sum) / tapply(fine$npix, parents, sum)
+  keys <- a5R::a5_u64_to_hex(out$cell)
+  got <- vapply(out$value, `[`, numeric(1), 1)
+  expect_equal(got[match(names(wmean), keys)], as.numeric(wmean), tolerance = 1e-12)
+})
+
+test_that("errors: mixed input resolutions and bad weights", {
+  fine <- make_wide()
+  mixed <- fine
+  mixed$cell[1] <- a5R::a5_cell_to_parent(fine$cell[1])
+  expect_error(a5_aggregate(mixed, 5L), "mixes cells")
+  expect_error(a5_aggregate(fine, 5L, weights = "nope"), "must name a column")
+  fine$w <- -1
+  expect_error(a5_aggregate(fine, 5L, weights = "w"), "negative")
 })

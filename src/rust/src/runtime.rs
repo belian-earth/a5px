@@ -7,20 +7,33 @@
 //! `worker_threads` is set to the number of CPUs since the heavy CPU work
 //! happens in `spawn_blocking` (separate pool) anyway -- the runtime threads
 //! are mostly driving I/O futures that yield.
+//!
+//! The runtime's threads belong to the process that built it. A child
+//! forked after a read (`parallel::mcparallel()`, `mclapply()`) inherits
+//! the runtime but none of its threads, so it would wait forever on the
+//! first read. Each process therefore keeps its own runtime: a child builds
+//! a fresh one, and the inherited one is leaked, since dropping it would
+//! try to join threads that do not exist.
 
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use tokio::runtime::Runtime;
 
 use crate::error::{A5CogError, Result};
 
-static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+/// The runtime and the process it was built in.
+static RUNTIME: Mutex<Option<(u32, &'static Runtime)>> = Mutex::new(None);
 
 pub(crate) fn shared_runtime() -> Result<&'static Runtime> {
-    if let Some(rt) = RUNTIME.get() {
-        return Ok(rt);
+    let pid = std::process::id();
+    let mut slot = RUNTIME.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((owner, rt)) = *slot {
+        if owner == pid {
+            return Ok(rt);
+        }
     }
-    // Race on init is fine: the loser of `set` discards its Runtime via Drop.
     let rt = Runtime::new()
         .map_err(|e| A5CogError::Internal(format!("tokio runtime build: {e}")))?;
-    Ok(RUNTIME.get_or_init(|| rt))
+    let rt: &'static Runtime = Box::leak(Box::new(rt));
+    *slot = Some((pid, rt));
+    Ok(rt)
 }

@@ -49,14 +49,14 @@
 #' `stat` vocabulary as the readers.
 #'
 #' @section Writing:
-#' [a5_write_parquet()] writes a tibble or Arrow table from the readers to
+#' [a5px_write_parquet()] writes a tibble or Arrow table from the readers to
 #' Parquet, with a schema for A5 cells and value lists.
 #'
 #' @section Inspecting sources:
 #' - [a5_raster_info()]: dimensions, data type, block grid, overview levels,
 #'   CRS, band scale and offset, and the WGS 84 envelope, without reading
 #'   pixels.
-#' - [a5_store_config()]: the object store configuration a remote `src`
+#' - [a5px_store_config()]: the object store configuration a remote `src`
 #'   resolves to.
 #'
 #' @section Areas of interest:
@@ -71,10 +71,13 @@
 #' @section Chunked reads:
 #' The accumulators hold every touched cell in memory (about 4.5 GB per
 #' million cells with 64 bands and `stat = c("mean", "count")`), so split
-#' very large reads by `bbox`. With `bbox_align = "block"` each chunk takes
-#' whole COG blocks, so no block is fetched twice; with
-#' `stat = c("sum", "count")` the per-cell partials of adjacent chunks add
-#' up exactly, and means follow. [a5_raster_info()] reports the block grid
+#' very large reads by `bbox`. A pixel centred on an edge two chunks share
+#' belongs to one of them, so with `stat = c("sum", "count")` the per-cell
+#' partials of adjacent chunks add up exactly, and means follow. A remote
+#' block that several chunks touch is fetched once and then served from the
+#' session cache ([a5px_set_cache()]), as long as the cache holds it. With
+#' `bbox_align = "block"` each chunk takes whole COG blocks instead, so no
+#' chunk reads a block another chunk owns. [a5_raster_info()] reports the block grid
 #' and envelope to build the chunks from.
 #'
 #' @section Configuration:
@@ -82,15 +85,17 @@
 #' defaults for the worker pool (`cpu_workers`) and the number of tile
 #' fetches in flight (`io_concurrency`). They are independent of
 #' [a5R::a5_set_threads()]. Remote reads are usually limited by latency,
-#' so a higher `io_concurrency` often helps.
+#' so a higher `io_concurrency` often helps. Remote reads keep the byte
+#' ranges they fetch in a session cache, so reads split into `bbox` chunks
+#' fetch each block once; [a5px_set_cache()] sets its budget.
 #'
 #' @section Common arguments:
 #' All readers accept the same core arguments:
 #' - `src`: one or more paths or URLs: local, `file://`, `http(s)://`,
 #'   `s3://`, `gs://` or `az://`. Remote reads fetch byte ranges and never
 #'   download the whole file; see "Remote sources".
-#' - `resolution`: A5 resolution, 0 to 30; [a5R::a5_cell_area()] gives the
-#'   cell area at each.
+#' - `resolution`: A5 resolution, 0 to 29 (30 is not yet supported);
+#'   [a5R::a5_cell_area()] gives the cell area at each.
 #' - `stat`: one or more of `"mean"`, `"sum"`, `"count"`, `"min"`, `"max"`,
 #'   `"var"`, `"sd"`, `"majority"`, `"fractions"` and `"npix"`. Several give
 #'   one column per band and stat. `var` and `sd` use the sample formula
@@ -106,7 +111,7 @@
 #' byte-range requests and the file is never downloaded whole. Cloud
 #' clients are configured from the environment first and from the readers'
 #' `store_opts` argument second, so an explicit option always wins.
-#' [a5_store_config()] shows the resolved configuration without making a
+#' [a5px_store_config()] shows the resolved configuration without making a
 #' request.
 #'
 #' - S3: every `AWS_*` variable `object_store` understands, including

@@ -124,3 +124,42 @@ test_that("forward reads with nodata skip projection of empty pixels without cha
   expect_equal(r$A01_max, a$A01_max)
   expect_equal(r$A01_mean, a$A01_mean)
 })
+
+test_that("errors carry a5px condition classes", {
+  expect_error(a5_read_raster(tempfile(fileext = ".tif"), 5L), class = "a5px_error_source")
+  f <- system.file("extdata", "overview_cog.tif", package = "a5px")
+  skip_if(f == "")
+  expect_error(a5_read_raster(f, 30L), class = "a5px_error_resolution")
+  expect_error(a5_read_raster(f, 12L, bbox = c(0, 0, 1, 95)), class = "a5px_error_geometry")
+  expect_error(a5_read_raster(f, 12L, bbox = c(0, 0, 1, 95)), class = "a5px_error_input")
+  g <- system.file("extdata", "scoff_int16.tif", package = "a5px")
+  skip_if(g == "")
+  # pooled files with different bands
+  expect_error(a5_read_raster(c(f, g), 12L), class = "a5px_error_input")
+})
+
+test_that("containment accepts the American spelling", {
+  f <- system.file("extdata", "overview_cog.tif", package = "a5px")
+  skip_if(f == "")
+  info <- a5_raster_info(f)
+  b <- info$bbox
+  aoi <- wk::rct(b[1], b[2], (b[1] + b[3]) / 2, b[4], crs = wk::wk_crs_longlat())
+  ord <- function(df) df[order(a5R::a5_u64_to_hex(df$cell)), , drop = FALSE]
+  expect_equal(
+    ord(a5_read_raster(f, 12L, aoi = aoi, containment = "center")),
+    ord(a5_read_raster(f, 12L, aoi = aoi, containment = "centre"))
+  )
+})
+
+test_that("bands must not repeat", {
+  f <- system.file("extdata", "overview_cog.tif", package = "a5px")
+  skip_if(f == "")
+  expect_error(a5_read_raster(f, 12L, bands = c(1, 1)), "must not repeat")
+})
+
+test_that("cpu_workers defaults to the CPUs available to the process", {
+  withr::local_options(a5px.cpu_workers = NULL)
+  withr::local_envvar(A5PX_CPU_WORKERS = "")
+  n <- a5px_get_concurrency()$cpu_workers
+  expect_true(n >= 1L && n <= parallel::detectCores())
+})

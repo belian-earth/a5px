@@ -20,7 +20,7 @@
 #'     the band names so dimension order is preserved when the table is
 #'     written to Parquet and read back in another language.
 #'
-#' @seealso [a5_write_parquet()] to write the result to Parquet,
+#' @seealso [a5px_write_parquet()] to write the result to Parquet,
 #'   [a5_read_raster()] for the tibble path.
 #' @export
 #' @examplesIf requireNamespace("arrow", quietly = TRUE)
@@ -29,7 +29,7 @@
 #'     "https://data.source.coop/.../tile.tiff",
 #'     resolution = 14L, bands = 1:8, value_type = "float32"
 #'   )
-#'   a5_write_parquet(tbl, "embeddings.parquet")
+#'   a5px_write_parquet(tbl, "embeddings.parquet")
 #' }
 a5_read_raster_arrow <- function(src,
                                  resolution,
@@ -91,7 +91,7 @@ a5_read_raster_arrow <- function(src,
     cells_in <- centroid_cells(srcs$src, resolution,
                                if (length(bbox_v)) bbox_v else NULL, store,
                                aoi_v$cells)
-    a5_sample_at_cells_flat_rs(
+    rs_call(a5_sample_at_cells_flat_rs(
       src = srcs$src,
       src_labels = srcs$labels,
       separate = srcs$separate,
@@ -108,9 +108,9 @@ a5_read_raster_arrow <- function(src,
       dequant_min = dequant_v$min,
       scoff = dequant_v$scoff,
       interp = interp
-    )
+    ))
   } else {
-    a5_read_raster_flat_rs(
+    rs_call(a5_read_raster_flat_rs(
       src = srcs$src,
       src_labels = srcs$labels,
       separate = srcs$separate,
@@ -135,7 +135,7 @@ a5_read_raster_arrow <- function(src,
       bbox_align_block = bbox_align_block,
       tile_bbox = aoi_v$tile_bbox,
       aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
-    )
+    ))
   }
 
   cells <- new_a5_cell_from_rs(out$cell)
@@ -190,7 +190,7 @@ a5_read_raster_arrow <- function(src,
 #' Read a raster and write it straight to Parquet (Rust-direct)
 #'
 #' Same engine and on-disk schema as [a5_read_raster_arrow()] +
-#' [a5_write_parquet()], but skips the R/Arrow round-trip entirely:
+#' [a5px_write_parquet()], but skips the R/Arrow round-trip entirely:
 #' the Rust side aggregates pixels into A5 cells, builds the
 #' `cell:uint64` + `value:FixedSizeList<float, n_bands>` RecordBatch
 #' from its existing flat buffer, and writes Parquet via the
@@ -286,7 +286,7 @@ a5_raster_to_parquet <- function(src,
     cells_in <- centroid_cells(srcs$src, resolution,
                                if (length(bbox_v)) bbox_v else NULL, store,
                                aoi_v$cells)
-    return(invisible(a5_sample_to_parquet_rs(
+    return(invisible(rs_call(a5_sample_to_parquet_rs(
       src = srcs$src,
       src_labels = srcs$labels,
       separate = srcs$separate,
@@ -308,10 +308,10 @@ a5_raster_to_parquet <- function(src,
       dequant_min = dequant_v$min,
       scoff = dequant_v$scoff,
       interp = interp
-    )))
+    ))))
   }
 
-  invisible(a5_raster_to_parquet_rs(
+  invisible(rs_call(a5_raster_to_parquet_rs(
     src = srcs$src,
     src_labels = srcs$labels,
     separate = srcs$separate,
@@ -340,7 +340,7 @@ a5_raster_to_parquet <- function(src,
     bbox_align_block = bbox_align_block,
     tile_bbox = aoi_v$tile_bbox,
     aoi_covering = vctrs::vec_data(aoi_v$covering_stored)
-  ))
+  )))
 }
 
 #' Write A5-keyed values to a Parquet file
@@ -362,9 +362,9 @@ a5_raster_to_parquet <- function(src,
 #' @examplesIf requireNamespace("arrow", quietly = TRUE)
 #' \dontrun{
 #'   tbl <- a5_read_raster_arrow(path, resolution = 14L, bands = 1:8)
-#'   a5_write_parquet(tbl, "out.parquet")
+#'   a5px_write_parquet(tbl, "out.parquet")
 #' }
-a5_write_parquet <- function(x, dest, compression = "zstd", ...) {
+a5px_write_parquet <- function(x, dest, compression = "zstd", ...) {
   rlang::check_installed("arrow", reason = "to write Parquet files")
   check_scalar_string(dest, "dest")
 

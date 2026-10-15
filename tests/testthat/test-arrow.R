@@ -66,7 +66,7 @@ test_that("a5_read_raster_arrow with as_vector = TRUE returns a FixedSizeList", 
   expect_lt(max(abs(mat - expected), na.rm = TRUE), 1e-3)
 })
 
-test_that("a5_write_parquet round-trips an arrow Table (wide default)", {
+test_that("a5px_write_parquet round-trips an arrow Table (wide default)", {
   testthat::skip_if_not_installed("arrow")
   skip_no_tifs()
   path <- file.path(tif_dir(), "exe_cog.tif")
@@ -74,7 +74,7 @@ test_that("a5_write_parquet round-trips an arrow Table (wide default)", {
 
   tbl <- a5_read_raster_arrow(path, resolution = 14L, bands = 1:3)
   dest <- withr::local_tempfile(fileext = ".parquet")
-  a5_write_parquet(tbl, dest)
+  a5px_write_parquet(tbl, dest)
 
   expect_true(file.exists(dest))
   back <- arrow::read_parquet(dest, as_data_frame = FALSE)
@@ -83,7 +83,7 @@ test_that("a5_write_parquet round-trips an arrow Table (wide default)", {
   expect_equal(back$schema$metadata$a5px_band_names, "B02\nB03\nB04")
 })
 
-test_that("a5_write_parquet accepts a tibble from a5_read_raster (per-band)", {
+test_that("a5px_write_parquet accepts a tibble from a5_read_raster (per-band)", {
   testthat::skip_if_not_installed("arrow")
   skip_no_tifs()
   path <- file.path(tif_dir(), "exe_cog.tif")
@@ -91,7 +91,7 @@ test_that("a5_write_parquet accepts a tibble from a5_read_raster (per-band)", {
 
   ref <- a5_read_raster(path, resolution = 12L, bands = 1:2)
   dest <- withr::local_tempfile(fileext = ".parquet")
-  a5_write_parquet(ref, dest)
+  a5px_write_parquet(ref, dest)
 
   back <- arrow::read_parquet(dest, as_data_frame = FALSE)
   expect_setequal(names(back), c("cell", "B02", "B03"))
@@ -221,7 +221,7 @@ test_that("a5_raster_to_parquet (as_vector = TRUE) matches the R-Arrow FSL path"
   expect_equal(back_flat, ref_flat)
 })
 
-test_that("a5_write_parquet accepts a tibble from a5_read_raster (as_vector list col)", {
+test_that("a5px_write_parquet accepts a tibble from a5_read_raster (as_vector list col)", {
   testthat::skip_if_not_installed("arrow")
   skip_no_tifs()
   path <- file.path(tif_dir(), "exe_cog.tif")
@@ -229,7 +229,7 @@ test_that("a5_write_parquet accepts a tibble from a5_read_raster (as_vector list
 
   v <- a5_read_raster(path, resolution = 12L, bands = 1:3, as_vector = TRUE)
   dest <- withr::local_tempfile(fileext = ".parquet")
-  a5_write_parquet(v, dest)
+  a5px_write_parquet(v, dest)
   back <- arrow::read_parquet(dest, as_data_frame = FALSE)
   expect_setequal(names(back), c("cell", "value"))
   expect_match(back$value$type$ToString(),

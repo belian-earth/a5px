@@ -57,14 +57,14 @@ check_store_opts <- function(store_opts, call = rlang::caller_env()) {
 #'   `skip_signature` and `static_credentials`.
 #' @seealso The "Remote sources" section of [a5px-package].
 #' @examples
-#' a5_store_config(
+#' a5px_store_config(
 #'   "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/2020/x.tiff",
 #'   store_opts = c(aws_region = "us-west-2", aws_skip_signature = "true")
 #' )
 #' @export
-a5_store_config <- function(src, store_opts = NULL) {
+a5px_store_config <- function(src, store_opts = NULL) {
   check_scalar_string(src, "src")
   store <- check_store_opts(store_opts)
-  out <- a5_store_config_rs(src, store$keys, store$values)
+  out <- rs_call(a5_store_config_rs(src, store$keys, store$values))
   vapply(out, as.character, character(1))
 }

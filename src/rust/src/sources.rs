@@ -12,6 +12,8 @@
 use async_tiff::ImageFileDirectory;
 use async_tiff::metadata::TiffMetadataReader;
 use async_tiff::reader::{Endianness, ObjectReader};
+
+use crate::range_cache::CachedReader;
 use async_tiff::TIFF;
 use proj4rs::Proj;
 
@@ -20,7 +22,7 @@ use crate::geo::{
     build_src_proj, build_src_proj_described, extract_geotransform, parse_band_descriptions,
     parse_band_scale_offset,
 };
-use crate::store::{parse_src, StoreOpts};
+use crate::store::{cache_key, parse_src, StoreOpts};
 
 /// One source as passed from R: its path or URL and its label (the name in
 /// `src`, else the file name without extension), used for band names under
@@ -58,7 +60,7 @@ pub(crate) fn source_specs(src: Vec<String>, labels: Vec<String>) -> Result<Vec<
 /// of the full-resolution image.
 pub(crate) struct OpenedSource {
     pub spec: SourceSpec,
-    pub reader: ObjectReader,
+    pub reader: CachedReader,
     pub tiff: TIFF,
     pub endianness: Endianness,
     pub ifd0: ImageFileDirectory,
@@ -69,7 +71,7 @@ pub(crate) struct OpenedSource {
 
 async fn open_source(spec: SourceSpec, store_opts: &StoreOpts) -> Result<OpenedSource> {
     let (store, path) = parse_src(&spec.src, store_opts)?;
-    let reader = ObjectReader::new(store, path);
+    let reader = CachedReader::new(ObjectReader::new(store, path), cache_key(&spec.src, store_opts));
     let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
     let mut meta = TiffMetadataReader::try_open(&cache).await?;
     let ifds = meta.read_all_ifds(&cache).await?;
