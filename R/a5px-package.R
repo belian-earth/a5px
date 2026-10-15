@@ -71,10 +71,13 @@
 #' @section Chunked reads:
 #' The accumulators hold every touched cell in memory (about 4.5 GB per
 #' million cells with 64 bands and `stat = c("mean", "count")`), so split
-#' very large reads by `bbox`. With `bbox_align = "block"` each chunk takes
-#' whole COG blocks, so no block is fetched twice; with
-#' `stat = c("sum", "count")` the per-cell partials of adjacent chunks add
-#' up exactly, and means follow. [a5_raster_info()] reports the block grid
+#' very large reads by `bbox`. A pixel centred on an edge two chunks share
+#' belongs to one of them, so with `stat = c("sum", "count")` the per-cell
+#' partials of adjacent chunks add up exactly, and means follow. A remote
+#' block that several chunks touch is fetched once and then served from the
+#' session cache ([a5px_set_cache()]), as long as the cache holds it. With
+#' `bbox_align = "block"` each chunk takes whole COG blocks instead, so no
+#' chunk reads a block another chunk owns. [a5_raster_info()] reports the block grid
 #' and envelope to build the chunks from.
 #'
 #' @section Configuration:
@@ -82,7 +85,9 @@
 #' defaults for the worker pool (`cpu_workers`) and the number of tile
 #' fetches in flight (`io_concurrency`). They are independent of
 #' [a5R::a5_set_threads()]. Remote reads are usually limited by latency,
-#' so a higher `io_concurrency` often helps.
+#' so a higher `io_concurrency` often helps. Remote reads keep the byte
+#' ranges they fetch in a session cache, so reads split into `bbox` chunks
+#' fetch each block once; [a5px_set_cache()] sets its budget.
 #'
 #' @section Common arguments:
 #' All readers accept the same core arguments:

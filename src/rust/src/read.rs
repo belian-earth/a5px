@@ -10,7 +10,8 @@ use async_tiff::tags::PlanarConfiguration;
 use async_tiff::{TIFF, TypedArray};
 use extendr_api::prelude::*;
 use futures::stream::{self, StreamExt, TryStreamExt};
-use crate::store::{parse_src, parse_store_opts, StoreOpts};
+use crate::range_cache::CachedReader;
+use crate::store::{cache_key, parse_src, parse_store_opts, StoreOpts};
 use proj4rs::Proj;
 use proj4rs::transform::transform as proj_transform;
 
@@ -1969,7 +1970,7 @@ struct PlanCommon<'a> {
 /// One source, planned: the overview level and its grid, the tiles to
 /// read, the per-pixel settings, and where its bands land in the output.
 struct SourcePlan {
-    reader: ObjectReader,
+    reader: CachedReader,
     ifd: Arc<async_tiff::ImageFileDirectory>,
     src_proj: Arc<Proj>,
     gt: GeoTransform,
@@ -2559,7 +2560,8 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
     let mut aggs: Vec<Aggregate<L>> = Vec::with_capacity(stores.len());
     for st in stores {
         aggs.push(Aggregate::from_parts(
-            st.into_parts()?, n_out, band_names.clone(), stats.clone(), fractions, index_pool.clone(),
+            st.into_parts()?, n_out, band_names.clone(), stats.clone(), fractions, cfg.has_npix,
+            index_pool.clone(),
         ));
     }
     if profile_enabled() {
@@ -2581,13 +2583,16 @@ pub(crate) struct Aggregate<L: AccLayout> {
     pub(crate) band_names: Vec<String>,
     pub(crate) stats: Vec<Stat>,
     fractions: bool,
+    /// Whether `npix` was requested: an empty read still carries the
+    /// column, so the output schema does not depend on the data.
+    has_npix: bool,
     /// Index pool of the read, reused for flattening and Parquet encoding.
     pub(crate) pool: Option<Arc<rayon::ThreadPool>>,
 }
 
 impl<L: AccLayout> Aggregate<L> {
-    fn empty(band_names: Vec<String>, n_out: usize, stats: Vec<Stat>, fractions: bool, _cfg: AccCfg) -> Self {
-        Self::from_parts(Vec::new(), n_out, band_names, stats, fractions, None)
+    fn empty(band_names: Vec<String>, n_out: usize, stats: Vec<Stat>, fractions: bool, cfg: AccCfg) -> Self {
+        Self::from_parts(Vec::new(), n_out, band_names, stats, fractions, cfg.has_npix, None)
     }
 
     fn from_parts(
@@ -2596,13 +2601,14 @@ impl<L: AccLayout> Aggregate<L> {
         band_names: Vec<String>,
         stats: Vec<Stat>,
         fractions: bool,
+        has_npix: bool,
         pool: Option<Arc<rayon::ThreadPool>>,
     ) -> Self {
         let mut cells = Vec::with_capacity(parts.iter().map(|p| p.len()).sum());
         for p in &parts {
             cells.extend_from_slice(&p.cells);
         }
-        Self { parts, cells, n_out, band_names, stats, fractions, pool }
+        Self { parts, cells, n_out, band_names, stats, fractions, has_npix, pool }
     }
 
     #[inline]
@@ -2617,7 +2623,7 @@ impl<L: AccLayout> Aggregate<L> {
 
     /// Per-cell pixel weights in output order, when requested.
     pub(crate) fn npix(&self) -> Option<Vec<f64>> {
-        if !self.parts.iter().any(|p| p.cfg.has_npix) {
+        if !self.has_npix {
             return None;
         }
         let mut v = Vec::with_capacity(self.len());
@@ -3976,7 +3982,7 @@ fn pad_footprint(b: [f64; 4]) -> [f64; 4] {
 /// Open `src` and read all IFDs.
 async fn open_tiff(src: &str, store_opts: &StoreOpts) -> Result<TIFF> {
     let (store, path) = parse_src(src, store_opts)?;
-    let reader = ObjectReader::new(store, path);
+    let reader = CachedReader::new(ObjectReader::new(store, path), cache_key(src, store_opts));
     let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
     let mut meta = TiffMetadataReader::try_open(&cache).await?;
     let ifds = meta.read_all_ifds(&cache).await?;
@@ -4155,7 +4161,7 @@ fn a5_select_overview_level_rs(
     let runtime = crate::runtime::shared_runtime()?;
     runtime.block_on(async move {
         let (store, path) = parse_src(src, &store_opts)?;
-        let reader = ObjectReader::new(store, path);
+        let reader = CachedReader::new(ObjectReader::new(store, path), cache_key(src, &store_opts));
         let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
         let mut meta = TiffMetadataReader::try_open(&cache).await?;
         let ifds = meta.read_all_ifds(&cache).await?;

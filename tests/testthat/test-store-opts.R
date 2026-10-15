@@ -133,3 +133,57 @@ test_that("S3 origin read matches the CDN read (issue #4 acceptance)", {
     )
   )
 })
+
+test_that("an empty read keeps the npix column, in R and in Parquet", {
+  f <- system.file("extdata", "overview_cog.tif", package = "a5px")
+  skip_if(f == "")
+  far <- c(100, 10, 101, 11)
+  got <- a5_read_raster(f, 12L, stat = c("mean", "npix"), bbox = far)
+  expect_equal(nrow(got), 0L)
+  expect_true("npix" %in% names(got))
+  skip_if_not_installed("arrow")
+  pq <- tempfile(fileext = ".parquet")
+  on.exit(unlink(pq))
+  a5_raster_to_parquet(f, pq, 12L, stat = c("mean", "npix"), bbox = far)
+  expect_true("npix" %in% names(arrow::read_parquet(pq)))
+  tab <- a5_read_raster_arrow(f, 12L, stat = c("mean", "npix"), bbox = far)
+  expect_true("npix" %in% names(tab))
+})
+
+test_that("local reads bypass the session cache", {
+  f <- system.file("extdata", "overview_cog.tif", package = "a5px")
+  skip_if(f == "")
+  a5px_clear_cache()
+  a5_read_raster(f, 12L)
+  info <- a5px_cache_info()
+  expect_equal(info$entries, 0)
+  expect_equal(info$hits + info$misses, 0)
+})
+
+test_that("a5px_set_cache sets and returns the budget", {
+  old <- a5px_set_cache(64)
+  on.exit(a5px_set_cache(old))
+  expect_equal(a5px_cache_info()$max_mb, 64)
+  expect_equal(a5px_set_cache(old), 64)
+  expect_error(a5px_set_cache(-1), "max_mb")
+})
+
+test_that("a repeated remote read is served from the session cache", {
+  skip_on_cran()
+  skip_if_not(nzchar(Sys.getenv("A5PX_TEST_REMOTE")), "set A5PX_TEST_REMOTE=1 to run")
+  url <- paste0(
+    "https://data.source.coop/earthgenome/sentinel2-temporal-mosaics/",
+    "22MEE_2023-01-01_2024-01-01/B04.tif"
+  )
+  bb <- c(-50.82, -0.62, -50.78, -0.58)
+  a5px_clear_cache()
+  first <- a5_read_raster(url, 15L, bbox = bb)
+  misses <- a5px_cache_info()$misses
+  expect_gt(misses, 0)
+  # two chunks of the same box fetch nothing new
+  west <- a5_read_raster(url, 15L, bbox = c(bb[1], bb[2], -50.80, bb[4]))
+  east <- a5_read_raster(url, 15L, bbox = c(-50.80, bb[2], bb[3], bb[4]))
+  info <- a5px_cache_info()
+  expect_equal(info$misses, misses)
+  expect_gt(info$hits, 0)
+})

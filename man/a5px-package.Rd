@@ -97,10 +97,13 @@ cells afterwards with coverage fractions of your choice.
 
 The accumulators hold every touched cell in memory (about 4.5 GB per
 million cells with 64 bands and \code{stat = c("mean", "count")}), so split
-very large reads by \code{bbox}. With \code{bbox_align = "block"} each chunk takes
-whole COG blocks, so no block is fetched twice; with
-\code{stat = c("sum", "count")} the per-cell partials of adjacent chunks add
-up exactly, and means follow. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the block grid
+very large reads by \code{bbox}. A pixel centred on an edge two chunks share
+belongs to one of them, so with \code{stat = c("sum", "count")} the per-cell
+partials of adjacent chunks add up exactly, and means follow. A remote
+block that several chunks touch is fetched once and then served from the
+session cache (\code{\link[=a5px_set_cache]{a5px_set_cache()}}), as long as the cache holds it. With
+\code{bbox_align = "block"} each chunk takes whole COG blocks instead, so no
+chunk reads a block another chunk owns. \code{\link[=a5_raster_info]{a5_raster_info()}} reports the block grid
 and envelope to build the chunks from.
 }
 
@@ -110,7 +113,9 @@ and envelope to build the chunks from.
 defaults for the worker pool (\code{cpu_workers}) and the number of tile
 fetches in flight (\code{io_concurrency}). They are independent of
 \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}. Remote reads are usually limited by latency,
-so a higher \code{io_concurrency} often helps.
+so a higher \code{io_concurrency} often helps. Remote reads keep the byte
+ranges they fetch in a session cache, so reads split into \code{bbox} chunks
+fetch each block once; \code{\link[=a5px_set_cache]{a5px_set_cache()}} sets its budget.
 }
 
 \section{Common arguments}{

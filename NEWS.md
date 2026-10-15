@@ -20,6 +20,18 @@
   from a worker are now reported instead of "consumer pool dropped
   channel".
 
+* Remote reads keep the byte ranges they fetch (header chunks and
+  compressed blocks) in a session cache, so a read split into `bbox`
+  chunks, or repeated, fetches each block once: a 1 km AEF box over HTTPS
+  read in 25 chunks took about 15 s, as one read does, against about 400
+  s before. `a5px_set_cache()` sets the budget (default 512 MiB, or
+  `A5PX_CACHE_MB`; 0 disables it), `a5px_cache_info()` reports it and
+  `a5px_clear_cache()` empties it. Local files bypass the cache.
+
+* A read that finds no pixels keeps the `npix` column when it was asked
+  for, so its tibble, Arrow table or Parquet file has the same schema as
+  any other read.
+
 * A `bbox` far larger than the raster, up to the whole globe, now reads the
   whole raster. Tiles were chosen by projecting only the bbox's outline,
   which collapses under transverse Mercator (both poles and every meridian

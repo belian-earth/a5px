@@ -133,4 +133,20 @@ a5_raster_info_rs <- function(src, store_keys, store_values) .Call(wrap__a5_rast
 #' @keywords internal
 a5_select_overview_level_rs <- function(src, overview_target_m, store_keys, store_values) .Call(wrap__a5_select_overview_level_rs, src, overview_target_m, store_keys, store_values)
 
+#' Set the session range cache budget in MiB (0 disables it); returns the
+#' previous budget in MiB.
+#' @noRd
+#' @keywords internal
+a5px_cache_set_rs <- function(max_mb) .Call(wrap__a5px_cache_set_rs, max_mb)
+
+#' Drop every cached range.
+#' @noRd
+#' @keywords internal
+a5px_cache_clear_rs <- function() .Call(wrap__a5px_cache_clear_rs)
+
+#' Cache state: entries, size and budget in MiB, hits and misses.
+#' @noRd
+#' @keywords internal
+a5px_cache_info_rs <- function() .Call(wrap__a5px_cache_info_rs)
+
 # nolint end
