@@ -42,6 +42,22 @@
   direct read at the coarse resolution. Input cells must share one
   resolution.
 
+- Cell ids cross between a5px and a5R through a5R’s C API (a5R \>=
+  0.9.9.9003) instead of a5px’s copy of a5R’s internal `a5_cell` layout,
+  which a change in a5R would have broken without an error. When a5px
+  loads, it checks the API version and that its a5 crate gives the same
+  cell ids as a5R’s for fixed points at resolutions 1 to 29, and stops
+  naming both versions if not.
+
+- `aoi` selects tiles from
+  [`a5R::a5_bbox()`](https://belian-earth.github.io/a5R/reference/a5_bbox.html),
+  which includes the poleward bulge of great-circle edges past their
+  vertices. Tiles under the bulge were never read, so covering cells
+  there were missing or partial: a band from 59 N to 61 N, 20 degrees
+  wide, lost the cells up to 61.37 N. An AOI across the antimeridian
+  reads every longitude in its latitude band, which is correct but not
+  yet efficient.
+
 - NaN pixels are missing data whatever the nodata tag: they counted as
   valid unless the nodata value was itself NaN, giving NaN means and
   inflated counts. Codes a `dequant` function maps to `NA` are missing
