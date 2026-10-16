@@ -346,8 +346,8 @@ requests made, and `a5px_clear_cache()` empties it.
 - **Workers and requests.** `cpu_workers` sets the threads that decode
   and index pixels; it defaults to the CPUs available to R, which
   respects container limits. `io_concurrency` sets the remote requests a
-  read keeps in flight, 32 by default. `a5px_set_concurrency()` changes
-  both for the session.
+  read keeps in flight, 32 by default. `a5px_concurrency()` sets both
+  for the session, or for one expression with `with()`.
 - **Bands.** For COGs that store each band separately
   (`INTERLEAVE=BAND`), as embedding rasters often do, `bands` limits the
   download to the bands selected: reading 8 of 64 bands of a 2.8 GB AEF

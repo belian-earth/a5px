@@ -160,7 +160,7 @@ test_that("bands must not repeat", {
 test_that("cpu_workers defaults to the CPUs available to the process", {
   withr::local_options(a5px.cpu_workers = NULL)
   withr::local_envvar(A5PX_CPU_WORKERS = "")
-  n <- a5px_get_concurrency()$cpu_workers
+  n <- a5px_concurrency()$cpu_workers
   expect_true(n >= 1L && n <= parallel::detectCores())
 })
 

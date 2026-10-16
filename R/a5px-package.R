@@ -81,7 +81,7 @@
 #' and envelope to build the chunks from.
 #'
 #' @section Configuration:
-#' [a5px_set_concurrency()] and [a5px_get_concurrency()] set the session
+#' [a5px_concurrency()] sets and reports the session
 #' defaults for the worker pool (`cpu_workers`) and the number of remote
 #' requests in flight (`io_concurrency`). They are independent of
 #' [a5R::a5_set_threads()]. Remote reads are usually limited by latency,
@@ -104,7 +104,7 @@
 #'   GDAL `DESCRIPTION` band tag. For band-interleaved files only the
 #'   selected bands are fetched.
 #' - `scoff`, `dequant`: decode stored values per pixel before aggregation.
-#' - `cpu_workers`, `io_concurrency`: see [a5px_set_concurrency()].
+#' - `cpu_workers`, `io_concurrency`: see [a5px_concurrency()].
 #'
 #' @section Remote sources:
 #' `src` may be an `s3://`, `gs://`, `az://` or `http(s)://` URL; reads are
