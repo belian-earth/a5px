@@ -21,7 +21,7 @@
 #' `options(a5px.io_concurrency = ...)`, or the environment variables
 #' `A5PX_CPU_WORKERS` and `A5PX_IO_CONCURRENCY`.
 #'
-#' `a5px_concurrency()` works like [options()] and `a5R::a5_threads()`:
+#' `a5px_concurrency()` works like [options()] and [a5R::a5_threads()]:
 #' called with no settings it returns them, and called with settings it
 #' changes them and returns the previous ones, which restore them when
 #' passed back or when used with [with()].

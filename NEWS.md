@@ -26,6 +26,7 @@
   with arguments it sets them and returns the previous ones, which
   `a5px_concurrency(old)` or `with(a5px_concurrency(cpu_workers = 1),
   expr)` restore.
+  a5px now needs a5R >= 0.9.9.9006, which brings `a5_threads()`.
 
 * **Breaking:** `a5_store_config()` is now `a5px_store_config()`,
   `a5_write_parquet()` is now `a5px_write_parquet()`, and
