@@ -1213,6 +1213,9 @@ struct TileData<'a> {
     data: &'a TypedArray,
     data_n_bands: usize,
     band_offsets: &'a [usize],
+    /// Per pixel of the block (row-major, block width), whether the
+    /// internal mask marks it valid; `None` without a mask.
+    mask: Option<&'a [bool]>,
 }
 
 /// Rows per indexing work unit. A 1024-row block becomes 16 stripes, enough
@@ -1332,7 +1335,8 @@ fn process_tile<L: AccLayout>(
     // a float type (NaN), or a LUT that decodes some codes to NaN.
     let decode_nan = dequant.is_some_and(|d| d.may_yield_nan());
     let float_data = matches!(data, TypedArray::Float32(_) | TypedArray::Float64(_));
-    let check_valid = nodata.is_some() || float_data || decode_nan;
+    let check_bands = nodata.is_some() || float_data || decode_nan;
+    let check_valid = check_bands || tile.mask.is_some();
     let mut row_slot: Vec<u32> = vec![NO_SLOT; actual_w];
     let mut runs: Vec<(u32, usize, usize)> = Vec::with_capacity(actual_w / 2 + 1);
     let mut vals: Vec<f64> = Vec::with_capacity(actual_w);
@@ -1348,7 +1352,7 @@ fn process_tile<L: AccLayout>(
 
         // --- pass 1: which pixels have at least one valid band
         let t = if prof { Some(Instant::now()) } else { None };
-        if check_valid {
+        if check_bands {
             any_valid.iter_mut().for_each(|v| *v = false);
             let mut n_valid = 0usize;
             for (out_b, &src_b) in tile.band_offsets.iter().enumerate() {
@@ -1358,6 +1362,12 @@ fn process_tile<L: AccLayout>(
                     break;
                 }
             }
+        } else if check_valid {
+            any_valid.iter_mut().for_each(|v| *v = true);
+        }
+        if let Some(m) = tile.mask {
+            let row = &m[r * tile_w..r * tile_w + actual_w];
+            any_valid.iter_mut().zip(row).for_each(|(v, &ok)| *v &= ok);
         }
         if let Some(t0) = t { sub_pix += t0.elapsed().as_nanos() as u64; }
 
@@ -1681,6 +1691,9 @@ fn process_tile_overlay<L: AccLayout>(
     let mut n_interior: u64 = 0;
     for r in rows.clone() {
         for c in 0..actual_w {
+            if tile.mask.is_some_and(|m| !m[r * tile_w + c]) {
+                continue;
+            }
             let pixel_base = r * h_stride + c * w_stride;
             if !gather_bands(
                 data, pixel_base, b_stride, tile.band_offsets,
@@ -1809,6 +1822,8 @@ pub(crate) struct TileItem {
     pub tx: usize,
     pub ty: usize,
     pub payload: TilePayload,
+    /// The block of the source's internal mask, when it has one.
+    pub mask: Option<async_tiff::Tile>,
 }
 
 pub(crate) enum TilePayload {
@@ -1904,16 +1919,19 @@ async fn read_raster_to_parquet_async(
     value_type: crate::parquet_write::ValueType,
     compression: crate::parquet_write::CompressionChoice,
     as_vector: bool,
+    extra: Vec<(String, String)>,
 ) -> Result<()> {
     dispatch_layout!(a, |r: ReadResult<_>| match r {
         ReadResult::Pooled(agg) => {
-            crate::parquet_write::write_aggregate_parquet(&agg, dest, resolution, value_type, compression, as_vector)
+            crate::parquet_write::write_aggregate_parquet(
+                &agg, dest, resolution, value_type, compression, as_vector, &extra,
+            )
         }
         ReadResult::PerSource(aggs, red) => {
             let out = composite_output(aggs, red);
             crate::parquet_write::write_arrow_parquet(
                 dest, out.cells, out.flat_values, out.n_bands, &out.band_names, &out.stats,
-                resolution, value_type, compression, as_vector,
+                resolution, value_type, compression, as_vector, &extra,
             )
         }
     })
@@ -1921,30 +1939,29 @@ async fn read_raster_to_parquet_async(
 
 /// Composite per-source aggregates: for each cell and band, reduce each
 /// stat's per-source values, weighted by the source's valid pixel weight in
-/// that cell and band (for `majority`, the weight of its majority class). Output cells are in first-seen order over the
-/// sources.
+/// that cell and band (for `majority`, the weight of its majority class).
+/// Output cells ascend by id.
 fn composite_output<L: AccLayout>(aggs: Vec<Aggregate<L>>, red: Reducer) -> Output {
     let t_flatten = Instant::now();
     let n_out = aggs[0].n_out;
     let stats = aggs[0].stats.clone();
     let band_names = aggs[0].band_names.clone();
-    // (source, part, local index) of every source cell, grouped by output cell
-    let mut index: AHashMap<u64, u32> = AHashMap::new();
-    let mut cells: Vec<u64> = Vec::new();
+    // (source, part, local index) of every source cell, grouped by output
+    // cell; output cells ascend by id, as for a pooled read
+    let mut cells: Vec<u64> = aggs.iter().flat_map(|a| a.cells.iter().copied()).collect();
+    cells.sort_unstable();
+    cells.dedup();
+    let index: AHashMap<u64, u32> = cells.iter().enumerate().map(|(o, &c)| (c, o as u32)).collect();
     let mut refs: Vec<(u32, u32, u32, u32)> = Vec::new();
     for (s, agg) in aggs.iter().enumerate() {
         for (pi, part) in agg.parts.iter().enumerate() {
             for (i, &cell) in part.cells.iter().enumerate() {
-                let o = *index.entry(cell).or_insert_with(|| {
-                    cells.push(cell);
-                    (cells.len() - 1) as u32
-                });
-                refs.push((o, s as u32, pi as u32, i as u32));
+                refs.push((index[&cell], s as u32, pi as u32, i as u32));
             }
         }
     }
     drop(index);
-    refs.sort_unstable_by_key(|r| r.0);
+    refs.sort_unstable_by_key(|r| (r.0, r.1));
     let n = cells.len();
     let mut flat: Vec<Vec<f64>> = (0..stats.len()).map(|_| vec![f64::NAN; n * n_out]).collect();
     let mut vals: Vec<(f64, f64)> = Vec::new();
@@ -1983,6 +2000,46 @@ fn composite_output<L: AccLayout>(aggs: Vec<Aggregate<L>>, red: Reducer) -> Outp
         fractions: None,
         npix: None,
     }
+}
+
+/// The internal mask of the image level `width` x `height`: an IFD flagged
+/// as a transparency mask (NewSubfileType bit 2), as GDAL writes with
+/// `GDAL_TIFF_INTERNAL_MASK`, one per level. It must share the level's
+/// block size, as GDAL's do.
+pub(crate) fn find_mask_ifd(
+    tiff: &TIFF,
+    width: usize,
+    height: usize,
+    tile_w: usize,
+    tile_h: usize,
+) -> Result<Option<Arc<async_tiff::ImageFileDirectory>>> {
+    for ifd in tiff.ifds() {
+        let is_mask = ifd.new_subfile_type().is_some_and(|st| st & 0x4 != 0);
+        if !is_mask || ifd.image_width() as usize != width || ifd.image_height() as usize != height {
+            continue;
+        }
+        if ifd.tile_width().map(|v| v as usize) != Some(tile_w) || ifd.tile_height().map(|v| v as usize) != Some(tile_h) {
+            return Err(A5CogError::Unsupported(
+                "internal mask with a block size other than the image's".into(),
+            ));
+        }
+        return Ok(Some(Arc::new(ifd.clone())));
+    }
+    Ok(None)
+}
+
+/// Decode a mask block to one flag per pixel: nonzero is valid.
+pub(crate) fn decode_mask(tile: async_tiff::Tile, registry: &DecoderRegistry, n: usize) -> Result<Vec<bool>> {
+    let (data, _, _) = tile.decode(registry)?.into_inner();
+    let v: Vec<bool> = match data {
+        TypedArray::Bool(v) => v,
+        TypedArray::UInt8(v) => v.into_iter().map(|x| x != 0).collect(),
+        _ => return Err(A5CogError::Unsupported("internal mask is neither 1-bit nor 8-bit".into())),
+    };
+    if v.len() < n {
+        return Err(A5CogError::Invalid(format!("internal mask block has {} pixels, expected {n}", v.len())));
+    }
+    Ok(v)
 }
 
 /// Settings shared by every source of a read, for [`plan_source`].
@@ -2030,6 +2087,8 @@ struct SourcePlan {
     tiles: Vec<(usize, usize)>,
     use_strips: bool,
     is_chunky: bool,
+    /// The internal mask (GDAL `GDAL_TIFF_INTERNAL_MASK`) at the level read.
+    mask_ifd: Option<Arc<async_tiff::ImageFileDirectory>>,
 }
 
 /// Plan one opened source. `Ok(None)` when no tile of it intersects the
@@ -2137,6 +2196,8 @@ fn plan_source(
         .tile_count()
         .ok_or_else(|| A5CogError::Unsupported("non-tiled".into()))?;
 
+    let mask_ifd = find_mask_ifd(&tiff, width, height, tile_w, tile_h).map_err(with_src)?;
+
     // nodata lives on IFD 0; overview IFDs omit it. A user override wins.
     let nodata = nodata_in_source_precision(&ifd0, c.src_nodata_override.or(parse_nodata(&ifd0)));
     let decode = resolve_decode(c.dequant.clone(), c.scoff, &ifd0, n_bands, &selected)?;
@@ -2219,6 +2280,7 @@ fn plan_source(
         tiles,
         use_strips,
         is_chunky,
+        mask_ifd,
     }))
 }
 
@@ -2441,12 +2503,17 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
                     overlay_k: p.overlay_k,
                     slots: p.slots.as_deref().map(|v| v.as_slice()),
                 };
+                let mask_px = match item.mask {
+                    Some(t) => Some(decode_mask(t, &registry, p.tile_w * p.tile_h)?),
+                    None => None,
+                };
                 let td = TileData {
                     tx: item.tx,
                     ty: item.ty,
                     data: &data,
                     data_n_bands: data_n_bands_eff,
                     band_offsets: offsets_arc,
+                    mask: mask_px.as_deref(),
                 };
                 let store = &parts[if per_source { item.src } else { 0 }];
                 process_tile_striped::<L>(pool.as_deref(), &ctx, &td, store)?;
@@ -2513,6 +2580,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
                                 tx,
                                 ty,
                                 payload: TilePayload::Block { bufs, chunky: p.is_chunky },
+                                mask: None,
                             })
                             .collect()
                     } else {
@@ -2521,8 +2589,14 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
                             .ifd
                             .fetch_tile(tx, ty, &p.reader as &dyn AsyncFileReader)
                             .await?;
-                        vec![TileItem { src: s, tx, ty, payload: TilePayload::Full(tile) }]
+                        vec![TileItem { src: s, tx, ty, payload: TilePayload::Full(tile), mask: None }]
                     };
+                    let mut items = items;
+                    if let Some(m) = &p.mask_ifd {
+                        for item in &mut items {
+                            item.mask = Some(m.fetch_tile(item.tx, item.ty, &p.reader as &dyn AsyncFileReader).await?);
+                        }
+                    }
                     if prof {
                         T_FETCH_NS
                             .fetch_add(t_fetch.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -2613,7 +2687,11 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
 /// within each partition (`cells` is that concatenation).
 pub(crate) struct Aggregate<L: AccLayout> {
     parts: Vec<CellStore<L>>,
+    /// Output cells, ascending by id, so a read's rows come out in one
+    /// order whatever the worker count.
     cells: Vec<u64>,
+    /// (partition, index in it) of each output cell.
+    order: Vec<(u32, u32)>,
     pub(crate) n_out: usize,
     pub(crate) band_names: Vec<String>,
     pub(crate) stats: Vec<Stat>,
@@ -2639,11 +2717,21 @@ impl<L: AccLayout> Aggregate<L> {
         has_npix: bool,
         pool: Option<Arc<rayon::ThreadPool>>,
     ) -> Self {
-        let mut cells = Vec::with_capacity(parts.iter().map(|p| p.len()).sum());
-        for p in &parts {
-            cells.extend_from_slice(&p.cells);
+        let mut keyed: Vec<(u64, u32, u32)> = Vec::with_capacity(parts.iter().map(|p| p.len()).sum());
+        for (pi, p) in parts.iter().enumerate() {
+            keyed.extend(p.cells.iter().enumerate().map(|(i, &c)| (c, pi as u32, i as u32)));
         }
-        Self { parts, cells, n_out, band_names, stats, fractions, has_npix, pool }
+        // each cell sits in one partition, so ids are unique
+        match pool.as_deref() {
+            Some(pool) if keyed.len() > 1 << 16 => pool.install(|| {
+                use rayon::prelude::*;
+                keyed.par_sort_unstable_by_key(|k| k.0)
+            }),
+            _ => keyed.sort_unstable_by_key(|k| k.0),
+        }
+        let cells = keyed.iter().map(|k| k.0).collect();
+        let order = keyed.into_iter().map(|k| (k.1, k.2)).collect();
+        Self { parts, cells, order, n_out, band_names, stats, fractions, has_npix, pool }
     }
 
     #[inline]
@@ -2661,45 +2749,39 @@ impl<L: AccLayout> Aggregate<L> {
         if !self.has_npix {
             return None;
         }
-        let mut v = Vec::with_capacity(self.len());
-        for p in &self.parts {
-            v.extend_from_slice(&p.npix);
-        }
-        Some(v)
+        Some(self.order.iter().map(|&(p, i)| self.parts[p as usize].npix[i as usize]).collect())
     }
 
     /// Values of `stat` for band `b` over all cells, in output order.
     pub(crate) fn column_iter(&self, stat: Stat, b: usize) -> impl Iterator<Item = f64> + '_ {
-        self.parts
+        self.order
             .iter()
-            .flat_map(move |p| (0..p.len()).map(move |i| p.value(stat, i, b)))
+            .map(move |&(p, i)| self.parts[p as usize].value(stat, i as usize, b))
     }
 
-    /// Fill `out` (length `len() * n_out`) cell-major with `stat`, one
-    /// partition per task on the pool.
+    /// Fill `out` (length `len() * n_out`) cell-major with `stat`, in
+    /// output order, in chunks of cells on the pool.
     pub(crate) fn flat_into(&self, stat: Stat, out: &mut [f64]) {
         let n_out = self.n_out;
         debug_assert_eq!(out.len(), self.len() * n_out);
-        let mut slices: Vec<&mut [f64]> = Vec::with_capacity(self.parts.len());
-        let mut rest = out;
-        for p in &self.parts {
-            let (a, b) = rest.split_at_mut(p.len() * n_out);
-            slices.push(a);
-            rest = b;
+        if n_out == 0 {
+            return;
         }
-        let fill = |(p, s): (&CellStore<L>, &mut [f64])| {
-            for i in 0..p.len() {
+        const CHUNK: usize = 4096;
+        let fill = |(o, s): (&[(u32, u32)], &mut [f64])| {
+            for (k, &(p, i)) in o.iter().enumerate() {
+                let part = &self.parts[p as usize];
                 for b in 0..n_out {
-                    s[i * n_out + b] = p.value(stat, i, b);
+                    s[k * n_out + b] = part.value(stat, i as usize, b);
                 }
             }
         };
         match self.pool.as_deref() {
-            Some(pool) if self.parts.len() > 1 => pool.install(|| {
+            Some(pool) if self.order.len() > CHUNK => pool.install(|| {
                 use rayon::prelude::*;
-                self.parts.par_iter().zip(slices.into_par_iter()).for_each(fill)
+                self.order.par_chunks(CHUNK).zip(out.par_chunks_mut(CHUNK * n_out)).for_each(fill)
             }),
-            _ => self.parts.iter().zip(slices).for_each(fill),
+            _ => self.order.chunks(CHUNK).zip(out.chunks_mut(CHUNK * n_out)).for_each(fill),
         }
     }
 
@@ -2727,7 +2809,8 @@ impl<L: AccLayout> Aggregate<L> {
         None
     };
     if let Some(fr) = frac_out.as_mut() {
-        for (p, i) in self.parts.iter().flat_map(|p| (0..p.len()).map(move |i| (p, i))) {
+        for &(p, i) in &self.order {
+            let (p, i) = (&self.parts[p as usize], i as usize);
             for b in 0..n_out {
                 // classes sorted ascending so output order is deterministic;
                 // shares are each class's fraction of the cell's valid weight
@@ -2783,6 +2866,14 @@ struct FracOut {
     classes: Vec<Vec<i32>>,
     shares: Vec<Vec<f64>>,
     offsets: Vec<Vec<i32>>,
+}
+
+/// Key-value metadata from R, as parallel key and value vectors.
+fn meta_pairs(keys: Vec<String>, values: Vec<String>) -> Result<Vec<(String, String)>> {
+    if keys.len() != values.len() {
+        return Err(A5CogError::Invalid("metadata keys and values differ in length".into()));
+    }
+    Ok(keys.into_iter().zip(values).collect())
 }
 
 /// A region passed from R as flat `xmin, ymin, xmax, ymax` boxes (two for a
@@ -3287,7 +3378,6 @@ fn a5_read_raster_rs(
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
-    let runtime = crate::runtime::shared_runtime()?;
 
     let prof = profile_enabled();
     if prof {
@@ -3302,7 +3392,7 @@ fn a5_read_raster_rs(
     let tile_bbox_opt = parse_boxes_arg(tile_bbox, "tile_bbox")?;
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
-    let out: Output = runtime.block_on(read_raster_async(ReadArgs {
+    let out: Output = crate::runtime::block_on_interruptible(read_raster_async(ReadArgs {
         sources: source_specs(src, src_labels)?,
         separate,
         composite: Reducer::parse(composite)?,
@@ -3462,7 +3552,6 @@ fn a5_read_raster_flat_rs(
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
-    let runtime = crate::runtime::shared_runtime()?;
 
     let prof = profile_enabled();
     if prof {
@@ -3477,7 +3566,7 @@ fn a5_read_raster_flat_rs(
     let tile_bbox_opt = parse_boxes_arg(tile_bbox, "tile_bbox")?;
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
-    let out: Output = runtime.block_on(read_raster_async(ReadArgs {
+    let out: Output = crate::runtime::block_on_interruptible(read_raster_async(ReadArgs {
         sources: source_specs(src, src_labels)?,
         separate,
         composite: Reducer::parse(composite)?,
@@ -3591,10 +3680,13 @@ fn a5_raster_to_parquet_rs(
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
     aoi_covering: Robj,
+    meta_keys: Vec<String>,
+    meta_values: Vec<String>,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<String> {
     let store_opts = parse_store_opts(store_keys, store_values)?;
+    let extra = meta_pairs(meta_keys, meta_values)?;
     if !(0..=30).contains(&resolution) {
         return Err(A5CogError::Invalid(format!(
             "resolution must be 0..=30, got {resolution}"
@@ -3616,7 +3708,6 @@ fn a5_raster_to_parquet_rs(
     let cpu_workers = cpu_workers.max(1) as usize;
     let io_concurrency = io_concurrency.max(1) as usize;
 
-    let runtime = crate::runtime::shared_runtime()?;
 
     let prof = profile_enabled();
     if prof {
@@ -3632,7 +3723,7 @@ fn a5_raster_to_parquet_rs(
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
 
-    runtime.block_on(read_raster_to_parquet_async(
+    crate::runtime::block_on_interruptible(read_raster_to_parquet_async(
         ReadArgs {
         sources: source_specs(src, src_labels)?,
         separate,
@@ -3661,6 +3752,7 @@ fn a5_raster_to_parquet_rs(
         value_type_e,
         compression_e,
         as_vector,
+        extra,
     ))?;
 
     if prof {
@@ -3712,9 +3804,8 @@ fn run_sample_at_cells(
     let interp_e = crate::sample::Interp::parse(interp)?;
     let cells_in = cells_to_u64(&cells)?;
 
-    let runtime = crate::runtime::shared_runtime()?;
 
-    runtime.block_on(crate::sample::sample_at_cells_async(
+    crate::runtime::block_on_interruptible(crate::sample::sample_at_cells_async(
         source_specs(src, src_labels)?,
         separate,
         Reducer::parse(composite)?,
@@ -3871,10 +3962,13 @@ fn a5_sample_to_parquet_rs(
     dequant_min: f64,
     scoff: bool,
     interp: &str,
+    meta_keys: Vec<String>,
+    meta_values: Vec<String>,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<String> {
     let store_opts = parse_store_opts(store_keys, store_values)?;
+    let extra = meta_pairs(meta_keys, meta_values)?;
     let value_type_e = crate::parquet_write::ValueType::parse(value_type)?;
     let compression_e = crate::parquet_write::CompressionChoice::parse(compression)?;
     let out = run_sample_at_cells(
@@ -3906,6 +4000,7 @@ fn a5_sample_to_parquet_rs(
         value_type_e,
         compression_e,
         as_vector,
+        &extra,
     )?;
 
     Ok(dest.to_string())

@@ -235,3 +235,30 @@ test_that("a5px_write_parquet accepts a tibble from a5_read_raster (as_vector li
   expect_match(back$value$type$ToString(),
                "fixed_size_list<[A-Za-z]+: double>\\[3\\]")
 })
+
+test_that("Arrow and Parquet outputs record the read's provenance", {
+  skip_if_not_installed("arrow")
+  f <- system.file("extdata", "overview_cog.tif", package = "a5px")
+  skip_if(f == "")
+  keys <- c("a5_index", "a5_crate", "a5px_version", "a5px_mode", "a5px_decode",
+            "a5px_overviews", "a5px_src_nodata")
+  tab <- a5_read_raster_arrow(f, 12L, src_nodata = -1)
+  m <- tab$metadata
+  expect_true(all(keys %in% names(m)))
+  expect_equal(m$a5_index, "1.0")
+  expect_equal(m$a5_crate, a5R::a5_info()$crate)
+  expect_equal(m$a5px_mode, "forward")
+  expect_equal(m$a5px_decode, "none")
+  expect_equal(m$a5px_overviews, "allowed")
+  expect_equal(m$a5px_src_nodata, "-1")
+  pq <- withr::local_tempfile(fileext = ".parquet")
+  a5_raster_to_parquet(f, pq, 12L, mode = "centroid", scoff = TRUE)
+  m2 <- arrow::open_dataset(pq)$schema$metadata
+  expect_true(all(keys %in% names(m2)))
+  expect_equal(m2$a5px_mode, "centroid")
+  expect_equal(m2$a5px_decode, "scoff")
+  expect_equal(m2$a5px_overviews, "off")
+  pq2 <- withr::local_tempfile(fileext = ".parquet")
+  a5_raster_to_parquet(f, pq2, 12L)
+  expect_equal(arrow::open_dataset(pq2)$schema$metadata$a5px_mode, "forward")
+})

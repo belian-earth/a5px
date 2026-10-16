@@ -163,3 +163,52 @@ test_that("cpu_workers defaults to the CPUs available to the process", {
   n <- a5px_get_concurrency()$cpu_workers
   expect_true(n >= 1L && n <= parallel::detectCores())
 })
+
+test_that("rows come out in ascending cell order whatever the worker count", {
+  f <- system.file("extdata", "overview_cog.tif", package = "a5px")
+  skip_if(f == "")
+  sorted <- function(x) !is.unsorted(a5R::a5_u64_to_hex(x$cell))
+  a <- a5_read_raster(f, 13L, cpu_workers = 1L, use_overviews = FALSE)
+  b <- a5_read_raster(f, 13L, cpu_workers = 8L, use_overviews = FALSE)
+  expect_true(sorted(a))
+  expect_identical(a$cell, b$cell)
+  expect_equal(a, b)
+  expect_true(sorted(a5_read_raster(f, 15L, mode = "centroid")))
+  expect_true(sorted(a5_read_raster(c(f, f), 13L, composite = "mean")))
+  skip_if_not_installed("arrow")
+  tab <- as.data.frame(a5_read_raster_arrow(f, 13L, cpu_workers = 8L))
+  expect_false(is.unsorted(tab$cell))
+})
+
+test_that("an internal mask band hides the pixels it marks", {
+  skip_if_not_installed("terra")
+  skip_if_not_installed("sf")
+  dir <- withr::local_tempdir()
+  r <- terra::rast(nrows = 64, ncols = 64, crs = "EPSG:32633",
+                   extent = terra::ext(400000, 406400, 1000000, 1006400), nlyrs = 2)
+  v <- seq_len(64 * 64)
+  m <- rep(c(255, 0), each = 32, length.out = 64 * 64) # left half of each row valid
+  terra::values(r) <- cbind(v, m)
+  src <- file.path(dir, "src.tif")
+  terra::writeRaster(r, src, datatype = "INT2U", gdal = c("TILED=YES", "BLOCKXSIZE=16", "BLOCKYSIZE=16"))
+  masked <- file.path(dir, "masked.tif")
+  # band 1 with band 2 as GDAL's internal mask (terra itself ignores masks)
+  sf::gdal_utils("translate", src, masked,
+                 options = c("-b", "1", "-mask", "2", "-co", "TILED=YES",
+                             "-co", "BLOCKXSIZE=16", "-co", "BLOCKYSIZE=16"),
+                 config_options = c(GDAL_TIFF_INTERNAL_MASK = "YES"))
+  valid <- sum(m != 0)
+  kept <- sum(v[m != 0])
+  got <- a5_read_raster(masked, 12L, stat = c("count", "sum", "npix"))
+  expect_equal(sum(got[[2]]), valid)
+  expect_equal(sum(got$npix), valid)
+  expect_equal(sum(got[[3]]), kept)
+  ov <- a5_read_raster(masked, 12L, mode = "overlay", stat = "sum")
+  expect_equal(sum(ov[[2]]), kept, tolerance = 1e-6)
+  # the unmasked copy keeps every pixel
+  expect_equal(sum(a5_read_raster(src, 12L, stat = "count", bands = 1L)[[2]]), 64 * 64)
+  # centroid samples on masked pixels are dropped
+  ce <- a5_read_raster(masked, 16L, mode = "centroid")
+  unmasked <- a5_read_raster(src, 16L, mode = "centroid", bands = 1L)
+  expect_lt(nrow(ce), nrow(unmasked))
+})

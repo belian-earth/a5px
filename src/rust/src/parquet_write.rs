@@ -164,6 +164,7 @@ pub(crate) fn write_aggregate_parquet<L: AccLayout>(
     value_type: ValueType,
     compression: CompressionChoice,
     as_vector: bool,
+    extra: &[(String, String)],
 ) -> Result<()> {
     let n = agg.len();
     let n_bands = agg.n_out;
@@ -198,7 +199,7 @@ pub(crate) fn write_aggregate_parquet<L: AccLayout>(
         crate::read::T_PQ_COLUMNS_NS.fetch_add(t_cols.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
     let t_write = std::time::Instant::now();
-    let metadata = file_metadata(&agg.band_names, resolution, &stats, as_vector);
+    let metadata = file_metadata(&agg.band_names, resolution, &stats, as_vector, extra);
     let r = write_columns_parquet(dest, fields, columns, metadata, compression, pool);
     if prof {
         crate::read::T_PQ_WRITE_NS.fetch_add(t_write.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -219,6 +220,7 @@ pub(crate) fn write_arrow_parquet(
     value_type: ValueType,
     compression: CompressionChoice,
     as_vector: bool,
+    extra: &[(String, String)],
 ) -> Result<()> {
     let n_cells = cells.len();
     if flat_values.len() != stats.len() {
@@ -252,7 +254,7 @@ pub(crate) fn write_arrow_parquet(
         }
     }
     let fields = fields_for(band_names, stats, value_type, n_bands, as_vector);
-    let metadata = file_metadata(band_names, resolution, stats, as_vector);
+    let metadata = file_metadata(band_names, resolution, stats, as_vector, extra);
     write_columns_parquet(dest, fields, columns, metadata, compression, None)
 }
 
@@ -335,13 +337,17 @@ fn write_columns_parquet(
     Ok(())
 }
 
+/// The file's key-value metadata: the layout keys, then `extra`, the
+/// read's provenance from R (A5 index and crate versions, a5px version,
+/// mode, decode, overviews, nodata).
 fn file_metadata(
     band_names: &[String],
     resolution: i32,
     stats: &[String],
     as_vector: bool,
+    extra: &[(String, String)],
 ) -> HashMap<String, String> {
-    let mut m = HashMap::new();
+    let mut m: HashMap<String, String> = extra.iter().cloned().collect();
     m.insert("a5px_band_names".to_string(), band_names.join("\n"));
     m.insert("a5px_resolution".to_string(), resolution.to_string());
     m.insert("a5px_stats".to_string(), stats.join("\n"));

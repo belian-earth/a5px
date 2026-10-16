@@ -177,6 +177,8 @@ struct TileWork {
     tx: usize,
     ty: usize,
     payload: crate::read::TilePayload,
+    /// The block of the internal mask, when the file has one.
+    mask: Option<async_tiff::Tile>,
     entries: Vec<(usize, f64, f64)>,
 }
 
@@ -240,7 +242,7 @@ pub(crate) async fn sample_at_cells_async(
     // Each column is the mean of its valid samples (one per source in a
     // pooled read, at most one under `separate`), or their composite.
     // Samples are grouped by cell through (cell, source, local index)
-    // references, sorted, so output cells keep the order of `cells_in`.
+    // references, sorted by cell id.
     let red = composite.unwrap_or(Reducer::Mean);
     let mut refs: Vec<(u32, u32, u32)> = Vec::new();
     for (k, (smp, _, _)) in per_source.iter().enumerate() {
@@ -248,7 +250,8 @@ pub(crate) async fn sample_at_cells_async(
             refs.push((i, k as u32, j as u32));
         }
     }
-    refs.sort_unstable();
+    // output cells ascend by id, as for the pixel-driven reads
+    refs.sort_unstable_by_key(|&(i, k, j)| (cells_in[i as usize], k, j));
     let mut cells_out = Vec::new();
     let mut flat_out: Vec<f64> = Vec::new();
     let mut col_vals: Vec<Vec<(f64, f64)>> = vec![Vec::new(); n_out];
@@ -304,7 +307,7 @@ async fn sample_source(
     scoff: bool,
     interp: Interp,
 ) -> Result<SourceSamples> {
-    let OpenedSource { reader, endianness, ifd0: ifd_owned, n_bands, .. } = open;
+    let OpenedSource { reader, endianness, ifd0: ifd_owned, n_bands, tiff, .. } = open;
 
     if let Some(dq) = dequant.as_deref() {
         crate::read::validate_dequant_dtype(&ifd_owned, dq)?;
@@ -339,6 +342,8 @@ async fn sample_source(
         &ifd_owned,
         src_nodata_override.or(parse_nodata(&ifd_owned)),
     );
+    let mask_ifd = crate::read::find_mask_ifd(&tiff, width, height, tile_w, tile_h)?;
+    drop(tiff);
     let selected_bands: Vec<usize> = selected.to_vec();
     let n_out = selected_bands.len();
     let dequant =
@@ -540,6 +545,10 @@ async fn sample_source(
                         )));
                     }
                 };
+                let mask_px = match work.mask {
+                    Some(t) => Some(crate::read::decode_mask(t, &registry, tile_w * tile_h)?),
+                    None => None,
+                };
                 let tile_x0 = work.tx * tile_w;
                 let tile_y0 = work.ty * tile_h;
                 let actual_w = tile_w.min(width.saturating_sub(tile_x0));
@@ -593,6 +602,11 @@ async fn sample_source(
                             } else {
                                 0.0
                             };
+                            // a pixel the internal mask excludes adds
+                            // nothing, which also triggers the fallback
+                            if mask_px.as_ref().is_some_and(|m| !m[r * tile_w + c]) {
+                                continue;
+                            }
                             let pixel_base = r * h_stride + c * w_stride;
                             let mut all_valid = true;
                             for (out_b, &src_b) in offsets_arc.iter().enumerate() {
@@ -651,12 +665,14 @@ async fn sample_source(
         let reader = reader.clone();
         let ifd = Arc::clone(&ifd_arc);
         let selected_bands = Arc::clone(&selected_bands_arc);
+        let mask_ifd = mask_ifd.clone();
         let tx_chan = tx_chan_outer;
         let producer = stream::iter(tasks)
             .map(|((tx, ty), entries)| {
                 let reader = reader.clone();
                 let ifd = Arc::clone(&ifd);
                 let selected_bands = Arc::clone(&selected_bands);
+                let mask_ifd = mask_ifd.clone();
                 let tx_chan = tx_chan.clone();
                 async move {
                     let payload = if use_band_fetch {
@@ -675,8 +691,12 @@ async fn sample_source(
                             .await?;
                         crate::read::TilePayload::Full(tile)
                     };
+                    let mask = match &mask_ifd {
+                        Some(m) => Some(m.fetch_tile(tx, ty, &reader as &dyn AsyncFileReader).await?),
+                        None => None,
+                    };
                     tx_chan
-                        .send(TileWork { tx, ty, payload, entries })
+                        .send(TileWork { tx, ty, payload, mask, entries })
                         .await
                         .map_err(|_| {
                             A5CogError::Invalid("centroid consumer pool dropped channel".into())

@@ -268,6 +268,14 @@ fn a5px_available_cpus_rs() -> i32 {
     available_cpus() as i32
 }
 
+/// Return memory a finished read freed to the operating system.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5px_release_memory_rs() {
+    crate::runtime::release_freed_memory();
+}
+
 /// Cache state: entries, size and budget in MiB, hits and misses.
 /// @noRd
 /// @keywords internal
@@ -290,6 +298,7 @@ extendr_module! {
     fn a5px_cache_clear_rs;
     fn a5px_cache_info_rs;
     fn a5px_available_cpus_rs;
+    fn a5px_release_memory_rs;
 }
 
 #[cfg(test)]

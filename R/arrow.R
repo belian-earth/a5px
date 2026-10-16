@@ -20,6 +20,14 @@
 #'     the band names so dimension order is preserved when the table is
 #'     written to Parquet and read back in another language.
 #'
+#'   The schema metadata records the layout (`a5px_band_names`,
+#'   `a5px_resolution`, `a5px_stats`, `a5px_layout`) and the read's
+#'   provenance: `a5_index` (the A5 index version of the cell ids, `"1.0"`),
+#'   `a5_crate` (the a5 crate version), `a5px_version`, `a5px_mode`,
+#'   `a5px_decode` (`"none"`, `"scoff"` or `"dequant"`), `a5px_overviews`
+#'   (`"allowed"` or `"off"`) and `a5px_src_nodata` (the override, or
+#'   `"file"`). [a5_raster_to_parquet()] writes the same keys.
+#'
 #' @seealso [a5px_write_parquet()] to write the result to Parquet,
 #'   [a5_read_raster()] for the tibble path.
 #' @export
@@ -85,6 +93,7 @@ a5_read_raster_arrow <- function(src,
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE, scoff = scoff)
   warn_dequant_overviews(dequant, use_overviews)
   overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
+  prov <- read_provenance(mode, dequant_v, overview_target_m, src_nodata_v)
 
   out <- if (mode == "centroid") {
     warn_centroid_stat(stats)
@@ -175,12 +184,12 @@ a5_read_raster_arrow <- function(src,
 
   if (!is.null(out$npix)) cols$npix <- arrow::Array$create(as.numeric(out$npix), type = inner_type)
   tbl <- do.call(arrow::Table$create, cols)
-  meta <- list(
+  meta <- c(as.list(prov), list(
     a5px_band_names = paste(band_names, collapse = "\n"),
     a5px_resolution = as.character(resolution),
     a5px_stats      = paste(stats_out, collapse = "\n"),
     a5px_layout     = if (as_vector) "fsl" else "wide"
-  )
+  ))
   if (length(stats_out) == 1L) {
     meta$a5px_stat <- stats_out[[1]]  # legacy single-stat key
   }
@@ -280,6 +289,7 @@ a5_raster_to_parquet <- function(src,
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE, scoff = scoff)
   warn_dequant_overviews(dequant, use_overviews)
   overview_target_m <- overview_target_metres(use_overviews, stats, resolution)
+  prov <- read_provenance(mode, dequant_v, overview_target_m, src_nodata_v)
 
   if (mode == "centroid") {
     warn_centroid_stat(stats)
@@ -307,7 +317,9 @@ a5_raster_to_parquet <- function(src,
       dequant_lut = dequant_v$lut,
       dequant_min = dequant_v$min,
       scoff = dequant_v$scoff,
-      interp = interp
+      interp = interp,
+      meta_keys = names(prov),
+      meta_values = unname(prov)
     ))))
   }
 
@@ -339,7 +351,9 @@ a5_raster_to_parquet <- function(src,
     cell_edge_m = cell_edge_metres(mode, resolution),
     bbox_align_block = bbox_align_block,
     tile_bbox = aoi_v$tile_bbox,
-    aoi_covering = aoi_v$covering_stored
+    aoi_covering = aoi_v$covering_stored,
+    meta_keys = names(prov),
+    meta_values = unname(prov)
   )))
 }
 

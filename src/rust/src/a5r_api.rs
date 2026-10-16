@@ -82,6 +82,18 @@ pub(crate) fn cells_from_u64(ids: &[u64]) -> Robj {
     unsafe { Robj::from_sexp((api().from_u64)(ids.as_ptr(), std::ptr::null(), ids.len() as RXlen)) }
 }
 
+/// The a5 crate version a5px is built with: the exact pin in Cargo.toml,
+/// which a unit test holds this to.
+pub(crate) const A5_CRATE_VERSION: &str = "1.0.0-beta.3";
+
+/// The a5 crate version a5px is built with, recorded in output metadata.
+/// @noRd
+/// @keywords internal
+#[extendr]
+fn a5px_a5_crate_version_rs() -> &'static str {
+    A5_CRATE_VERSION
+}
+
 /// The version of a5R's C API, checked when a5px loads.
 /// @noRd
 /// @keywords internal
@@ -110,4 +122,15 @@ extendr_module! {
     mod a5r_api;
     fn a5px_a5r_api_version_rs;
     fn a5px_lonlat_to_cells_rs;
+    fn a5px_a5_crate_version_rs;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn crate_version_matches_the_cargo_pin() {
+        let toml = include_str!("../Cargo.toml");
+        let pin = format!("a5 = '={}'", super::A5_CRATE_VERSION);
+        assert!(toml.contains(&pin), "Cargo.toml does not pin {pin}");
+    }
 }

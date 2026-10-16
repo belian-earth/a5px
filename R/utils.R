@@ -384,10 +384,13 @@ parse_bands_arg <- function(bands, call = rlang::caller_env()) {
 #'   that cannot be used;
 #' - `a5px_error_input`: other invalid arguments or sources, such as files
 #'   that cannot be pooled;
+#' - `a5px_error_interrupted`: the user interrupted the read;
 #' - `a5px_error_internal`: a fault in a5px.
 #' Every class also carries `a5px_error`.
 #' @noRd
 rs_call <- function(expr, call = rlang::caller_env()) {
+  # once R holds the output, hand the memory the read freed back to the OS
+  on.exit(a5px_release_memory_rs(), add = TRUE)
   tryCatch(expr, error = function(e) {
     msg <- conditionMessage(e)
     cls <- rs_error_class(msg)
@@ -415,8 +418,27 @@ rs_error_class <- function(msg) {
         "a5px_error_input"
       }
     },
+    "interrupted" = "a5px_error_interrupted",
     "internal error" = , "worker task failed" = , "parquet/arrow error" = ,
     "a5 error" = "a5px_error_internal",
     NULL
+  )
+}
+
+#' Provenance of a read, recorded in Arrow and Parquet metadata, so a file
+#' says which A5 index its ids belong to and how its values were made.
+#' `a5_index` is the key shared across the stack; the crate is the one a5px
+#' was built with, which `check_a5r_compat()` holds to a5R's ids.
+#' @noRd
+read_provenance <- function(mode, dequant_v, overview_target_m, src_nodata_v) {
+  decode <- if (isTRUE(dequant_v$scoff)) "scoff" else if (length(dequant_v$lut)) "dequant" else "none"
+  c(
+    a5_index = a5R::a5_info()$index,
+    a5_crate = a5px_a5_crate_version_rs(),
+    a5px_version = as.character(utils::packageVersion("a5px")),
+    a5px_mode = mode,
+    a5px_decode = decode,
+    a5px_overviews = if (identical(mode, "centroid") || !(overview_target_m > 0)) "off" else "allowed",
+    a5px_src_nodata = if (length(src_nodata_v)) format(src_nodata_v, digits = 17) else "file"
   )
 }
