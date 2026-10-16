@@ -79,8 +79,9 @@ cache and frees what it holds.</p></dd>
     <h2 id="value">Value<a class="anchor" aria-label="anchor" href="#value"></a></h2>
     <p><code>a5px_set_cache()</code> returns the previous budget in MiB,
 invisibly. <code>a5px_cache_info()</code> returns a list: <code>entries</code>, <code>size_mb</code>,
-<code>max_mb</code>, and the <code>hits</code> and <code>misses</code> since the cache was last
-cleared. <code>a5px_clear_cache()</code> returns <code>NULL</code>, invisibly.</p>
+<code>max_mb</code>, and since the cache was last cleared the <code>hits</code> and
+<code>misses</code>, the remote <code>requests</code> made and the <code>fetched_mb</code> they
+returned. <code>a5px_clear_cache()</code> returns <code>NULL</code>, invisibly.</p>
     </div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
@@ -110,6 +111,12 @@ a task limited to 2 GiB caches at most 256 MiB. The environment variable
 <span class="r-out co"><span class="r-pr">#&gt;</span> [1] 0</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> </span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> $misses</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> [1] 0</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> $requests</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> [1] 0</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> </span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> $fetched_mb</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> [1] 0</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> </span>
 <span class="r-in"><span><span class="fu">a5px_clear_cache</span><span class="op">(</span><span class="op">)</span></span></span>

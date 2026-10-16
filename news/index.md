@@ -42,16 +42,54 @@
   direct read at the coarse resolution. Input cells must share one
   resolution.
 
+- **Breaking:** `io_concurrency` now counts the remote requests a read
+  keeps in flight, across all its sources, and defaults to 32. It
+  counted fetch tasks, each of which could run ten requests, so the
+  setting barely changed anything: a 5 km AEF read straight from S3 took
+  9-11 s at every value from 4 to 64. It now takes 7.1 s at 32 and 5.7 s
+  at 64 (median of three), with a tenth as many requests allowed in
+  flight. Through Source Cooperative’s proxy, which slows down under
+  many requests, 32 took 37-66 s against 104-114 s before. Nearby byte
+  ranges are merged into requests of up to 2 MiB, so the bands of an
+  overview block, stored next to each other, download in parallel (8-14
+  s to 4.9-5.5 s for one 64-band block).
+  [`a5px_cache_info()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
+  reports the `requests` made and the `fetched_mb`.
+
 - Faster and leaner reads:
 
+  - `mean`, `sum` and `count` keep one pixel weight per cell, shared by
+    its bands, and a weight per band only for cells whose bands differ
+    in which pixels are valid: reading a 2048 x 2048 AEF window at
+    resolution 18 peaks at 1.06 GB against 1.69 GB, and writing it to
+    Parquet at 1.68 GB against 2.10 GB, at the same speed;
+  - Parquet columns are filled from each cell’s accumulators in one pass
+    rather than one band at a time (11% faster writing that window on
+    one worker);
   - deflate blocks are decoded with zlib-rs (10% less decode time on a
-    float32 deflate raster);
+    float32 deflate raster), into a buffer that grows in few steps (12%
+    faster on eight workers);
   - pixels larger than their cells go straight to the cell lookup rather
     than first trying their neighbours’ cells (a 30 m raster read at
     resolution 18 took 16% less time);
   - memory a read freed goes back to the operating system once its
     output is in R, so a session reading chunk after chunk stays smaller
-    (nine chunked reads: about 510 MB resident against 620 MB).
+    (nine chunked reads: about 510 MB resident against 620 MB);
+  - a small `bbox` in large blocks no longer reserves room for every
+    pixel of the blocks.
+
+- S3 sources with no credentials configured are read unsigned where no
+  instance metadata service answers within 300 ms, as GDAL’s `/vsicurl/`
+  reads a URL; they waited 14-27 s on the metadata service and then
+  failed. An explicit `aws_skip_signature` or `AWS_NO_SIGN_REQUEST` is
+  kept either way. GDAL paths `/vsis3/`, `/vsigs/`, `/vsiaz/` and
+  `/vsicurl/` are read as the matching URL, and `http://` sources, or an
+  `http://` S3 endpoint, no longer need `allow_http`.
+
+- Installing the package no longer builds the `document` binary, a debug
+  build of every dependency that added about a minute; only development
+  builds (`NOT_CRAN` or `DEBUG` set, as devtools and pkgbuild do)
+  regenerate `R/extendr-wrappers.R`.
 
 - Reads return rows in ascending cell id, whatever the worker count, in
   tibbles, Arrow tables and Parquet files, so row order is reproducible
@@ -172,8 +210,10 @@
   read is now counted in one of them: the bbox is half-open on its
   `xmax` and `ymax` edges, except at 180 and 90.
 
-- a5px now uses A5 1.0: the a5 Rust crate 1.0.0-beta.3 and a5R \>=
-  0.9.9.9001. A5 1.0 introduces permanent cell ids with a new
+- a5px now uses A5 1.0: the a5 Rust crate 1.0.0 and a5R \>= 0.9.9.9001.
+  The crate’s 1.0.0 release keeps beta.3’s cell ids and fixes centre
+  containment flooding a quintant for thin sliver polygons, which
+  reached `aoi`. A5 1.0 introduces permanent cell ids with a new
   space-filling curve and face order, so **every cell id changes**.
   Cells keep their shape and position at every resolution except 1, so a
   read returns the same cells with the same values and pixel counts as

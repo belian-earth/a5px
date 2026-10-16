@@ -199,13 +199,11 @@ a5_read_raster(
 
 - io_concurrency:
 
-  Maximum in-flight fetch tasks the producer issues to the I/O stage;
-  each task carries one block, or a run of up to four adjacent blocks on
-  files without a predictor. `NULL` (default) resolves from
-  `getOption("a5px.io_concurrency")`, env `A5PX_IO_CONCURRENCY`, then
-  `min(16, max(cpu_workers, 8))`. Bump this for cloud reads of
-  multi-band embedding rasters where the network can absorb more
-  parallelism than the CPU pool. See
+  Maximum remote requests in flight for the read, across all sources;
+  adjacent blocks of a band share a request. For local files, the blocks
+  read at once. `NULL` (default) resolves from
+  `getOption("a5px.io_concurrency")`, env `A5PX_IO_CONCURRENCY`,
+  then 32. See
   [`a5px_set_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md).
 
 - scoff:

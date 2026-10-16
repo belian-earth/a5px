@@ -111,7 +111,7 @@ reports the block grid and envelope to build the chunks from.
 and
 [`a5px_get_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md)
 set the session defaults for the worker pool (`cpu_workers`) and the
-number of tile fetches in flight (`io_concurrency`). They are
+number of remote requests in flight (`io_concurrency`). They are
 independent of
 [`a5R::a5_set_threads()`](https://belian-earth.github.io/a5R/reference/a5_threads.html).
 Remote reads are usually limited by latency, so a higher
@@ -162,16 +162,21 @@ shows the resolved configuration without making a request.
   `AWS_ENDPOINT_URL_S3`, `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` and
   `AWS_WEB_IDENTITY_TOKEN_FILE`, plus GDAL's `AWS_NO_SIGN_REQUEST=YES`
   for public buckets (mapped to `aws_skip_signature`). Without static,
-  container or web-identity credentials the client falls back to
-  instance metadata, which off AWS waits for a long timeout before
-  failing, so set `AWS_NO_SIGN_REQUEST` or
-  `store_opts = c(aws_skip_signature = "true")` for public data. The
-  shared credentials file (`~/.aws/credentials`) and `AWS_PROFILE` are
-  not read. With no region the client assumes `us-east-1` and a bucket
-  elsewhere fails, so set `AWS_REGION` or `aws_region`. Path-style
+  container or web-identity credentials the client takes them from the
+  instance metadata service (on EC2, ECS or Batch); where none answers
+  within 300 ms and signing was not set either way, requests go
+  unsigned, which reads public data and gets "access denied" from a
+  private bucket. The shared credentials file (`~/.aws/credentials`) and
+  `AWS_PROFILE` are not read. With no region the client assumes
+  `us-east-1` and a bucket elsewhere fails, so set `AWS_REGION` or
+  `aws_region`. Path-style
   `https://s3.<region>.amazonaws.com/<bucket>/...` and virtual-hosted
   `https://<bucket>.s3.<region>.amazonaws.com/...` URLs are treated as
-  S3 rather than plain HTTP and take the same configuration.
+  S3 rather than plain HTTP and take the same configuration, so stale
+  credentials in the environment can be refused where an unsigned
+  request would succeed; set `aws_skip_signature` for public data. An
+  `http://` endpoint (`AWS_ENDPOINT`, as for MinIO) is allowed without
+  `allow_http`.
 
 - GCS: the `GOOGLE_*` variables (`GOOGLE_SERVICE_ACCOUNT`,
   `GOOGLE_SERVICE_ACCOUNT_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`);
@@ -182,7 +187,12 @@ shows the resolved configuration without making a request.
   `azure_skip_signature` for public containers.
 
 - Plain HTTP(S): no authentication. `store_opts` accepts client keys
-  such as `timeout`, `connect_timeout` and `allow_http`.
+  such as `timeout` and `connect_timeout`.
+
+- GDAL paths `/vsis3/bucket/key`, `/vsigs/bucket/key`,
+  `/vsiaz/container/key` and `/vsicurl/<url>` are read as the matching
+  `s3://`, `gs://`, `az://` or plain URL. Other `/vsi` paths, such as
+  `/vsizip/`, are not supported.
 
 ## Supported formats and CRSs
 

@@ -174,7 +174,7 @@
 <li>
 <code>use_overviews</code>: whether <code>stat = "mean"</code> may read a COG overview.</li>
 <li>
-<code>cpu_workers</code>, <code>io_concurrency</code>: tile-level concurrency.</li>
+<code>cpu_workers</code>, <code>io_concurrency</code>: CPU threads and remote requests in flight.</li>
 <li>
 <code>store_opts</code>: object store options (see <a href="#remote-sources">Remote sources</a>).</li>
 </ul>
@@ -264,7 +264,7 @@
 <span>  value_type     <span class="op">=</span> <span class="st">"float32"</span>,</span>
 <span>  compression    <span class="op">=</span> <span class="st">"zstd"</span>,</span>
 <span>  cpu_workers    <span class="op">=</span> <span class="fl">16L</span>,</span>
-<span>  io_concurrency <span class="op">=</span> <span class="fl">16L</span></span>
+<span>  io_concurrency <span class="op">=</span> <span class="fl">32L</span></span>
 <span><span class="op">)</span></span></code></pre></div>
 </div>
 <div class="section level3">
@@ -310,7 +310,7 @@
 <h3 id="configuration">Configuration<a class="anchor" aria-label="anchor" href="#configuration"></a>
 </h3>
 <div class="sourceCode" id="cb18"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="fu"><a href="reference/a5px_set_concurrency.html">a5px_set_concurrency</a></span><span class="op">(</span>cpu_workers <span class="op">=</span> <span class="fl">8</span>, io_concurrency <span class="op">=</span> <span class="fl">16</span><span class="op">)</span> <span class="co"># session default</span></span>
+<code class="sourceCode R"><span><span class="fu"><a href="reference/a5px_set_concurrency.html">a5px_set_concurrency</a></span><span class="op">(</span>cpu_workers <span class="op">=</span> <span class="fl">8</span>, io_concurrency <span class="op">=</span> <span class="fl">32</span><span class="op">)</span> <span class="co"># session default</span></span>
 <span><span class="fu"><a href="reference/a5px_set_concurrency.html">a5px_get_concurrency</a></span><span class="op">(</span><span class="op">)</span>                                     <span class="co"># current setting</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/Sys.setenv.html" class="external-link">Sys.setenv</a></span><span class="op">(</span>A5PX_PROFILE <span class="op">=</span> <span class="st">"1"</span><span class="op">)</span>                             <span class="co"># stage timings to stderr</span></span></code></pre></div>
 </div>

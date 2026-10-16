@@ -167,8 +167,8 @@ and envelope to build the chunks from.</p>
 
 
 <p><code><a href="a5px_set_concurrency.html">a5px_set_concurrency()</a></code> and <code><a href="a5px_set_concurrency.html">a5px_get_concurrency()</a></code> set the session
-defaults for the worker pool (<code>cpu_workers</code>) and the number of tile
-fetches in flight (<code>io_concurrency</code>). They are independent of
+defaults for the worker pool (<code>cpu_workers</code>) and the number of remote
+requests in flight (<code>io_concurrency</code>). They are independent of
 <code><a href="https://belian-earth.github.io/a5R/reference/a5_threads.html" class="external-link">a5R::a5_set_threads()</a></code>. Remote reads are usually limited by latency,
 so a higher <code>io_concurrency</code> often helps. Remote reads keep the byte
 ranges they fetch in a session cache, so reads split into <code>bbox</code> chunks
@@ -208,15 +208,21 @@ request.</p><ul><li><p>S3: every <code>AWS_*</code> variable <code>object_store<
 <code>AWS_ENDPOINT_URL_S3</code>, <code>AWS_CONTAINER_CREDENTIALS_RELATIVE_URI</code> and
 <code>AWS_WEB_IDENTITY_TOKEN_FILE</code>, plus GDAL's <code>AWS_NO_SIGN_REQUEST=YES</code>
 for public buckets (mapped to <code>aws_skip_signature</code>). Without static,
-container or web-identity credentials the client falls back to
-instance metadata, which off AWS waits for a long timeout before
-failing, so set <code>AWS_NO_SIGN_REQUEST</code> or <code>store_opts = c(aws_skip_signature = "true")</code> for public data. The shared credentials file
+container or web-identity credentials the client takes them from the
+instance metadata service (on EC2, ECS or Batch); where none answers
+within 300 ms and signing was not set either way, requests go
+unsigned, which reads public data and gets "access denied" from a
+private bucket. The shared credentials file
 (<code>~/.aws/credentials</code>) and <code>AWS_PROFILE</code> are not read. With no region
 the client assumes <code>us-east-1</code> and a bucket elsewhere fails, so set
 <code>AWS_REGION</code> or <code>aws_region</code>. Path-style
 <code>https://s3.&lt;region&gt;.amazonaws.com/&lt;bucket&gt;/...</code> and virtual-hosted
 <code>https://&lt;bucket&gt;.s3.&lt;region&gt;.amazonaws.com/...</code> URLs are treated as
-S3 rather than plain HTTP and take the same configuration.</p></li>
+S3 rather than plain HTTP and take the same configuration, so stale
+credentials in the environment can be refused where an unsigned
+request would succeed; set <code>aws_skip_signature</code> for public data. An
+<code>http://</code> endpoint (<code>AWS_ENDPOINT</code>, as for MinIO) is allowed without
+<code>allow_http</code>.</p></li>
 <li><p>GCS: the <code>GOOGLE_*</code> variables (<code>GOOGLE_SERVICE_ACCOUNT</code>,
 <code>GOOGLE_SERVICE_ACCOUNT_KEY</code>, <code>GOOGLE_APPLICATION_CREDENTIALS</code>);
 <code>google_skip_signature</code> for public buckets.</p></li>
@@ -224,7 +230,11 @@ S3 rather than plain HTTP and take the same configuration.</p></li>
 <code>AZURE_STORAGE_ACCESS_KEY</code>, <code>AZURE_STORAGE_SAS_KEY</code>, ...);
 <code>azure_skip_signature</code> for public containers.</p></li>
 <li><p>Plain HTTP(S): no authentication. <code>store_opts</code> accepts client keys
-such as <code>timeout</code>, <code>connect_timeout</code> and <code>allow_http</code>.</p></li>
+such as <code>timeout</code> and <code>connect_timeout</code>.</p></li>
+<li><p>GDAL paths <code>/vsis3/bucket/key</code>, <code>/vsigs/bucket/key</code>,
+<code>/vsiaz/container/key</code> and <code>/vsicurl/&lt;url&gt;</code> are read as the matching
+<code>s3://</code>, <code>gs://</code>, <code>az://</code> or plain URL. Other <code>/vsi</code> paths, such as
+<code>/vsizip/</code>, are not supported.</p></li>
 </ul></div>
     <div class="section level2">
     <h2 id="supported-formats-and-crss">Supported formats and CRSs<a class="anchor" aria-label="anchor" href="#supported-formats-and-crss"></a></h2>
