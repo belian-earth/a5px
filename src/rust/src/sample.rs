@@ -207,7 +207,8 @@ pub(crate) async fn sample_at_cells_async(
             "composite reduces sources with the same bands, and does not apply to `separate = TRUE`".into(),
         ));
     }
-    let opened = open_sources(sources, &store_opts).await?;
+    let limit = Some(crate::range_cache::request_limit(io_concurrency));
+    let opened = open_sources(sources, &store_opts, limit).await?;
     let plan = plan_bands(&opened, separate, &bands_idx, &bands_names)?;
     if !separate {
         check_same_pixel_size(&opened)?;
@@ -443,7 +444,7 @@ async fn sample_source(
     let identity_offsets: Vec<usize> = (0..n_out).collect();
 
     let ifd_arc = Arc::new(ifd_owned);
-    let registry_arc: Arc<DecoderRegistry> = Arc::new(DecoderRegistry::default());
+    let registry_arc: Arc<DecoderRegistry> = Arc::new(crate::decoders::registry());
     let selected_bands_arc: Arc<Vec<usize>> = Arc::new(selected_bands);
     let identity_offsets_arc: Arc<Vec<usize>> = Arc::new(identity_offsets);
 

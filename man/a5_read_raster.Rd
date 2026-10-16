@@ -158,13 +158,11 @@ error otherwise.}
 \code{A5PX_CPU_WORKERS}, then the CPUs available to the R process, which
 respects container and cgroup CPU limits.}
 
-\item{io_concurrency}{Maximum in-flight fetch tasks the producer issues
-to the I/O stage; each task carries one block, or a run of up to four
-adjacent blocks on files without a predictor. \code{NULL} (default) resolves from
+\item{io_concurrency}{Maximum remote requests in flight for the read,
+across all sources; adjacent blocks of a band share a request. For
+local files, the blocks read at once. \code{NULL} (default) resolves from
 \code{getOption("a5px.io_concurrency")}, env \code{A5PX_IO_CONCURRENCY}, then
-\code{min(16, max(cpu_workers, 8))}. Bump this for cloud reads of multi-band
-embedding rasters where the network can absorb more parallelism than
-the CPU pool. See \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.}
+32. See \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.}
 
 \item{scoff}{Logical. If \code{TRUE}, apply the scale and offset the file
 declares for each band (\code{value * scale + offset}, from the GDAL band

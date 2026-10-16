@@ -84,7 +84,7 @@ pub(crate) fn cells_from_u64(ids: &[u64]) -> Robj {
 
 /// The a5 crate version a5px is built with: the exact pin in Cargo.toml,
 /// which a unit test holds this to.
-pub(crate) const A5_CRATE_VERSION: &str = "1.0.0-beta.3";
+pub(crate) const A5_CRATE_VERSION: &str = "1.0.0";
 
 /// The a5 crate version a5px is built with, recorded in output metadata.
 /// @noRd

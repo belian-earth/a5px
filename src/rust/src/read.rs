@@ -428,6 +428,14 @@ pub(crate) trait AccLayout: Copy + Send + Sync + 'static {
     }
     fn merge(&mut self, other: &Self);
     fn finalise(&self, stat: Stat) -> f64;
+    /// Whether the store keeps the weight, once per cell, instead of each
+    /// band's accumulator.
+    const SHARED_W: bool = false;
+    /// `finalise` given the band's weight from the store.
+    #[inline]
+    fn finalise_w(&self, stat: Stat, _w: f64) -> f64 {
+        self.finalise(stat)
+    }
 }
 
 /// Which accumulator layout a stat set needs.
@@ -489,6 +497,51 @@ impl AccLayout for AccSum {
     #[inline]
     fn finalise(&self, stat: Stat) -> f64 {
         finalise_sum(self.sum, self.sum_w, stat)
+    }
+}
+
+/// Weighted sum Σ w·v alone, for `mean`, `sum` and `count`. The weight Σ w
+/// is kept by the store once per cell, since a cell's bands usually share
+/// their valid pixels (an embedding raster's nodata is per pixel), so the
+/// accumulators take half the memory of `AccSum`. A cell whose bands differ
+/// gets a weight per band (see `CellStore::add_band_weights`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AccMean {
+    sum: f64,
+}
+
+impl AccLayout for AccMean {
+    const SHARED_W: bool = true;
+    #[inline]
+    fn new() -> Self {
+        Self { sum: 0.0 }
+    }
+    #[inline]
+    fn push(&mut self, v: f64, w: f64) {
+        if w > 0.0 {
+            self.sum += w * v;
+        }
+    }
+    #[inline]
+    fn push_run(&mut self, vals: &[f64]) {
+        let mut s = 0.0;
+        for &v in vals {
+            s += v;
+        }
+        self.sum += s;
+    }
+    #[inline]
+    fn merge(&mut self, other: &Self) {
+        self.sum += other.sum;
+    }
+    #[inline]
+    fn finalise(&self, _stat: Stat) -> f64 {
+        // the weight is in the store; see `finalise_w`
+        f64::NAN
+    }
+    #[inline]
+    fn finalise_w(&self, stat: Stat, w: f64) -> f64 {
+        finalise_sum(self.sum, w, stat)
     }
 }
 
@@ -734,6 +787,12 @@ pub(crate) struct CellStore<L: AccLayout> {
     cat: Vec<ClassWeights>,
     /// Per-cell weight (pixels with any valid band), when `cfg.has_npix`.
     npix: Vec<f64>,
+    /// With `L::SHARED_W`: the weight of each band of a cell, shared by
+    /// its bands...
+    bw: Vec<f64>,
+    /// ...except for cells whose bands' weights differ, which keep one per
+    /// band here and no longer use `bw`.
+    split: AHashMap<u32, Box<[f64]>>,
 }
 
 impl<L: AccLayout> CellStore<L> {
@@ -746,7 +805,15 @@ impl<L: AccLayout> CellStore<L> {
             cont: Vec::with_capacity(if cfg.has_cont { cap * n_out } else { 0 }),
             cat: Vec::with_capacity(if cfg.has_cat { cap * n_out } else { 0 }),
             npix: Vec::with_capacity(if cfg.has_npix { cap } else { 0 }),
+            bw: Vec::with_capacity(if Self::shared(cfg) { cap } else { 0 }),
+            split: AHashMap::new(),
         }
+    }
+
+    /// Whether this store keeps band weights per cell (`L::SHARED_W`).
+    #[inline]
+    fn shared(cfg: AccCfg) -> bool {
+        L::SHARED_W && cfg.has_cont
     }
 
     #[inline]
@@ -772,7 +839,102 @@ impl<L: AccLayout> CellStore<L> {
         if self.cfg.has_npix {
             self.npix.push(0.0);
         }
+        if Self::shared(self.cfg) {
+            self.bw.push(0.0);
+        }
         s
+    }
+
+    /// The per-band weights of `slot`, splitting it from the shared weight
+    /// if it is not split already.
+    #[inline]
+    fn split_weights(&mut self, slot: u32) -> &mut [f64] {
+        let (w, n) = (self.bw[slot as usize], self.n_out);
+        self.split.entry(slot).or_insert_with(|| vec![w; n].into_boxed_slice())
+    }
+
+    /// Add `w[b]`, the weight of band `b`'s valid pixels, to cell `slot`
+    /// under a shared-weight layout: equal weights go to the cell's one
+    /// weight, and a cell whose bands differ is split.
+    #[inline]
+    fn add_band_weights(&mut self, slot: u32, w: &[f64]) {
+        if !Self::shared(self.cfg) || w.is_empty() {
+            return;
+        }
+        if !self.split.is_empty() {
+            if let Some(e) = self.split.get_mut(&slot) {
+                e.iter_mut().zip(w).for_each(|(x, &d)| *x += d);
+                return;
+            }
+        }
+        let w0 = w[0];
+        if w.iter().all(|&x| x == w0) {
+            self.bw[slot as usize] += w0;
+            return;
+        }
+        self.split_weights(slot).iter_mut().zip(w).for_each(|(x, &d)| *x += d);
+    }
+
+    /// [`Self::add_band_weights`] for one pixel of weight `w`, valid in the
+    /// bands where `valid` is set.
+    #[inline]
+    fn add_pixel_weight(&mut self, slot: u32, w: f64, valid: &[bool]) {
+        if !Self::shared(self.cfg) || valid.is_empty() || w <= 0.0 {
+            return;
+        }
+        if !self.split.is_empty() {
+            if let Some(e) = self.split.get_mut(&slot) {
+                e.iter_mut().zip(valid).filter(|(_, &v)| v).for_each(|(x, _)| *x += w);
+                return;
+            }
+        }
+        let v0 = valid[0];
+        if valid.iter().all(|&v| v == v0) {
+            if v0 {
+                self.bw[slot as usize] += w;
+            }
+            return;
+        }
+        self.split_weights(slot).iter_mut().zip(valid).filter(|(_, &v)| v).for_each(|(x, _)| *x += w);
+    }
+
+    /// Merge the shared-layout weights of cell `i` of `other` into slot
+    /// `s`, local band `b` of `other` going to column `slots[b]` (identity
+    /// when `None`).
+    #[inline]
+    fn merge_weights(&mut self, other: &CellStore<L>, i: usize, s: usize, slots: Option<&[usize]>) {
+        let theirs = if other.split.is_empty() { None } else { other.split.get(&(i as u32)) };
+        let ow = other.bw[i];
+        match slots {
+            None => {
+                let mine = !self.split.is_empty() && self.split.contains_key(&(s as u32));
+                if theirs.is_none() && !mine {
+                    self.bw[s] += ow;
+                    return;
+                }
+                let e = self.split_weights(s as u32);
+                for (b, x) in e.iter_mut().enumerate() {
+                    *x += theirs.map_or(ow, |t| t[b]);
+                }
+            }
+            Some(map) => {
+                let e = self.split_weights(s as u32);
+                for (b, &col) in map.iter().enumerate() {
+                    e[col] += theirs.map_or(ow, |t| t[b]);
+                }
+            }
+        }
+    }
+
+    /// Band `b`'s weight in local cell `i` under a shared-weight layout.
+    #[inline]
+    fn shared_weight(&self, i: usize, b: usize) -> f64 {
+        if !self.split.is_empty() {
+            if let Some(e) = self.split.get(&(i as u32)) {
+                return e[b];
+            }
+        }
+        self.bw[i]
     }
 
     #[inline]
@@ -814,6 +976,9 @@ impl<L: AccLayout> CellStore<L> {
         if self.cfg.has_npix {
             self.npix[s] += other.npix[i];
         }
+        if Self::shared(self.cfg) {
+            self.merge_weights(other, i, s, Some(slots));
+        }
         Ok(())
     }
 
@@ -837,6 +1002,9 @@ impl<L: AccLayout> CellStore<L> {
         if self.cfg.has_npix {
             self.npix[s] += other.npix[i];
         }
+        if Self::shared(self.cfg) {
+            self.merge_weights(other, i, s, None);
+        }
         Ok(())
     }
 }
@@ -847,7 +1015,9 @@ impl<L: AccLayout> CellStore<L> {
     #[inline]
     fn weight(&self, i: usize, b: usize) -> f64 {
         let idx = i * self.n_out + b;
-        if self.cfg.has_cont {
+        if Self::shared(self.cfg) {
+            self.shared_weight(i, b)
+        } else if self.cfg.has_cont {
             self.cont[idx].finalise(Stat::Count)
         } else {
             self.cat[idx].iter().map(|&(_, w)| w).sum()
@@ -860,6 +1030,7 @@ impl<L: AccLayout> CellStore<L> {
         let idx = i * self.n_out + b;
         match stat {
             Stat::Majority => finalise_majority(&self.cat[idx]),
+            _ if Self::shared(self.cfg) => self.cont[idx].finalise_w(stat, self.shared_weight(i, b)),
             _ => self.cont[idx].finalise(stat),
         }
     }
@@ -1340,6 +1511,9 @@ fn process_tile<L: AccLayout>(
     let mut row_slot: Vec<u32> = vec![NO_SLOT; actual_w];
     let mut runs: Vec<(u32, usize, usize)> = Vec::with_capacity(actual_w / 2 + 1);
     let mut vals: Vec<f64> = Vec::with_capacity(actual_w);
+    // valid-pixel weight of each band of each run, for a shared-weight layout
+    let shared_w = CellStore::<L>::shared(cfg);
+    let mut run_w: Vec<f64> = Vec::new();
 
     let mut sub_pix: u64 = 0;
     let mut sub_a5: u64 = 0;
@@ -1450,11 +1624,18 @@ fn process_tile<L: AccLayout>(
                 store.add_npix(slot, (c1 - c0) as f64);
             }
         }
+        if shared_w {
+            run_w.clear();
+            run_w.resize(runs.len() * n_out, 0.0);
+        }
         for (out_b, &src_b) in tile.band_offsets.iter().enumerate() {
             let band_base = row_base + src_b * b_stride;
-            for &(slot, c0, c1) in &runs {
+            for (ri, &(slot, c0, c1)) in runs.iter().enumerate() {
                 vals.clear();
                 read_run_values(data, band_base + c0 * w_stride, w_stride, c1 - c0, nodata, dequant.map(|d| d.band(out_b)), &mut vals);
+                if shared_w {
+                    run_w[ri * n_out + out_b] = vals.len() as f64;
+                }
                 if vals.is_empty() {
                     continue;
                 }
@@ -1467,6 +1648,11 @@ fn process_tile<L: AccLayout>(
                         cat_push(m, v as i32, 1.0)?;
                     }
                 }
+            }
+        }
+        if shared_w {
+            for (ri, &(slot, _, _)) in runs.iter().enumerate() {
+                store.add_band_weights(slot, &run_w[ri * n_out..(ri + 1) * n_out]);
             }
         }
         if let Some(t0) = t { sub_push += t0.elapsed().as_nanos() as u64; }
@@ -1564,6 +1750,7 @@ fn push_pixel<L: AccLayout>(
     w: f64,
 ) -> Result<()> {
     store.add_npix(slot, w);
+    store.add_pixel_weight(slot, w, band_valid);
     for b in 0..band_vals.len() {
         if band_valid[b] {
             if cfg.has_cont {
@@ -1897,6 +2084,8 @@ macro_rules! dispatch_layout {
     ($a:expr, $f:expr) => {{
         let a = $a;
         match layout_for(&a.stats) {
+            // separate sources fill different columns, whose weights differ
+            Layout::Sum if !a.separate => $f(read_raster_async_impl::<AccMean>(a).await?),
             Layout::Sum => $f(read_raster_async_impl::<AccSum>(a).await?),
             Layout::Range => $f(read_raster_async_impl::<AccRange>(a).await?),
             Layout::Full => $f(read_raster_async_impl::<AccFull>(a).await?),
@@ -2305,7 +2494,8 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
     }
     let prof_call = profile_enabled();
     let t_open = Instant::now();
-    let opened = open_sources(sources, &store_opts).await?;
+    let limit = Some(crate::range_cache::request_limit(io_concurrency));
+    let opened = open_sources(sources, &store_opts, limit).await?;
     if prof_call {
         T_OPEN_HEADER_NS.fetch_add(t_open.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -2368,7 +2558,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
 
     let plans: Arc<Vec<SourcePlan>> = Arc::new(plans);
     let dst_proj_arc = Arc::new(dst_proj);
-    let registry_arc: Arc<DecoderRegistry> = Arc::new(DecoderRegistry::default());
+    let registry_arc: Arc<DecoderRegistry> = Arc::new(crate::decoders::registry());
 
     // Producer / consumer pipeline. The producer issues all tile fetches
     // concurrently (`io_concurrency`), pushes a TileItem into a bounded
@@ -2424,6 +2614,15 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
         })
         .max()
         .unwrap_or(0);
+    // A bbox read touches no more cells than the bbox holds (plus its
+    // edge), far fewer than its blocks' pixels when the box is small.
+    let expected_cells = match bbox_pixel_filter.as_deref() {
+        Some(b) => {
+            let n = b.area_m2() / a5::cell_area(resolution);
+            expected_cells.min((n * 1.1 + 4.0 * n.sqrt() + 64.0) as usize)
+        }
+        None => expected_cells,
+    };
     // One store, or one per source when compositing.
     let per_source = composite.is_some();
     let n_stores = if per_source { plans.len() } else { 1 };
@@ -2752,11 +2951,39 @@ impl<L: AccLayout> Aggregate<L> {
         Some(self.order.iter().map(|&(p, i)| self.parts[p as usize].npix[i as usize]).collect())
     }
 
-    /// Values of `stat` for band `b` over all cells, in output order.
-    pub(crate) fn column_iter(&self, stat: Stat, b: usize) -> impl Iterator<Item = f64> + '_ {
-        self.order
-            .iter()
-            .map(move |&(p, i)| self.parts[p as usize].value(stat, i as usize, b))
+    /// Fill `cols[b]` with `stat` of band `b` for every cell, in output
+    /// order, converted by `conv`. Cells go in chunks on the pool, each
+    /// cell's bands read together from its slab row: gathering one column
+    /// at a time read every slab row once per band, in output order, which
+    /// jumps between partitions.
+    pub(crate) fn columns_into<T: Copy + Send>(&self, stat: Stat, cols: &mut [Vec<T>], conv: impl Fn(f64) -> T + Sync) {
+        const CHUNK: usize = 2048;
+        let n = self.len();
+        debug_assert_eq!(cols.len(), self.n_out);
+        let mut chunks: Vec<Vec<&mut [T]>> = (0..n.div_ceil(CHUNK)).map(|_| Vec::with_capacity(cols.len())).collect();
+        for c in cols.iter_mut() {
+            c.clear();
+            c.resize(n, conv(0.0));
+            for (k, s) in c.chunks_mut(CHUNK).enumerate() {
+                chunks[k].push(s);
+            }
+        }
+        let fill = |(k, mut out): (usize, Vec<&mut [T]>)| {
+            let o = &self.order[k * CHUNK..n.min((k + 1) * CHUNK)];
+            for (j, &(p, i)) in o.iter().enumerate() {
+                let part = &self.parts[p as usize];
+                for (b, col) in out.iter_mut().enumerate() {
+                    col[j] = conv(part.value(stat, i as usize, b));
+                }
+            }
+        };
+        match self.pool.as_deref() {
+            Some(pool) if n > CHUNK => pool.install(|| {
+                use rayon::prelude::*;
+                chunks.into_par_iter().enumerate().for_each(fill)
+            }),
+            _ => chunks.into_iter().enumerate().for_each(fill),
+        }
     }
 
     /// Fill `out` (length `len() * n_out`) cell-major with `stat`, in

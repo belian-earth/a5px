@@ -37,6 +37,12 @@ if (!is_not_cran) {
 .profile <- ifelse(is_debug, "", "--release")
 .clean_targets <- ifelse(is_debug, "", "$(TARGET_DIR)")
 
+# Development builds (devtools sets NOT_CRAN, pkgbuild::compile_dll sets
+# DEBUG) regenerate R/extendr-wrappers.R with the `document` binary, a
+# debug build of every dependency that adds about a minute. Other installs
+# use the committed wrappers.
+.document <- ifelse(is_not_cran, "true", "false")
+
 # We specify this target when building for webR
 webr_target <- "wasm32-unknown-emscripten"
 
@@ -150,7 +156,8 @@ new_txt <- gsub("@CRAN_FLAGS@", .cran_flags, mv_txt) |>
   gsub("@LIBDIR@", .libdir, x = _) |>
   gsub("@TARGET@", .target, x = _) |>
   gsub("@PANIC_EXPORTS@", .panic_exports, x = _) |>
-  gsub("@MACOS_DEPLOY@", .macos_deploy, x = _)
+  gsub("@MACOS_DEPLOY@", .macos_deploy, x = _) |>
+  gsub("@DOCUMENT@", .document, x = _)
 
 message("Writing `", mv_ofp, "`.")
 con <- file(mv_ofp, open = "wb")

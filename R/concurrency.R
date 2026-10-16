@@ -7,11 +7,10 @@
 #'   same size that indexes each decoded block as row stripes, so a read
 #'   that spans fewer blocks than workers still uses every worker. Pick
 #'   this to match the number of physical cores you can spare.
-#' - **`io_concurrency`** is the number of in-flight tile fetches the
-#'   producer issues at once. For local files the default is enough; for
-#'   cloud reads of multi-band embedding rasters, push it higher (`32`,
-#'   `64`+) so the network stays busy while CPU workers consume from a
-#'   bounded channel.
+#' - **`io_concurrency`** is the number of remote requests a read keeps in
+#'   flight, across all its sources. Blocks next to each other in the file
+#'   (a band's blocks along a row, say) are fetched in one request. For
+#'   local files it is the number of blocks read at once.
 #'
 #' These two knobs replace the old `threads` arg, which conflated tokio
 #' worker count and tile-level parallelism in confusing ways.
@@ -20,7 +19,7 @@
 #' built-in default. For `cpu_workers` that is the number of CPUs available
 #' to the R process, which respects affinity masks and container or cgroup
 #' CPU quotas (a job limited to 4 CPUs on a 20-core host gets 4); for
-#' `io_concurrency` it is `min(16, max(cpu_workers, 8))`. Set globally via
+#' `io_concurrency` it is 32. Set globally via
 #' [a5px_set_concurrency()], `options(a5px.cpu_workers = ...)`,
 #' `options(a5px.io_concurrency = ...)`, or environment variables
 #' `A5PX_CPU_WORKERS` / `A5PX_IO_CONCURRENCY`.
@@ -71,20 +70,19 @@ resolve_cpu_workers <- function() {
 }
 
 #' @noRd
-resolve_io_concurrency <- function(cpu_workers = NULL) {
+resolve_io_concurrency <- function() {
   v <- getOption("a5px.io_concurrency")
   if (is.null(v)) {
     env <- Sys.getenv("A5PX_IO_CONCURRENCY", unset = "")
     if (nzchar(env)) v <- suppressWarnings(as.integer(env))
   }
   if (is.null(v) || is.na(v) || v < 1L) {
-    if (is.null(cpu_workers)) cpu_workers <- resolve_cpu_workers()
-    # Conservative cloud default: between 8 (so small machines still get
-    # some I/O parallelism) and 16 (CloudFlare / S3 / Source Cooperative
-    # tend to queue or throttle past ~16 simultaneous range requests, so
-    # going higher tends to hurt rather than help). Tune up via
-    # a5px_set_concurrency() / A5PX_IO_CONCURRENCY for fast on-prem stores.
-    v <- min(16L, max(cpu_workers, 8L))
+    # Requests in flight. Reading a 5 km AEF window (257 requests) took
+    # 5.7 s at 64, 7.1 s at 32 and 7.9 s at 16 straight from S3, and
+    # 37-66 s at 32 against 70-107 s at 16 and 64 through Source
+    # Cooperative's proxy, which slows under more. The setting used to
+    # count fetch tasks of up to ten requests each.
+    v <- 32L
   }
   as.integer(v)
 }

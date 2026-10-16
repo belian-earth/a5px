@@ -162,7 +162,7 @@ Their main arguments:
 - `scoff`, `dequant`: decode stored values per pixel before aggregation
   (see [Decoding stored values](#decoding-stored-values)).
 - `use_overviews`: whether `stat = "mean"` may read a COG overview.
-- `cpu_workers`, `io_concurrency`: tile-level concurrency.
+- `cpu_workers`, `io_concurrency`: CPU threads and remote requests in flight.
 - `store_opts`: object store options (see [Remote
   sources](#remote-sources)).
 
@@ -295,7 +295,7 @@ a5_raster_to_parquet(
   value_type     = "float32",
   compression    = "zstd",
   cpu_workers    = 16L,
-  io_concurrency = 16L
+  io_concurrency = 32L
 )
 ```
 
@@ -357,7 +357,7 @@ parts <- lapply(chunks, function(b) {
 ### Configuration
 
 ``` r
-a5px_set_concurrency(cpu_workers = 8, io_concurrency = 16) # session default
+a5px_set_concurrency(cpu_workers = 8, io_concurrency = 32) # session default
 a5px_get_concurrency()                                     # current setting
 Sys.setenv(A5PX_PROFILE = "1")                             # stage timings to stderr
 ```

@@ -376,6 +376,16 @@ impl Boxes {
         }
     }
 
+    /// Area of the boxes on the authalic sphere, in square metres (boxes
+    /// that overlap count twice).
+    pub(crate) fn area_m2(&self) -> f64 {
+        const R: f64 = 6_371_007.180_918_475;
+        self.0
+            .iter()
+            .map(|b| R * R * (b[2] - b[0]).to_radians() * (b[3].to_radians().sin() - b[1].to_radians().sin()))
+            .sum()
+    }
+
     /// Whether a point lies in any box ([`in_bbox`], longitude wrapped).
     #[inline]
     pub(crate) fn contains(&self, lon: f64, lat: f64) -> bool {

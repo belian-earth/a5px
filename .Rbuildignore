@@ -18,3 +18,4 @@
 ^pkgdown$
 ^\.github$
 ^codecov\.yml$
+^tests/testthat/_problems$

@@ -13,11 +13,20 @@
 //!
 //! Remote files are taken to be immutable for the session; a source that
 //! changes in place needs [`clear`].
+//!
+//! The reader also issues the remote requests. Ranges a few bytes apart, as
+//! the blocks of one band in a strip are, merge into one request, and every
+//! request takes a permit from the read's limit, so `io_concurrency` bounds
+//! the requests in flight. object_store's own `get_ranges` runs up to ten
+//! requests for each call, which made the real number about ten times the
+//! setting on planar rasters.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
+
+use tokio::sync::Semaphore;
 
 use async_tiff::error::AsyncTiffResult;
 use async_tiff::reader::{AsyncFileReader, ObjectReader};
@@ -28,6 +37,17 @@ use extendr_api::prelude::*;
 /// held to an eighth of a cgroup memory limit (a container or a systemd
 /// scope), so a 2 GiB task caches at most 256 MiB.
 const DEFAULT_BUDGET_MB: u64 = 512;
+
+/// Ranges at most this far apart are fetched in one request: the gap is
+/// read and discarded, which costs less than a round trip. object_store
+/// uses 1 MiB.
+const COALESCE_GAP: u64 = 1 << 20;
+
+/// Ranges are merged only up to this size, so a block's bands, often
+/// stored next to each other, still download in parallel: one 10.6 MB
+/// request for a 64-band block took 13 s from a client where parallel
+/// requests reach several times one stream's rate.
+const MAX_MERGED: u64 = 2 << 20;
 
 type Key = (Arc<str>, u64, u64);
 
@@ -140,6 +160,9 @@ pub(crate) fn available_cpus() -> usize {
 
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
+/// Remote requests issued and bytes they returned, since the last clear.
+static REQUESTS: AtomicU64 = AtomicU64::new(0);
+static FETCHED: AtomicU64 = AtomicU64::new(0);
 
 fn cache() -> std::sync::MutexGuard<'static, RangeCache> {
     // a panic while holding the lock leaves the map consistent enough to
@@ -160,12 +183,13 @@ pub(crate) fn set_budget(bytes: u64) -> u64 {
 /// Drop every cached range and reset the hit and miss counts.
 pub(crate) fn clear() {
     cache().clear();
-    HITS.store(0, Ordering::Relaxed);
-    MISSES.store(0, Ordering::Relaxed);
+    for n in [&HITS, &MISSES, &REQUESTS, &FETCHED] {
+        n.store(0, Ordering::Relaxed);
+    }
 }
 
-/// `(entries, bytes, budget, hits, misses)`.
-pub(crate) fn stats() -> (u64, u64, u64, u64, u64) {
+/// `(entries, bytes, budget, hits, misses, requests, fetched bytes)`.
+pub(crate) fn stats() -> (u64, u64, u64, u64, u64, u64, u64) {
     let c = cache();
     (
         c.map.len() as u64,
@@ -173,7 +197,37 @@ pub(crate) fn stats() -> (u64, u64, u64, u64, u64) {
         c.budget,
         HITS.load(Ordering::Relaxed),
         MISSES.load(Ordering::Relaxed),
+        REQUESTS.load(Ordering::Relaxed),
+        FETCHED.load(Ordering::Relaxed),
     )
+}
+
+/// A limit on one read's remote requests in flight.
+pub(crate) fn request_limit(n: usize) -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(n.max(1)))
+}
+
+/// Merge `ranges` (any order, overlaps allowed) into requests no more than
+/// `gap` apart and, unless one range is larger, at most `max` long.
+/// Returns the requests in offset order and, per input range, its request
+/// and offset within it.
+fn coalesce(ranges: &[Range<u64>], gap: u64, max: u64) -> (Vec<Range<u64>>, Vec<(usize, u64)>) {
+    let mut order: Vec<usize> = (0..ranges.len()).collect();
+    order.sort_by_key(|&i| ranges[i].start);
+    let mut reqs: Vec<Range<u64>> = Vec::new();
+    let mut place = vec![(0usize, 0u64); ranges.len()];
+    for i in order {
+        let r = &ranges[i];
+        match reqs.last_mut() {
+            Some(last) if r.start <= last.end.saturating_add(gap) && r.end.max(last.end) - last.start <= max => {
+                last.end = last.end.max(r.end)
+            }
+            _ => reqs.push(r.clone()),
+        }
+        let k = reqs.len() - 1;
+        place[i] = (k, r.start - reqs[k].start);
+    }
+    (reqs, place)
 }
 
 /// An [`ObjectReader`] whose ranges go through the session cache when it
@@ -182,12 +236,32 @@ pub(crate) fn stats() -> (u64, u64, u64, u64, u64) {
 pub(crate) struct CachedReader {
     inner: ObjectReader,
     key: Option<Arc<str>>,
+    limit: Option<Arc<Semaphore>>,
 }
 
 impl CachedReader {
     /// `key` (see `store::cache_key`) is `None` for local files.
     pub(crate) fn new(inner: ObjectReader, key: Option<String>) -> Self {
-        Self { inner, key: key.map(Arc::from) }
+        Self { inner, key: key.map(Arc::from), limit: None }
+    }
+
+    /// Hold remote requests to `limit`'s permits, shared with the read's
+    /// other sources.
+    pub(crate) fn with_limit(mut self, limit: Option<Arc<Semaphore>>) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    /// One remote request, under the read's limit.
+    async fn fetch(&self, range: Range<u64>) -> AsyncTiffResult<Bytes> {
+        let _permit = match &self.limit {
+            Some(l) => Some(l.acquire().await.expect("request limit is never closed")),
+            None => None,
+        };
+        let b = self.inner.get_bytes(range).await?;
+        REQUESTS.fetch_add(1, Ordering::Relaxed);
+        FETCHED.fetch_add(b.len() as u64, Ordering::Relaxed);
+        Ok(b)
     }
 
     fn key_of(&self, range: &Range<u64>) -> Option<Key> {
@@ -207,7 +281,7 @@ impl AsyncFileReader for CachedReader {
             return Ok(b);
         }
         MISSES.fetch_add(1, Ordering::Relaxed);
-        let b = self.inner.get_bytes(range).await?;
+        let b = self.fetch(range).await?;
         cache().insert(key, b.clone());
         Ok(b)
     }
@@ -225,12 +299,25 @@ impl AsyncFileReader for CachedReader {
         HITS.fetch_add((out.len() - missing.len()) as u64, Ordering::Relaxed);
         MISSES.fetch_add(missing.len() as u64, Ordering::Relaxed);
         if !missing.is_empty() {
-            let fetched = self
-                .inner
-                .get_byte_ranges(missing.iter().map(|&i| ranges[i].clone()).collect())
-                .await?;
+            let want: Vec<Range<u64>> = missing.iter().map(|&i| ranges[i].clone()).collect();
+            let (reqs, place) = coalesce(&want, COALESCE_GAP, MAX_MERGED);
+            let got = futures::future::try_join_all(reqs.into_iter().map(|r| self.fetch(r))).await?;
             let mut c = cache();
-            for (&i, b) in missing.iter().zip(fetched) {
+            for ((&i, r), (k, off)) in missing.iter().zip(&want).zip(place) {
+                let (lo, hi) = (off as usize, (off + r.end - r.start) as usize);
+                if hi > got[k].len() {
+                    return Err(async_tiff::error::AsyncTiffError::General(format!(
+                        "range {}..{} beyond end of file",
+                        r.start, r.end
+                    )));
+                }
+                // part of a merged request is copied, so a cached block does
+                // not hold the whole request beyond the cache's count
+                let b = if hi - lo == got[k].len() {
+                    got[k].clone()
+                } else {
+                    Bytes::copy_from_slice(&got[k][lo..hi])
+                };
                 c.insert(keys[i].clone(), b.clone());
                 out[i] = Some(b);
             }
@@ -281,14 +368,16 @@ fn a5px_release_memory_rs() {
 /// @keywords internal
 #[extendr]
 fn a5px_cache_info_rs() -> List {
-    let (n, bytes, budget, hits, misses) = stats();
+    let (n, bytes, budget, hits, misses, requests, fetched) = stats();
     let mb = |b: u64| b as f64 / (1u64 << 20) as f64;
     list!(
         entries = n as f64,
         size_mb = mb(bytes),
         max_mb = mb(budget),
         hits = hits as f64,
-        misses = misses as f64
+        misses = misses as f64,
+        requests = requests as f64,
+        fetched_mb = mb(fetched)
     )
 }
 
@@ -335,6 +424,21 @@ mod tests {
         let mut z = cache_of(0);
         z.insert(key("a", 0), Bytes::from(vec![0u8; 1]));
         assert!(z.map.is_empty());
+    }
+
+    #[test]
+    fn coalesces_near_ranges_and_places_each_input() {
+        let rs = vec![30..40, 0..10, 12..20, 100..110, 35..45];
+        let (reqs, place) = coalesce(&rs, 5, 100);
+        assert_eq!(reqs, vec![0..20, 30..45, 100..110]);
+        assert_eq!(place, vec![(1, 0), (0, 0), (0, 12), (2, 0), (1, 5)]);
+        let (reqs, _) = coalesce(&rs, 0, 100);
+        assert_eq!(reqs, vec![0..10, 12..20, 30..45, 100..110]);
+        // a size cap starts a new request; a range longer than it stays whole
+        let (reqs, _) = coalesce(&rs, 5, 12);
+        assert_eq!(reqs, vec![0..10, 12..20, 30..40, 35..45, 100..110]);
+        let (reqs, _) = coalesce(&[0..50, 50..60], 5, 12);
+        assert_eq!(reqs, vec![0..50, 50..60]);
     }
 
     #[test]
