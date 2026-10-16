@@ -167,7 +167,7 @@ and envelope to build the chunks from.</p>
     <h2 id="configuration">Configuration<a class="anchor" aria-label="anchor" href="#configuration"></a></h2>
 
 
-<p><code><a href="a5px_set_concurrency.html">a5px_set_concurrency()</a></code> and <code><a href="a5px_set_concurrency.html">a5px_get_concurrency()</a></code> set the session
+<p><code><a href="a5px_concurrency.html">a5px_concurrency()</a></code> sets and reports the session
 defaults for the worker pool (<code>cpu_workers</code>) and the number of remote
 requests in flight (<code>io_concurrency</code>). They are independent of
 <code><a href="https://belian-earth.github.io/a5R/reference/a5_threads.html" class="external-link">a5R::a5_set_threads()</a></code>. Remote reads are usually limited by latency,
@@ -192,7 +192,7 @@ one column per band and stat. <code>var</code> and <code>sd</code> use the sampl
 GDAL <code>DESCRIPTION</code> band tag. For band-interleaved files only the
 selected bands are fetched.</p></li>
 <li><p><code>scoff</code>, <code>dequant</code>: decode stored values per pixel before aggregation.</p></li>
-<li><p><code>cpu_workers</code>, <code>io_concurrency</code>: see <code><a href="a5px_set_concurrency.html">a5px_set_concurrency()</a></code>.</p></li>
+<li><p><code>cpu_workers</code>, <code>io_concurrency</code>: see <code><a href="a5px_concurrency.html">a5px_concurrency()</a></code>.</p></li>
 </ul></div>
     <div class="section level2">
     <h2 id="remote-sources">Remote sources<a class="anchor" aria-label="anchor" href="#remote-sources"></a></h2>

@@ -533,8 +533,9 @@ empties it.
   and index pixels; it defaults to the CPUs available to R, which
   respects container limits. `io_concurrency` sets the remote requests a
   read keeps in flight, 32 by default.
-  [`a5px_set_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md)
-  changes both for the session.
+  [`a5px_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_concurrency.md)
+  sets both for the session, or for one expression with
+  [`with()`](https://rdrr.io/r/base/with.html).
 - **Bands.** For COGs that store each band separately
   (`INTERLEAVE=BAND`), as embedding rasters often do, `bands` limits the
   download to the bands selected: reading 8 of 64 bands of a 2.8 GB AEF

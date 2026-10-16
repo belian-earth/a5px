@@ -107,12 +107,10 @@ reports the block grid and envelope to build the chunks from.
 
 ## Configuration
 
-[`a5px_set_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md)
-and
-[`a5px_get_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md)
-set the session defaults for the worker pool (`cpu_workers`) and the
-number of remote requests in flight (`io_concurrency`). They are
-independent of
+[`a5px_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_concurrency.md)
+sets and reports the session defaults for the worker pool
+(`cpu_workers`) and the number of remote requests in flight
+(`io_concurrency`). They are independent of
 [`a5R::a5_set_threads()`](https://belian-earth.github.io/a5R/reference/a5_threads.html).
 Remote reads are usually limited by latency, so a higher
 `io_concurrency` often helps. Remote reads keep the byte ranges they
@@ -145,7 +143,7 @@ All readers accept the same core arguments:
 - `scoff`, `dequant`: decode stored values per pixel before aggregation.
 
 - `cpu_workers`, `io_concurrency`: see
-  [`a5px_set_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md).
+  [`a5px_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_concurrency.md).
 
 ## Remote sources
 

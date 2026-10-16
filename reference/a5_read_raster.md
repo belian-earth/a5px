@@ -204,7 +204,7 @@ a5_read_raster(
   read at once. `NULL` (default) resolves from
   `getOption("a5px.io_concurrency")`, env `A5PX_IO_CONCURRENCY`,
   then 32. See
-  [`a5px_set_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md).
+  [`a5px_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_concurrency.md).
 
 - scoff:
 

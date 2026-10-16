@@ -22,6 +22,15 @@
   mode each file samples only the cells on it. Errors from a worker are
   now reported instead of “consumer pool dropped channel”.
 
+- **Breaking:** `a5px_set_concurrency()` and `a5px_get_concurrency()`
+  become one function,
+  [`a5px_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_concurrency.md),
+  which works like [`options()`](https://rdrr.io/r/base/options.html)
+  and a5R’s `a5_threads()`: with no arguments it returns the settings,
+  with arguments it sets them and returns the previous ones, which
+  `a5px_concurrency(old)` or
+  `with(a5px_concurrency(cpu_workers = 1), expr)` restore.
+
 - **Breaking:** `a5_store_config()` is now
   [`a5px_store_config()`](https://belian-earth.github.io/a5px/reference/a5px_store_config.md),
   `a5_write_parquet()` is now

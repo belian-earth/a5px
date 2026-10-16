@@ -554,8 +554,8 @@ reports its size and the requests made, and
 the threads that decode and index pixels; it defaults to the CPUs
 available to R, which respects container limits.
 <code>io_concurrency</code> sets the remote requests a read keeps in
-flight, 32 by default. <code><a href="../reference/a5px_set_concurrency.html">a5px_set_concurrency()</a></code> changes both
-for the session.</li>
+flight, 32 by default. <code><a href="../reference/a5px_concurrency.html">a5px_concurrency()</a></code> sets both for the
+session, or for one expression with <code><a href="https://rdrr.io/r/base/with.html" class="external-link">with()</a></code>.</li>
 <li>
 <strong>Bands.</strong> For COGs that store each band separately
 (<code>INTERLEAVE=BAND</code>), as embedding rasters often do,

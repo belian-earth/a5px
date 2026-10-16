@@ -47,8 +47,7 @@ Write A5-keyed results to Parquet.
 
 Worker and fetch concurrency, and the session cache of remote reads.
 
-- [`a5px_set_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md)
-  [`a5px_get_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_set_concurrency.md)
+- [`a5px_concurrency()`](https://belian-earth.github.io/a5px/reference/a5px_concurrency.md)
   : Tile-level concurrency for raster reads
 - [`a5px_set_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
   [`a5px_cache_info()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
