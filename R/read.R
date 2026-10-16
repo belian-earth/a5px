@@ -136,8 +136,12 @@
 #'   supplied, only tiles overlapping the bbox (in raster CRS) are fetched
 #'   from the COG, and pixels outside the bbox are skipped. The bbox is
 #'   half-open on its `xmax` / `ymax` edges, except at 180 and 90, so bboxes
-#'   that share an edge take a pixel centred on it once. `NULL` (default)
-#'   reads the whole raster.
+#'   that share an edge take a pixel centred on it once. For a box across
+#'   the antimeridian give `xmin > xmax`, such as `c(179, -1, -179, 1)`.
+#'   Pixel longitudes are wrapped to -180 to 180 before the test, so a
+#'   raster stored in longitudes 0 to 360 meets bboxes west of 0, and a
+#'   pixel centred on the antimeridian belongs to boxes starting at -180.
+#'   `NULL` (default) reads the whole raster.
 #' @param bbox_align How `bbox` selects pixels. `"pixel"` (default) keeps
 #'   every pixel whose centre lies in the bbox. `"block"` keeps every
 #'   internal COG block (tile) whose origin pixel centre lies in the bbox,
@@ -483,62 +487,50 @@ read_raster_centroid <- function(srcs, resolution, bands_idx, bands_names,
   }
 }
 
-#' Enumerate the uniform grid of A5 cells sampled in centroid mode. `bbox`
-#' defaults to the raster's WGS 84 envelope when NULL.
+#' Enumerate the uniform grid of A5 cells sampled in centroid mode: the
+#' cells centred on each source, within `bbox` (flat boxes from
+#' `check_bbox()`, or NULL) and the AOI covering `aoi_cells` when given.
+#' Candidates are taken per source from its footprint (padded in Rust past
+#' the bulge of its outline, and split at the antimeridian), so sources far
+#' apart, a raster across the antimeridian or an AOI larger than the raster
+#' never enumerate cells off the raster.
 #' @noRd
 centroid_cells <- function(src, resolution, bbox, store = check_store_opts(NULL),
                            aoi_cells = NULL, call = rlang::caller_env()) {
-  if (!is.null(aoi_cells)) {
-    # AOI cells are the sample set; a bbox further restricts by centroid.
-    cells <- a5R::a5_uncompact(aoi_cells, resolution = resolution)
-    if (!is.null(bbox)) {
-      cells <- cells_centred_in(cells, bbox)
-    }
-    if (length(cells) == 0L) {
-      cli::cli_abort(
-        "No AOI cells have centroids within the requested bbox at resolution {resolution}.",
-        call = call
-      )
-    }
-    return(cells)
-  }
-  # Candidates are taken per source, from the bbox cut to the source's
-  # envelope (padded in Rust past the bulge of its outline), so sources far
-  # apart do not enumerate the cells between them.
+  user <- if (is.null(bbox)) NULL else split_boxes(bbox)
   boxes <- if (length(src)) {
-    lapply(src, function(s) {
-      env <- as.numeric(rs_call(a5_raster_bbox_lonlat_rs(s, store$keys, store$values)))
-      if (is.null(bbox)) env else intersect_bbox(bbox, env)
-    })
+    unlist(lapply(src, function(s) {
+      env <- split_boxes(as.numeric(rs_call(a5_raster_bbox_lonlat_rs(s, store$keys, store$values))))
+      if (is.null(user)) env else intersect_boxes(user, env)
+    }), recursive = FALSE)
   } else {
-    list(bbox)
+    user
   }
-  boxes <- unique(Filter(Negate(is.null), boxes))
-  # Cells whose centre lies in the bbox, at the requested resolution so each
-  # cell gets one centroid sample. The candidates come from a covering of the
-  # bbox padded past the covering's residual bulge.
+  boxes <- unique(boxes)
+  if (is.null(boxes) && !is.null(aoi_cells)) {
+    # no source or bbox to bound the AOI
+    return(a5R::a5_uncompact(aoi_cells, resolution = resolution))
+  }
+  # Cells whose centre lies in each box, at the requested resolution so each
+  # cell gets one centroid sample. The candidates come from a covering of
+  # the box padded past the covering's residual bulge, intersected with the
+  # AOI's before it is expanded to cells.
   cells <- lapply(boxes, function(b) {
-    candidates <- a5R::a5_uncompact(
-      bbox_covering(pad_bbox(b, bbox_pad_deg), resolution),
-      resolution = resolution
-    )
-    cells_centred_in(candidates, b)
+    cover <- bbox_covering(pad_bbox(b, bbox_pad_deg), resolution)
+    if (!is.null(aoi_cells)) cover <- a5R::a5_intersect(cover, aoi_cells)
+    if (a5R::a5_count(cover) == 0) return(a5R::a5_cell(character()))
+    cells_centred_in(a5R::a5_uncompact(cover, resolution = resolution), b)
   })
   cells <- vctrs::vec_unique(vctrs::vec_c(a5R::a5_cell(character()), !!!cells))
   if (length(cells) == 0L) {
-    cli::cli_abort(
-      "No A5 cells have centroids within the requested bbox at resolution {resolution}. Use a finer resolution or a larger bbox.",
-      call = call
-    )
+    msg <- if (is.null(aoi_cells)) {
+      "No A5 cells have centroids within the requested bbox at resolution {resolution}. Use a finer resolution or a larger bbox."
+    } else {
+      "No AOI cells have centroids on the raster within the requested bbox at resolution {resolution}."
+    }
+    cli::cli_abort(msg, call = call, class = c("a5px_error_geometry", "a5px_error_input", "a5px_error"))
   }
   cells
-}
-
-#' The intersection of two WGS 84 bboxes, or `NULL` when they do not meet.
-#' @noRd
-intersect_bbox <- function(a, b) {
-  out <- c(max(a[1], b[1]), max(a[2], b[2]), min(a[3], b[3]), min(a[4], b[4]))
-  if (out[1] < out[3] && out[2] < out[4]) out else NULL
 }
 
 #' The cells of `cells` whose centre lies in a WGS 84 bbox. The max edges

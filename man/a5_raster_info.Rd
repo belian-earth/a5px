@@ -51,6 +51,9 @@ level (\code{level} = IFD index, \code{width}, \code{height}, \code{block_width}
 the proj string a5px resolved.
 \item \code{geotransform}: the 6-element GDAL geotransform.
 \item \code{bbox}: WGS 84 envelope \code{c(xmin, ymin, xmax, ymax)} of the footprint.
+For a raster across the antimeridian \code{xmax} exceeds 180, as
+\code{\link[a5R:a5_bbox]{a5R::a5_bbox()}} reports such polygons; one containing a pole spans
+every longitude and reaches the pole.
 }
 }
 \description{

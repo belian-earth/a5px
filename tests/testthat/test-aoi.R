@@ -163,11 +163,15 @@ test_that("the AOI tile box holds the bulge of great-circle edges", {
   expect_true(all(ll$lat >= bb8[2] & ll$lat <= bb8[4] & ll$lon >= bb8[1] & ll$lon <= bb8[3]))
 })
 
-test_that("an AOI across the antimeridian widens the tile box to every longitude", {
+test_that("an AOI across the antimeridian gives a tile box each side of it", {
   aoi <- wk::wkt("POLYGON((179 -0.5, 181 -0.5, 181 0.5, 179 0.5, 179 -0.5))",
                  crs = wk::wk_crs_longlat())
-  bb <- a5px:::aoi_tile_bbox(aoi, 9L)
-  expect_equal(bb[c(1, 3)], c(-180, 180))
+  bb <- matrix(a5px:::aoi_tile_bbox(aoi, 9L), nrow = 4)
+  expect_equal(ncol(bb), 2L)
+  expect_equal(bb[3, 1], 180)
+  expect_equal(bb[1, 2], -180)
+  expect_true(bb[1, 1] < 179 && bb[1, 1] > 178)
+  expect_true(bb[3, 2] > -179 && bb[3, 2] < -178)
 })
 
 test_that("an AOI band whose edges bulge past its vertices keeps every covering cell", {

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::cell_mask::{CellMask, MaskCache};
-use crate::grid_proj::{bbox_classify, in_bbox, ExactMap, GridProjector};
+use crate::grid_proj::{wrap_lon, Boxes, ExactMap, GridProjector};
 use crate::locator::{a5_spherical, CellLocator, NO_CELL};
 use crate::a5r_api::{cells_from_u64, cells_to_u64};
 use crate::error::{A5CogError, Result};
@@ -1161,7 +1161,7 @@ struct TileCtx<'a> {
     /// Source pixels per target cell (area ratio), for the locator.
     px_per_cell: f64,
     nodata: Option<f64>,
-    bbox_lonlat: Option<[f64; 4]>,
+    bbox_lonlat: Option<&'a Boxes>,
     dequant: Option<&'a Decode>,
     mask: Option<&'a CellMask>,
     cfg: AccCfg,
@@ -1376,7 +1376,7 @@ fn process_tile<L: AccLayout>(
             let mut exact_ll: Option<Option<(f64, f64)>> = None;
             if let Some(b) = ctx.bbox_lonlat {
                 let decided = match p.lonlat {
-                    Some((lon, lat, m)) => bbox_classify(lon, lat, m, &b),
+                    Some((lon, lat, m)) => b.classify(lon, lat, m),
                     None => None,
                 };
                 let inside = match decided {
@@ -1385,9 +1385,7 @@ fn process_tile<L: AccLayout>(
                         let ll = map.lonlat(colf, rowf)?;
                         exact_ll = Some(ll);
                         match ll {
-                            Some((lon, lat)) => {
-                                in_bbox(lon, lat, &b)
-                            }
+                            Some((lon, lat)) => b.contains(lon, lat),
                             None => false,
                         }
                     }
@@ -1640,7 +1638,7 @@ fn process_tile_overlay<L: AccLayout>(
             let mut exact_ll: Option<Option<(f64, f64)>> = None;
             if let Some(b) = bbox_lonlat {
                 let decided = match p.lonlat {
-                    Some((lon, lat, m)) => bbox_classify(lon, lat, m, &b),
+                    Some((lon, lat, m)) => b.classify(lon, lat, m),
                     None => None,
                 };
                 corner_in_bbox[idx] = match decided {
@@ -1649,7 +1647,7 @@ fn process_tile_overlay<L: AccLayout>(
                         let ll = map.lonlat(colf, rowf)?;
                         exact_ll = Some(ll);
                         match ll {
-                            Some((lon, lat)) => in_bbox(lon, lat, &b),
+                            Some((lon, lat)) => b.contains(lon, lat),
                             None => false,
                         }
                     }
@@ -1724,7 +1722,7 @@ fn process_tile_overlay<L: AccLayout>(
     let in_read_bbox = |lon: f64, lat: f64| -> bool {
         match bbox_lonlat {
             None => true,
-            Some(b) => in_bbox(lon, lat, &b),
+            Some(b) => b.contains(lon, lat),
         }
     };
     for chunk in boundary.chunks(CHUNK) {
@@ -1855,7 +1853,7 @@ pub(crate) struct ReadArgs {
     pub stats: Vec<Stat>,
     pub bands_idx: Vec<i32>,
     pub bands_names: Vec<String>,
-    pub bbox_lonlat: Option<[f64; 4]>,
+    pub bbox_lonlat: Option<Boxes>,
     pub src_nodata_override: Option<f64>,
     pub cpu_workers: usize,
     pub io_concurrency: usize,
@@ -1866,7 +1864,7 @@ pub(crate) struct ReadArgs {
     pub fractions: bool,
     pub npix: bool,
     pub bbox_align_block: bool,
-    pub tile_bbox: Option<[f64; 4]>,
+    pub tile_bbox: Option<Boxes>,
     pub mask: Option<Arc<CellMask>>,
     /// Reduce per-source cell values across sources instead of pooling
     /// their pixels.
@@ -1998,8 +1996,8 @@ struct PlanCommon<'a> {
     scoff: bool,
     cfg: AccCfg,
     src_nodata_override: Option<f64>,
-    bbox_lonlat: Option<[f64; 4]>,
-    tile_bbox: Option<[f64; 4]>,
+    bbox_lonlat: Option<&'a Boxes>,
+    tile_bbox: Option<&'a Boxes>,
     bbox_align_block: bool,
     dst_proj: &'a Proj,
 }
@@ -2273,8 +2271,8 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
         scoff,
         cfg,
         src_nodata_override,
-        bbox_lonlat,
-        tile_bbox,
+        bbox_lonlat: bbox_lonlat.as_ref(),
+        tile_bbox: tile_bbox.as_ref(),
         bbox_align_block,
         dst_proj: &dst_proj,
     };
@@ -2303,7 +2301,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
     let t_pipe = Instant::now();
     // Under block alignment the whole tile is in, so the per-pixel bbox
     // test is skipped.
-    let bbox_pixel_filter: Option<[f64; 4]> = if bbox_align_block { None } else { bbox_lonlat };
+    let bbox_pixel_filter: Option<Arc<Boxes>> = if bbox_align_block { None } else { bbox_lonlat.map(Arc::new) };
     let total_tiles: usize = plans.iter().map(|p| p.tiles.len()).sum();
 
     let plans: Arc<Vec<SourcePlan>> = Arc::new(plans);
@@ -2379,7 +2377,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
         let plans = Arc::clone(&plans);
         let dst_proj = Arc::clone(&dst_proj_arc);
         let registry = Arc::clone(&registry_arc);
-        let bbox_lonlat_c = bbox_pixel_filter;
+        let bbox_lonlat_c = bbox_pixel_filter.clone();
         let mask_c = mask.clone();
         let pool = index_pool.clone();
         let parts = Arc::clone(&parts);
@@ -2436,7 +2434,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
                     resolution,
                     px_per_cell: p.px_per_cell,
                     nodata: p.nodata,
-                    bbox_lonlat: bbox_lonlat_c,
+                    bbox_lonlat: bbox_lonlat_c.as_deref(),
                     dequant: p.decode.as_deref(),
                     mask: mask_c.as_deref(),
                     cfg,
@@ -2787,31 +2785,10 @@ struct FracOut {
     offsets: Vec<Vec<i32>>,
 }
 
-/// Decode an extendr-passed `Vec<f64>` whose length is the cheap NULL
-/// sentinel: empty `Vec` means "user passed NULL"; other lengths are
-/// validated by the caller against the expected shape.
-fn opt_f64_arg<const N: usize>(v: Vec<f64>, label: &str) -> Result<Option<[f64; N]>> {
-    if v.is_empty() {
-        return Ok(None);
-    }
-    if v.len() != N {
-        return Err(A5CogError::Invalid(format!(
-            "{label} must be length {N} (or NULL); got len {}",
-            v.len()
-        )));
-    }
-    if v.iter().any(|x| !x.is_finite()) {
-        return Err(A5CogError::Invalid(format!(
-            "{label} must contain finite numeric values"
-        )));
-    }
-    let mut out = [0.0f64; N];
-    out.copy_from_slice(&v);
-    Ok(Some(out))
-}
-
-fn parse_bbox_arg(v: Vec<f64>) -> Result<Option<[f64; 4]>> {
-    opt_f64_arg::<4>(v, "bbox")
+/// A region passed from R as flat `xmin, ymin, xmax, ymax` boxes (two for a
+/// bbox or AOI across the antimeridian); empty for none.
+fn parse_boxes_arg(v: Vec<f64>, what: &str) -> Result<Option<Boxes>> {
+    Boxes::from_flat(&v, what).map_err(A5CogError::Invalid)
 }
 
 /// `src_nodata`: empty for none. NaN and infinities are allowed, since
@@ -3009,7 +2986,7 @@ fn derive_level_geotransform(
     ])
 }
 
-/// Keep the tiles whose representative point projects into `bbox_lonlat`,
+/// Keep the tiles whose representative point projects into `region`,
 /// half-open on the max edges so a partition of bboxes sharing edges
 /// assigns each tile to exactly one member. The representative is the
 /// origin pixel centre (top-left pixel of the tile); when that point is
@@ -3018,7 +2995,7 @@ fn derive_level_geotransform(
 /// a tile with any projectable content still has a deterministic owner.
 fn filter_tiles_by_origin(
     tiles: &[(usize, usize)],
-    bbox_lonlat: [f64; 4],
+    region: &Boxes,
     src_proj: &Proj,
     dst_proj: &Proj,
     gt: &GeoTransform,
@@ -3049,7 +3026,6 @@ fn filter_tiles_by_origin(
     }
     proj_points(src_proj, dst_proj, &mut points[..])?;
     let dst_is_latlong = dst_proj.is_latlong();
-    let [xmin, ymin, xmax, ymax] = bbox_lonlat;
     Ok(tiles
         .iter()
         .enumerate()
@@ -3057,9 +3033,12 @@ fn filter_tiles_by_origin(
             let rep = points[k * CANDIDATES..(k + 1) * CANDIDATES]
                 .iter()
                 .find(|&&(x, y, _)| x.is_finite() && y.is_finite())?;
-            let lon = if dst_is_latlong { rep.0.to_degrees() } else { rep.0 };
+            let lon = wrap_lon(if dst_is_latlong { rep.0.to_degrees() } else { rep.0 });
             let lat = if dst_is_latlong { rep.1.to_degrees() } else { rep.1 };
-            let inside = lon >= xmin && lon < xmax && lat >= ymin && lat < ymax;
+            let inside = region
+                .0
+                .iter()
+                .any(|b| lon >= b[0] && lon < b[2] && lat >= b[1] && lat < b[3]);
             if inside { Some(t) } else { None }
         })
         .collect())
@@ -3080,16 +3059,18 @@ fn rect_edge_samples(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(f64, f64)> {
     v
 }
 
-/// The inclusive tile-index range that may hold pixels in a WGS 84 bbox, or
-/// `Ok(None)` when none can. The bbox is first cut to the raster's
+/// The inclusive tile-index range that may hold pixels in a WGS 84 region,
+/// or `Ok(None)` when none can. The region is first cut to the raster's
 /// footprint: projecting only a bbox's outline fails for a bbox far larger
 /// than the raster, since under transverse Mercator both poles and every
 /// meridian more than 90 degrees from the central one map to its central
 /// column, so the outline of a pole-to-pole bbox collapses onto that column.
-/// A bbox that holds the whole footprint takes every tile.
+/// A region that holds the whole footprint takes every tile. Footprint and
+/// region are both split at the antimeridian, so a raster or region across
+/// it is cut piece by piece.
 #[allow(clippy::too_many_arguments)]
 fn bbox_tile_range(
-    bbox_lonlat: [f64; 4],
+    region: &Boxes,
     src_proj: &Proj,
     dst_proj: &Proj,
     gt: &GeoTransform,
@@ -3098,24 +3079,35 @@ fn bbox_tile_range(
     tile_w: usize,
     tile_h: usize,
 ) -> Result<Option<(usize, usize, usize, usize)>> {
-    let [xmin, ymin, xmax, ymax] = bbox_lonlat;
-    if !(xmin < xmax && ymin < ymax) {
-        return Err(A5CogError::Invalid(format!(
-            "bbox must satisfy xmin<xmax & ymin<ymax; got [{xmin}, {ymin}, {xmax}, {ymax}]"
-        )));
-    }
-    let Ok(fp) = footprint_lonlat(src_proj, dst_proj, gt, width, height) else {
-        return projected_tile_range(bbox_lonlat, src_proj, dst_proj, gt, width, height, tile_w, tile_h);
+    let Ok(fp) = footprint_boxes(src_proj, dst_proj, gt, width, height) else {
+        let mut out = None;
+        for b in &region.0 {
+            let r = projected_tile_range(*b, src_proj, dst_proj, gt, width, height, tile_w, tile_h)?;
+            out = union_range(out, r);
+        }
+        return Ok(out);
     };
-    let fp = pad_footprint(fp);
-    if xmin <= fp[0] && ymin <= fp[1] && xmax >= fp[2] && ymax >= fp[3] {
+    if region.covers(&fp) {
         return Ok(Some((0, 0, (width - 1) / tile_w, (height - 1) / tile_h)));
     }
-    let cut = [xmin.max(fp[0]), ymin.max(fp[1]), xmax.min(fp[2]), ymax.min(fp[3])];
-    if !(cut[0] < cut[2] && cut[1] < cut[3]) {
-        return Ok(None);
+    let mut out = None;
+    for cut in region.intersect(&fp).0 {
+        let r = projected_tile_range(cut, src_proj, dst_proj, gt, width, height, tile_w, tile_h)?;
+        out = union_range(out, r);
     }
-    projected_tile_range(cut, src_proj, dst_proj, gt, width, height, tile_w, tile_h)
+    Ok(out)
+}
+
+/// The smallest tile range holding both.
+fn union_range(
+    a: Option<(usize, usize, usize, usize)>,
+    b: Option<(usize, usize, usize, usize)>,
+) -> Option<(usize, usize, usize, usize)> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))),
+        (a, None) => a,
+        (None, b) => b,
+    }
 }
 
 /// Reproject a WGS84 lon/lat bbox into the raster CRS, take the axis-aligned
@@ -3159,9 +3151,14 @@ fn projected_tile_range(
     // forward direction: WGS84 (dst) -> raster CRS (src)
     proj_points(dst_proj, src_proj, &mut points[..])?;
     if src_proj.is_latlong() {
+        // a geographic raster may store longitudes 0 to 360, or run past
+        // 180: move each longitude by whole turns to its nearest copy to
+        // the raster's centre
+        let centre = gt.0[0] + 0.5 * width as f64 * gt.0[1];
         for p in &mut points {
             p.0 = p.0.to_degrees();
             p.1 = p.1.to_degrees();
+            p.0 += 360.0 * ((centre - p.0) / 360.0).round();
         }
     }
     let mut xmin = f64::INFINITY;
@@ -3298,11 +3295,11 @@ fn a5_read_raster_rs(
     }
     let t0 = Instant::now();
 
-    let bbox_opt = parse_bbox_arg(bbox)?;
+    let bbox_opt = parse_boxes_arg(bbox, "bbox")?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
-    let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
+    let tile_bbox_opt = parse_boxes_arg(tile_bbox, "tile_bbox")?;
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(ReadArgs {
@@ -3473,11 +3470,11 @@ fn a5_read_raster_flat_rs(
     }
     let t0 = Instant::now();
 
-    let bbox_opt = parse_bbox_arg(bbox)?;
+    let bbox_opt = parse_boxes_arg(bbox, "bbox")?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
-    let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
+    let tile_bbox_opt = parse_boxes_arg(tile_bbox, "tile_bbox")?;
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
     let out: Output = runtime.block_on(read_raster_async(ReadArgs {
@@ -3627,11 +3624,11 @@ fn a5_raster_to_parquet_rs(
     }
     let t0 = Instant::now();
 
-    let bbox_opt = parse_bbox_arg(bbox)?;
+    let bbox_opt = parse_boxes_arg(bbox, "bbox")?;
     let src_nodata_opt = parse_src_nodata_arg(src_nodata)?;
     let dequant = parse_dequant_arg(dequant_lut, dequant_min).map(Arc::new);
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
-    let tile_bbox_opt = opt_f64_arg::<4>(tile_bbox, "tile_bbox")?;
+    let tile_bbox_opt = parse_boxes_arg(tile_bbox, "tile_bbox")?;
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
 
 
@@ -3917,7 +3914,8 @@ fn a5_sample_to_parquet_rs(
 /// WGS 84 envelope of a raster footprint: the envelope of its densely
 /// sampled outline, widened to the full range of longitudes and to the pole
 /// when the raster contains a pole, whose latitude its outline never
-/// reaches.
+/// reaches. `xmin` is in [-180, 180) and `xmax` exceeds 180 for a raster
+/// across the antimeridian, as `a5R::a5_bbox()` reports such polygons.
 fn footprint_lonlat(
     src_proj: &Proj,
     dst_proj: &Proj,
@@ -3948,25 +3946,33 @@ fn footprint_lonlat(
             p.1 = p.1.to_degrees();
         }
     }
-    let mut xmin = f64::INFINITY;
+    // Longitudes are enveloped in two frames, [-180, 180) and [0, 360),
+    // and the narrower kept: an outline that crosses the antimeridian spans
+    // the whole first frame but a few degrees of the second, and one stored
+    // in longitudes 0 to 360 lands in either.
     let mut ymin = f64::INFINITY;
-    let mut xmax = f64::NEG_INFINITY;
     let mut ymax = f64::NEG_INFINITY;
+    let mut env = [[f64::INFINITY, f64::NEG_INFINITY]; 2];
     for &(x, y, _) in &points {
         if !x.is_finite() || !y.is_finite() {
             continue;
         }
-        if x < xmin { xmin = x; }
-        if x > xmax { xmax = x; }
-        if y < ymin { ymin = y; }
-        if y > ymax { ymax = y; }
+        let a = wrap_lon(x);
+        for (k, v) in [a, a.rem_euclid(360.0)].into_iter().enumerate() {
+            env[k][0] = env[k][0].min(v);
+            env[k][1] = env[k][1].max(v);
+        }
+        ymin = ymin.min(y);
+        ymax = ymax.max(y);
     }
-    if !xmin.is_finite() {
+    if !ymin.is_finite() {
         return Err(A5CogError::Invalid(
             "could not project raster footprint into WGS84".into(),
         ));
     }
-    let mut b = [xmin, ymin, xmax, ymax];
+    let [lo, hi] = if env[1][1] - env[1][0] < env[0][1] - env[0][0] { env[1] } else { env[0] };
+    let lo2 = wrap_lon(lo);
+    let mut b = [lo2, ymin, lo2 + (hi - lo), ymax];
     for lat in [90.0f64, -90.0] {
         if raster_contains_lonlat(src_proj, dst_proj, gt, w, h, 0.0, lat) {
             b[0] = -180.0;
@@ -3975,6 +3981,13 @@ fn footprint_lonlat(
         }
     }
     Ok(b)
+}
+
+/// The footprint (padded, [`pad_footprint`]) as boxes split at the
+/// antimeridian.
+fn footprint_boxes(src_proj: &Proj, dst_proj: &Proj, gt: &GeoTransform, w: usize, h: usize) -> Result<Boxes> {
+    let b = pad_footprint(footprint_lonlat(src_proj, dst_proj, gt, w, h)?);
+    Ok(Boxes::of_range(b[0], b[1], b[2], b[3]))
 }
 
 /// Whether a WGS 84 point falls inside the raster's grid.
@@ -4014,12 +4027,14 @@ fn raster_contains_lonlat(
 fn pad_footprint(b: [f64; 4]) -> [f64; 4] {
     let px = 0.01 * (b[2] - b[0]) + 0.01;
     let py = 0.01 * (b[3] - b[1]) + 0.01;
-    [
-        (b[0] - px).max(-180.0),
-        (b[1] - py).max(-90.0),
-        (b[2] + px).min(180.0),
-        (b[3] + py).min(90.0),
-    ]
+    // longitudes stay in the footprint's frame (`xmax` may pass 180); a
+    // range of 360 or more is the whole globe
+    let (x0, x1) = if b[2] - b[0] + 2.0 * px >= 360.0 {
+        (-180.0, 180.0)
+    } else {
+        (b[0] - px, b[2] + px)
+    };
+    [x0, (b[1] - py).max(-90.0), x1, (b[3] + py).min(90.0)]
 }
 
 /// Open `src` and read all IFDs.
@@ -4033,9 +4048,10 @@ async fn open_tiff(src: &str, store_opts: &StoreOpts) -> Result<TIFF> {
     Ok(TIFF::new(ifds, endianness))
 }
 
-/// The WGS84 lon/lat bbox of the raster at `src`, padded (as for tile
-/// selection) to hold every cell centre on the raster: centroid mode takes
-/// its candidate cells from it.
+/// The WGS84 lon/lat footprint of the raster at `src`, padded (as for tile
+/// selection) to hold every cell centre on the raster, as boxes flattened
+/// `xmin, ymin, xmax, ymax, ...`: two when it crosses the antimeridian.
+/// Centroid mode takes its candidate cells from them.
 /// @noRd
 /// @keywords internal
 #[extendr]
@@ -4058,11 +4074,11 @@ fn a5_raster_bbox_lonlat_rs(
         let src_proj = crate::geo::build_src_proj(geo)?;
         let dst_proj = Proj::from_proj_string("+proj=longlat +datum=WGS84 +no_defs")?;
         let gt = crate::geo::extract_geotransform(ifd)?;
-        let b = footprint_lonlat(
+        let b = footprint_boxes(
             &src_proj, &dst_proj, &gt,
             ifd.image_width() as usize, ifd.image_height() as usize,
         )?;
-        Ok(pad_footprint(b).to_vec())
+        Ok(b.0.into_iter().flatten().collect())
     })
 }
 

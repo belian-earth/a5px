@@ -330,7 +330,22 @@ impl GeoTransform {
     }
 }
 
+/// The affine pixel-to-CRS transform of an IFD, with GDAL's corner
+/// convention: (0, 0) is the outer corner of the first pixel. A raster
+/// tagged `PixelIsPoint` (GTRasterTypeGeoKey = 2) ties its coordinates to
+/// pixel centres, so, as GDAL does, the origin moves back half a pixel.
 pub(crate) fn extract_geotransform(ifd: &ImageFileDirectory) -> Result<GeoTransform> {
+    let mut gt = geotransform_as_tagged(ifd)?;
+    let pixel_is_point = ifd.geo_key_directory().and_then(|g| g.raster_type) == Some(2);
+    if pixel_is_point {
+        gt.0[0] -= 0.5 * (gt.0[1] + gt.0[2]);
+        gt.0[3] -= 0.5 * (gt.0[4] + gt.0[5]);
+    }
+    Ok(gt)
+}
+
+/// The transform the tags state, before the `PixelIsPoint` shift.
+fn geotransform_as_tagged(ifd: &ImageFileDirectory) -> Result<GeoTransform> {
     if let Some(m) = ifd.model_transformation() {
         if m.len() < 16 {
             return Err(A5CogError::Invalid(

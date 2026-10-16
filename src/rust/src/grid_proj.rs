@@ -319,6 +319,113 @@ fn bilinear(c: &[(f64, f64); 4], u: f64, v: f64) -> (f64, f64) {
     )
 }
 
+/// A longitude in [-180, 180).
+#[inline]
+pub(crate) fn wrap_lon(lon: f64) -> f64 {
+    if (-180.0..180.0).contains(&lon) {
+        lon
+    } else {
+        (lon + 180.0).rem_euclid(360.0) - 180.0
+    }
+}
+
+/// A WGS 84 region as one or more boxes within longitudes [-180, 180]:
+/// a region across the antimeridian is two. Points are tested with their
+/// longitude wrapped to [-180, 180), so a pixel of a raster stored in
+/// longitudes 0 to 360 meets the box its position lies in, and a pixel on
+/// the antimeridian itself belongs to boxes starting at -180.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Boxes(pub Vec<[f64; 4]>);
+
+impl Boxes {
+    /// Boxes from a flat `xmin, ymin, xmax, ymax, ...` vector, each within
+    /// the globe and non-empty.
+    pub(crate) fn from_flat(v: &[f64], what: &str) -> std::result::Result<Option<Self>, String> {
+        if v.is_empty() {
+            return Ok(None);
+        }
+        if v.len() % 4 != 0 || v.iter().any(|x| !x.is_finite()) {
+            return Err(format!("{what} must be finite numbers, four per box"));
+        }
+        let boxes: Vec<[f64; 4]> = v.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        for b in &boxes {
+            if !(b[0] < b[2] && b[1] < b[3]) {
+                return Err(format!(
+                    "{what} must satisfy xmin<xmax & ymin<ymax; got [{}, {}, {}, {}]",
+                    b[0], b[1], b[2], b[3]
+                ));
+            }
+        }
+        Ok(Some(Boxes(boxes)))
+    }
+
+    /// The boxes of the longitude range `a..b` (`b - a` up to 360, `a` and
+    /// `b` in any frame) and latitudes `ymin..ymax`, split at the
+    /// antimeridian.
+    pub(crate) fn of_range(a: f64, ymin: f64, b: f64, ymax: f64) -> Self {
+        let (ymin, ymax) = (ymin.max(-90.0), ymax.min(90.0));
+        if b - a >= 360.0 {
+            return Boxes(vec![[-180.0, ymin, 180.0, ymax]]);
+        }
+        let a2 = wrap_lon(a);
+        let b2 = a2 + (b - a);
+        if b2 <= 180.0 {
+            Boxes(vec![[a2, ymin, b2, ymax]])
+        } else {
+            Boxes(vec![[a2, ymin, 180.0, ymax], [-180.0, ymin, b2 - 360.0, ymax]])
+        }
+    }
+
+    /// Whether a point lies in any box ([`in_bbox`], longitude wrapped).
+    #[inline]
+    pub(crate) fn contains(&self, lon: f64, lat: f64) -> bool {
+        let lon = wrap_lon(lon);
+        self.0.iter().any(|b| in_bbox(lon, lat, b))
+    }
+
+    /// Membership of a point known to within `margin` degrees, as
+    /// [`bbox_classify`]: `None` when it needs the exact position, which
+    /// includes points within the margin of the antimeridian.
+    #[inline]
+    pub(crate) fn classify(&self, lon: f64, lat: f64, margin: f64) -> Option<bool> {
+        let lon = wrap_lon(lon);
+        if lon + margin >= 180.0 || lon - margin < -180.0 {
+            return None;
+        }
+        let mut undecided = false;
+        for b in &self.0 {
+            match bbox_classify(lon, lat, margin, b) {
+                Some(true) => return Some(true),
+                Some(false) => {}
+                None => undecided = true,
+            }
+        }
+        if undecided { None } else { Some(false) }
+    }
+
+    /// The pieces of these boxes inside `other`'s.
+    pub(crate) fn intersect(&self, other: &Boxes) -> Boxes {
+        let mut out = Vec::new();
+        for a in &self.0 {
+            for b in &other.0 {
+                let c = [a[0].max(b[0]), a[1].max(b[1]), a[2].min(b[2]), a[3].min(b[3])];
+                if c[0] < c[2] && c[1] < c[3] {
+                    out.push(c);
+                }
+            }
+        }
+        Boxes(out)
+    }
+
+    /// Whether these boxes together hold every box of `other`, each in one
+    /// box (enough for footprints, whose pieces never straddle two).
+    pub(crate) fn covers(&self, other: &Boxes) -> bool {
+        other.0.iter().all(|o| {
+            self.0.iter().any(|b| b[0] <= o[0] && b[1] <= o[1] && b[2] >= o[2] && b[3] >= o[3])
+        })
+    }
+}
+
 /// Whether a point lies in a WGS 84 bbox. The max edges are open, so
 /// bboxes that share an edge, as chunks of one read do, take each pixel
 /// once; at the globe's edge (180 E, 90 N) they are closed, so a bbox
@@ -409,5 +516,31 @@ mod tests {
             }
             assert!(n_approx > 0, "no window was interpolated");
         }
+    }
+}
+
+#[cfg(test)]
+mod boxes_tests {
+    use super::*;
+
+    #[test]
+    fn wraps_longitudes_and_splits_ranges() {
+        assert_eq!(wrap_lon(270.0), -90.0);
+        assert_eq!(wrap_lon(180.0), -180.0);
+        assert_eq!(wrap_lon(-190.0), 170.0);
+        assert_eq!(Boxes::of_range(170.0, 0.0, 190.0, 1.0).0, vec![[170.0, 0.0, 180.0, 1.0], [-180.0, 0.0, -170.0, 1.0]]);
+        assert_eq!(Boxes::of_range(0.0, -90.0, 360.0, 90.0).0, vec![[-180.0, -90.0, 180.0, 90.0]]);
+        assert_eq!(Boxes::of_range(190.0, 0.0, 200.0, 1.0).0, vec![[-170.0, 0.0, -160.0, 1.0]]);
+    }
+
+    #[test]
+    fn contains_a_pixel_stored_beyond_180() {
+        let west = Boxes(vec![[-180.0, -90.0, 0.0, 90.0]]);
+        assert!(west.contains(270.0, 10.0));
+        assert!(!west.contains(90.0, 10.0));
+        let seam = Boxes::of_range(179.0, -1.0, 181.0, 1.0);
+        assert!(seam.contains(179.5, 0.0) && seam.contains(180.5, 0.0) && seam.contains(-179.5, 0.0));
+        assert_eq!(seam.classify(179.99, 0.0, 0.05), None);
+        assert_eq!(seam.classify(179.5, 0.0, 0.05), Some(true));
     }
 }

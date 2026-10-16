@@ -111,9 +111,10 @@ a5_sample_at_cells_flat_rs <- function(src, src_labels, separate, composite, cel
 #' @keywords internal
 a5_sample_to_parquet_rs <- function(src, src_labels, separate, composite, dest, resolution, cells, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values) .Call(wrap__a5_sample_to_parquet_rs, src, src_labels, separate, composite, dest, resolution, cells, bands_idx, bands_names, src_nodata, as_vector, value_type, compression, cpu_workers, io_concurrency, dequant_lut, dequant_min, scoff, interp, store_keys, store_values)
 
-#' The WGS84 lon/lat bbox of the raster at `src`, padded (as for tile
-#' selection) to hold every cell centre on the raster: centroid mode takes
-#' its candidate cells from it.
+#' The WGS84 lon/lat footprint of the raster at `src`, padded (as for tile
+#' selection) to hold every cell centre on the raster, as boxes flattened
+#' `xmin, ymin, xmax, ymax, ...`: two when it crosses the antimeridian.
+#' Centroid mode takes its candidate cells from them.
 #' @noRd
 #' @keywords internal
 a5_raster_bbox_lonlat_rs <- function(src, store_keys, store_values) .Call(wrap__a5_raster_bbox_lonlat_rs, src, store_keys, store_values)

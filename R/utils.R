@@ -107,7 +107,8 @@ check_sources <- function(src, separate, stats, composite = NULL,
        composite = composite)
 }
 
-#' Validate a user-supplied bbox.
+#' Validate a user-supplied bbox into flat boxes for Rust: one box, or two
+#' when `xmin > xmax` asks for a box across the antimeridian.
 #' @noRd
 check_bbox <- function(bbox, call = rlang::caller_env()) {
   if (is.null(bbox)) {
@@ -121,21 +122,56 @@ check_bbox <- function(bbox, call = rlang::caller_env()) {
       class = c("a5px_error_geometry", "a5px_error_input", "a5px_error")
     )
   }
-  if (v[1] >= v[3] || v[2] >= v[4]) {
+  if (v[1] < -180 || v[1] > 180 || v[3] < -180 || v[3] > 180 || v[2] < -90 || v[4] > 90) {
     cli::cli_abort(
-      "{.arg bbox} must satisfy {.code xmin < xmax} and {.code ymin < ymax}.",
+      c("{.arg bbox} must lie within longitudes -180 to 180 and latitudes -90 to 90.",
+        "i" = "For a box across the antimeridian give {.code xmin > xmax}, such as {.code c(179, -1, -179, 1)}."),
       call = call,
       class = c("a5px_error_geometry", "a5px_error_input", "a5px_error")
     )
   }
-  if (v[1] < -180 || v[3] > 180 || v[2] < -90 || v[4] > 90) {
+  if (v[1] == v[3] || v[2] >= v[4]) {
     cli::cli_abort(
-      "{.arg bbox} must lie within longitudes -180 to 180 and latitudes -90 to 90.",
+      "{.arg bbox} must satisfy {.code xmin != xmax} and {.code ymin < ymax}.",
       call = call,
       class = c("a5px_error_geometry", "a5px_error_input", "a5px_error")
     )
+  }
+  if (v[1] > v[3]) {
+    # across the antimeridian: the part east of xmin and the part west of xmax
+    return(c(v[1], v[2], 180, v[4], -180, v[2], v[3], v[4]))
   }
   v
+}
+
+#' Flat `xmin, ymin, xmax, ymax, ...` boxes as a list of length-4 vectors.
+#' @noRd
+split_boxes <- function(v) {
+  if (!length(v)) return(list())
+  lapply(seq(1L, length(v), by = 4L), function(i) v[i:(i + 3L)])
+}
+
+#' The pieces of boxes `a` inside boxes `b` (lists of length-4 vectors).
+#' @noRd
+intersect_boxes <- function(a, b) {
+  out <- list()
+  for (x in a) for (y in b) {
+    z <- c(max(x[1], y[1]), max(x[2], y[2]), min(x[3], y[3]), min(x[4], y[4]))
+    if (z[1] < z[3] && z[2] < z[4]) out[[length(out) + 1L]] <- z
+  }
+  out
+}
+
+#' Boxes for the longitude range `xmin..xmax` (possibly past 180, as
+#' `a5R::a5_bbox()` reports a polygon across the antimeridian) and
+#' latitudes `ymin..ymax`, split at the antimeridian.
+#' @noRd
+range_boxes <- function(xmin, ymin, xmax, ymax) {
+  if (xmax - xmin >= 360) return(list(c(-180, ymin, 180, ymax)))
+  a <- ((xmin + 180) %% 360) - 180
+  b <- a + (xmax - xmin)
+  if (b <= 180) list(c(a, ymin, b, ymax))
+  else list(c(a, ymin, 180, ymax), c(-180, ymin, b - 360, ymax))
 }
 
 #' Resolve `bbox_align` to the logical Rust flag. `"block"` needs a bbox to

@@ -34,6 +34,29 @@
   aggregated mean matches a direct read at the coarse resolution. Input
   cells must share one resolution.
 
+* The antimeridian is handled throughout:
+  - a raster stored in longitudes 0 to 360 meets bboxes west of 0, in
+    forward and centroid reads (a bbox of the western hemisphere read
+    none of a global 0 to 360 raster);
+  - a raster across 180, geographic or projected (UTM 60), keeps a
+    footprint a few degrees wide rather than the whole latitude band, so
+    tile selection and centroid candidates stay on it (centroid reads of
+    a 40 km UTM 60S raster ran out of memory);
+  - bbox chunks either side of 180 partition a raster across it;
+  - `bbox` accepts `xmin > xmax` for a box across the antimeridian, such
+    as `c(179, -1, -179, 1)`;
+  - an `aoi` across the antimeridian reads both sides, where it read
+    half.
+  `a5_raster_info()$bbox` reports a raster across 180 with `xmax` past
+  180, as `a5R::a5_bbox()` does.
+
+* A raster tagged `PixelIsPoint` (`AREA_OR_POINT=Point`) is placed half a
+  pixel up and left of its tie point, as GDAL places it.
+
+* Centroid mode with an `aoi` larger than the raster enumerates only the
+  AOI cells on the raster, intersecting the coverings before expanding
+  them, where it expanded the whole AOI.
+
 * Cell ids cross between a5px and a5R through a5R's C API (a5R >=
   0.9.9.9003) instead of a5px's copy of a5R's internal `a5_cell` layout,
   which a change in a5R would have broken without an error. When a5px
