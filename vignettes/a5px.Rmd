@@ -8,8 +8,15 @@ vignette: >
 ---
 
 ```{r, include = FALSE}
-knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+knitr::opts_chunk$set(
+  collapse = TRUE, comment = "#>",
+  fig.width = 7, fig.height = 4, dpi = 96, out.width = "100%",
+  dev.args = list(bg = "white")
+)
 has_arrow <- requireNamespace("arrow", quietly = TRUE)
+# figures need a5view (from GitHub) and ggplot2
+has_plots <- requireNamespace("a5view", quietly = TRUE) &&
+  requireNamespace("ggplot2", quietly = TRUE)
 ```
 
 a5px turns raster pixels into statistics over [A5](https://a5geo.org/)
@@ -41,6 +48,20 @@ row is a cell, keyed by an `a5R::a5_cell`, with one column per band:
 ```{r read}
 cells <- a5_read_raster(cog, resolution = 13L)
 cells
+```
+
+[a5view](https://github.com/belian-earth/a5view) draws the cells as a
+ggplot2 layer, `geom_a5()`, which takes the cell column as its `cell`
+aesthetic:
+
+```{r read-map, eval = has_plots, fig.height = 4.5}
+library(ggplot2)
+library(a5view)
+
+ggplot(cells, aes(cell = cell, fill = band_01)) +
+  geom_a5(colour = "white", linewidth = 0.05) +
+  scale_fill_viridis_c() +
+  theme_void()
 ```
 
 The resolution sets the cell size. `a5R::a5_cell_area()` gives the area
@@ -165,6 +186,23 @@ aoi <- wk::rct(13.80, 45.18, 13.86, 45.24, crs = wk::wk_crs_longlat())
 a5_read_raster(cog, resolution = 13L, aoi = aoi, containment = "overlapping")
 ```
 
+The two rules side by side, with the AOI outlined. `"overlapping"` adds
+the cells the edge cuts, and each keeps its pixels outside the polygon:
+
+```{r aoi-map, eval = has_plots}
+by_rule <- lapply(c("centre", "overlapping"), function(rule) {
+  out <- a5_read_raster(cog, resolution = 13L, aoi = aoi, containment = rule)
+  out$containment <- rule
+  out
+})
+ggplot(vctrs::vec_rbind(!!!by_rule)) +
+  geom_a5(aes(cell = cell, fill = band_01), colour = "white", linewidth = 0.1) +
+  geom_sf(data = sf::st_as_sf(aoi), fill = NA, colour = "black", linewidth = 0.6) +
+  facet_wrap(~containment) +
+  scale_fill_viridis_c() +
+  theme_void()
+```
+
 In centroid mode the AOI's cells are sampled directly, so the polygon is
 covered without gaps.
 
@@ -251,7 +289,24 @@ centre, and means are weighted by each cell's pixel count:
 
 ```{r aggregate}
 fine <- a5_read_raster(cog, resolution = 14L, stat = c("mean", "npix"))
-a5_aggregate(fine, resolution = 11L)
+coarse <- a5_aggregate(fine, resolution = 11L)
+coarse
+```
+
+Coarse cells along the raster's edge extend past it, and their means
+cover only the part with pixels:
+
+```{r aggregate-map, eval = has_plots}
+both <- vctrs::vec_rbind(
+  tibble::tibble(cell = fine$cell, band_01 = fine$band_01, res = "resolution 14"),
+  tibble::tibble(cell = coarse$cell, band_01 = coarse$band_01, res = "resolution 11")
+)
+both$res <- factor(both$res, levels = c("resolution 14", "resolution 11"))
+ggplot(both, aes(cell = cell, fill = band_01)) +
+  geom_a5() +
+  facet_wrap(~res) +
+  scale_fill_viridis_c() +
+  theme_void()
 ```
 
 ## Remote sources

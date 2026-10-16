@@ -34,6 +34,7 @@ Suggests:
     a5view,
     arrow,
     exactextractr,
+    ggplot2,
     knitr,
     parallel,
     rmarkdown,
