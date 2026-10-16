@@ -34,7 +34,9 @@ Suggests:
     a5view,
     arrow,
     exactextractr,
+    knitr,
     parallel,
+    rmarkdown,
     sf,
     terra,
     testthat (>= 3.0.0),
@@ -43,6 +45,7 @@ Remotes:
     belian-earth/a5R,
     belian-earth/a5view,
     r-spatial/geoarrowWidget
+VignetteBuilder: knitr
 Config/testthat/edition: 3
 Config/rextendr/version: 0.5.0
 SystemRequirements: Cargo (Rust's package manager), rustc >= 1.89.0

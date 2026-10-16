@@ -1,0 +1,326 @@
+---
+title: "Getting started with a5px"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with a5px}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>")
+has_arrow <- requireNamespace("arrow", quietly = TRUE)
+```
+
+a5px turns raster pixels into statistics over [A5](https://a5geo.org/)
+cells, the equal-area pentagons of a discrete global grid. It reads
+GeoTIFF and Cloud-Optimised GeoTIFF (COG) files from disk or a cloud
+store, assigns each pixel to a cell, and returns one row per cell. This
+article walks through the readers and their options. The examples run
+on small rasters shipped with the package; those that need the network
+are shown but not run.
+
+```{r setup}
+library(a5px)
+```
+
+## Reading a raster
+
+`a5_raster_info()` describes a file without reading its pixels: size,
+data type, block grid, overviews, CRS and its envelope in WGS 84.
+
+```{r info}
+cog <- system.file("extdata", "overview_cog.tif", package = "a5px")
+info <- a5_raster_info(cog)
+info[c("width", "height", "dtype", "crs", "block", "bbox")]
+```
+
+`a5_read_raster()` aggregates it into cells at one A5 resolution. Each
+row is a cell, keyed by an `a5R::a5_cell`, with one column per band:
+
+```{r read}
+cells <- a5_read_raster(cog, resolution = 13L)
+cells
+```
+
+The resolution sets the cell size. `a5R::a5_cell_area()` gives the area
+in square metres: a resolution-13 cell, about 0.5 km^2, holds some 560
+of this raster's 30 m pixels.
+
+```{r area}
+a5R::a5_cell_area(c(10L, 13L, 16L, 18L))
+```
+
+Resolutions run from 0 to 29. Resolution 30 is refused for now: the a5
+crate returns resolution-29 cells for some points at 30.
+
+### Three outputs
+
+The three readers share one engine and differ in what they return:
+
+- `a5_read_raster()` returns a tibble, one numeric column per band and
+  statistic.
+- `a5_read_raster_arrow()` returns an Arrow table, with the same columns
+  or, with `as_vector = TRUE`, one list column per statistic holding
+  every band.
+- `a5_raster_to_parquet()` writes a Parquet file straight from Rust,
+  which avoids holding the result in R.
+
+```{r outputs, eval = has_arrow}
+tab <- a5_read_raster_arrow(cog, resolution = 13L)
+tab
+
+pq <- tempfile(fileext = ".parquet")
+a5_raster_to_parquet(cog, pq, resolution = 13L, compression = "zstd")
+arrow::read_parquet(pq, as_data_frame = FALSE)
+```
+
+`a5px_write_parquet()` writes a tibble or Arrow table from the first two.
+The Arrow and Parquet outputs record the read's provenance in their
+metadata: the A5 index version, the a5 crate and a5px versions, the
+sampling mode, the decode, whether overviews were allowed and any
+nodata override.
+
+## Statistics
+
+`stat` takes one or more of `"mean"`, `"sum"`, `"count"`, `"min"`,
+`"max"`, `"var"`, `"sd"`, `"majority"` and `"fractions"`, all computed
+in one pass. `"npix"` adds the number of pixels in each cell with any
+valid band.
+
+```{r stats}
+a5_read_raster(cog, resolution = 13L, stat = c("mean", "sd", "count", "npix"))
+```
+
+`sum` and `count` let partial results be merged without re-reading the
+raster, as in [chunked reads](#chunked-reads).
+
+For integer class labels such as land cover, `"majority"` gives each
+cell's most common class and `"fractions"` the share of each class, as a
+list column:
+
+```{r categorical, eval = FALSE}
+a5_read_raster(landcover, resolution = 12L, stat = c("majority", "fractions"))
+```
+
+Pixels equal to the file's nodata value, and NaN pixels, are missing:
+they enter no statistic. `src_nodata` overrides the file's value.
+
+## Sampling modes
+
+`mode` controls how pixels map to cells.
+
+- `"forward"` (the default) assigns each pixel to the cell that contains
+  its centre. It suits cells several pixels across.
+- `"overlay"` splits each pixel between the cells it overlaps, in
+  proportion to area, estimated by supersampling the pixel
+  (`subsamples`). Means become area-weighted and `sum` conserves totals,
+  such as population counts. Only pixels on a cell boundary pay for the
+  supersampling.
+- `"centroid"` samples the raster at each cell's centre, for cells
+  smaller than pixels. `interp` picks the kernel: `"nearest"` (the
+  default), `"bilinear"`, `"bicubic"` or `"lanczos"`.
+
+```{r modes}
+a5_read_raster(cog, resolution = 11L, mode = "overlay", stat = c("mean", "sum"))
+a5_read_raster(cog, resolution = 18L, mode = "centroid", interp = "bilinear",
+               bbox = c(13.80, 45.20, 13.81, 45.21))
+```
+
+Under `"overlay"`, `majority` and `fractions` are area-weighted too.
+
+### Overviews
+
+With `stat = "mean"` in forward or overlay mode, a5px reads the coarsest
+COG overview that still has several pixels per cell, which cuts the
+download for coarse resolutions. Other statistics, such as `sum`,
+`count` or `max`, always read full-resolution pixels, since an overview
+changes them. `use_overviews = FALSE` turns this off.
+
+## Subsets
+
+### Bounding box
+
+`bbox` reads only the pixels inside a WGS 84 box, `c(xmin, ymin, xmax,
+ymax)`. A box with `xmin > xmax` crosses the antimeridian.
+
+```{r bbox}
+b <- info$bbox
+west <- c(b[1], b[2], (b[1] + b[3]) / 2, b[4])
+a5_read_raster(cog, resolution = 13L, bbox = west)
+```
+
+### Areas of interest
+
+`aoi` keeps the A5 cells of a polygon, selected as by
+`a5R::a5_polygon_to_cells()`: `containment = "centre"` keeps the cells
+whose centre is inside, `"overlapping"` every cell the polygon touches.
+Selection is by cell, so an included cell gets all its valid pixels,
+including any outside the polygon. `aoi` takes what
+`a5R::a5_polygon_to_cells()` does: `sf` or `sfc` objects, `wk`
+geometries, WKT, a terra `SpatVector` or a lon/lat matrix.
+
+```{r aoi}
+aoi <- wk::rct(13.80, 45.18, 13.86, 45.24, crs = wk::wk_crs_longlat())
+a5_read_raster(cog, resolution = 13L, aoi = aoi, containment = "overlapping")
+```
+
+In centroid mode the AOI's cells are sampled directly, so the polygon is
+covered without gaps.
+
+### Chunked reads
+
+A read holds every cell it touches in memory until it finishes, so very
+large reads are best split by `bbox`. `bbox_align = "block"` takes the
+COG blocks whose origin lies in each box, so a set of boxes that tiles
+the raster fetches every block once, and `sum` and `count` add up
+exactly across chunks:
+
+```{r chunks}
+east <- c((b[1] + b[3]) / 2, b[2], b[3], b[4])
+parts <- lapply(list(west, east), function(bb) {
+  a5_read_raster(cog, resolution = 13L, bbox = bb, bbox_align = "block",
+                 stat = c("sum", "count"), use_overviews = FALSE)
+})
+whole <- a5_read_raster(cog, resolution = 13L, stat = c("sum", "count"),
+                        use_overviews = FALSE)
+c(chunked = sum(sapply(parts, function(p) sum(p[[3]]))), whole = sum(whole[[3]]))
+```
+
+Remote chunks reuse the header and blocks they share through a session
+cache (see [Remote sources](#remote-sources)).
+
+## Several files
+
+`src` takes several files, read in one pass. How they combine depends
+on what they hold:
+
+```{r several, eval = FALSE}
+# bands stored one file each: one column per file, named by names(src)
+a5_read_raster(c(red = red_url, nir = nir_url), 14L, separate = TRUE)
+
+# adjacent tiles, or repeat captures, of one product: pixels pooled
+a5_read_raster(c(tile_a, tile_b), 14L)
+
+# a statistic per capture, then reduced across captures in each cell
+a5_read_raster(captures, 14L, composite = "median")
+a5_read_raster(captures, 14L, composite = "count") # captures per cell
+```
+
+Pooled files must have the same bands and pixel size. Every valid pixel
+enters its cell once, so cells on a seam between tiles combine exactly,
+and where files overlap every capture counts. `composite` computes
+`stat` for each file and reduces across files, weighting each by its
+valid pixels in the cell. Single-band files without band descriptions
+look alike to the pooling check, so set `separate = TRUE` for files that
+hold different bands.
+
+## Decoding stored values
+
+`scoff = TRUE` applies the scale and offset each band declares, turning
+stored integers into physical units:
+
+```{r scoff}
+sc <- system.file("extdata", "scoff_int16.tif", package = "a5px")
+a5_raster_info(sc)[c("scale", "offset")]
+a5_read_raster(sc, resolution = 12L, scoff = TRUE)
+```
+
+A linear decode gives the same result before or after averaging. A
+quantized code does not: the mean of codes is not the code of the mean.
+`dequant` decodes each pixel before it enters the statistics. It takes
+any vectorised R function of the integer codes; a5px evaluates it once
+per possible code and passes the table to Rust, so the source must be an
+integer type of 16 bits or fewer. `dequant_aef` decodes Alpha Earth
+Foundations embeddings, `sign(x) * (x / 127.5)^2`:
+
+```{r dequant}
+aef <- system.file("extdata", "aef_int8.tif", package = "a5px")
+a5_read_raster(aef, resolution = 13L, dequant = dequant_aef)
+```
+
+A function that returns `NA` for some codes marks those pixels missing.
+Setting `dequant` also turns `use_overviews` off, since overviews built
+by averaging codes decode wrongly.
+
+## Coarser resolutions
+
+`a5_aggregate()` summarises a result at a coarser resolution without
+re-reading the raster. Each cell goes to the coarse cell containing its
+centre, and means are weighted by each cell's pixel count:
+
+```{r aggregate}
+fine <- a5_read_raster(cog, resolution = 14L, stat = c("mean", "npix"))
+a5_aggregate(fine, resolution = 11L)
+```
+
+## Remote sources
+
+`src` may be an `s3://`, `gs://`, `az://` or `http(s)://` URL, or a GDAL
+`/vsis3/`, `/vsigs/`, `/vsiaz/` or `/vsicurl/` path. Reads fetch byte
+ranges and never download the whole file. Cloud clients are configured
+from the environment first, every `AWS_*`, `GOOGLE_*` and `AZURE_*`
+variable that `object_store` understands plus GDAL's
+`AWS_NO_SIGN_REQUEST`, and from `store_opts` second, so an explicit
+option wins.
+
+```{r remote, eval = FALSE}
+url <- "s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/2020/22S/tile.tiff"
+
+# a public bucket outside us-east-1
+a5_read_raster(url, 14L, store_opts = c(aws_region = "us-west-2",
+                                        aws_skip_signature = "true"))
+
+# check region, endpoint and signing before a long read
+a5px_store_config(url, store_opts = c(aws_region = "us-west-2"))
+```
+
+An S3 source with no credentials configured is read unsigned where no
+instance metadata service answers, which reads public data. The shared
+credentials file and `AWS_PROFILE` are not read. See `?a5px` for each
+provider's settings.
+
+Remote reads keep the byte ranges they fetch in a session cache, so a
+read split into chunks, or repeated, fetches each block once.
+`a5px_set_cache()` sets its budget (512 MiB, or an eighth of a container
+memory limit, by default), `a5px_cache_info()` reports its size and the
+requests made, and `a5px_clear_cache()` empties it.
+
+## Performance
+
+- **Workers and requests.** `cpu_workers` sets the threads that decode
+  and index pixels; it defaults to the CPUs available to R, which
+  respects container limits. `io_concurrency` sets the remote requests a
+  read keeps in flight, 32 by default. `a5px_set_concurrency()` changes
+  both for the session.
+- **Bands.** For COGs that store each band separately
+  (`INTERLEAVE=BAND`), as embedding rasters often do, `bands` limits the
+  download to the bands selected: reading 8 of 64 bands of a 2.8 GB AEF
+  tile takes 24 s instead of 62 s. `bands` takes 1-based indices or band
+  names.
+- **Memory.** The cells of a read are held until it finishes: the mean
+  of 64 bands over a 2048 x 2048 AEF window, 848,000 cells at resolution
+  18, peaks at about 1.1 GB. For larger areas, chunk by `bbox`.
+  `value_type = "float32"` halves the size of Arrow and Parquet output.
+- **Profiling.** `Sys.setenv(A5PX_PROFILE = "1")` prints the time spent
+  in each stage of a read.
+
+```{r embeddings, eval = FALSE}
+a5_raster_to_parquet(
+  url, "embeddings.parquet",
+  resolution = 14L, bands = 1:8, dequant = dequant_aef,
+  value_type = "float32", compression = "zstd"
+)
+```
+
+## Supported rasters
+
+- **Formats.** Tiled GeoTIFF and COG with ZSTD, Deflate, LZW, JPEG,
+  PackBits or no compression; internal mask bands are applied.
+  Strip-based GeoTIFFs fail with a clear error.
+- **CRSs.** EPSG codes, WKT in a citation field, or the GeoKey
+  parameters, which covers custom projections written by GDAL without an
+  EPSG code, such as a centred Lambert azimuthal equal-area. Rasters
+  crossing the antimeridian, and pixel-is-point rasters, are handled.
+- **NoData.** The dataset-wide GDAL nodata value, and NaN. GeoTIFF has no
+  per-band nodata.

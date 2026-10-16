@@ -175,6 +175,7 @@ test_that("rows come out in ascending cell order whatever the worker count", {
   expect_equal(a, b)
   expect_true(sorted(a5_read_raster(f, 15L, mode = "centroid")))
   expect_true(sorted(a5_read_raster(c(f, f), 13L, composite = "mean")))
+  expect_true(sorted(a5_aggregate(a, resolution = 10L)))
   skip_if_not_installed("arrow")
   tab <- as.data.frame(a5_read_raster_arrow(f, 13L, cpu_workers = 8L))
   expect_false(is.unsorted(tab$cell))

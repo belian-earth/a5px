@@ -22,3 +22,6 @@ dev/
 benchmarks/ab-out/
 tests/testthat/_problems/
 tests/testthat/testthat-problems.rds
+/doc/
+/Meta/
+inst/doc

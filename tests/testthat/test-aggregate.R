@@ -188,11 +188,8 @@ test_that("default selection skips non-aggregable cols", {
 
 test_that("on a real reader output the result resolves cleanly", {
   testthat::skip_if_not_installed("arrow")
-  d <- normalizePath(file.path(testthat::test_path(), "..", "..", "test-tifs"),
-                     mustWork = FALSE)
-  if (!dir.exists(d)) testthat::skip("test-tifs/ not present")
-  path <- file.path(d, "exe_cog.tif")
-  skip_if_not(file.exists(path), "exe_cog.tif missing")
+  skip_no_tifs()
+  path <- file.path(tif_dir(), "exe_cog.tif")
 
   fine <- a5_read_raster(path, resolution = 14L, bands = 1:3)
   coarse <- a5_aggregate(fine, resolution = 11L)
