@@ -74,7 +74,7 @@ approximate for area, because fine cells straddle coarse-cell
 boundaries. If you need conservative aggregation (counts that must sum
 exactly), use a higher input resolution so boundary error is small
 relative to cell area. Locating centres runs in parallel under
-[`a5R::a5_set_threads()`](https://belian-earth.github.io/a5R/reference/a5_threads.html).
+[`a5R::a5_set_threads()`](https://belian-earth.github.io/a5R/reference/a5_set_threads.html).
 
 A cell's mean summarises its pixels, so `"mean"` is weighted by each
 row's pixel count: the `npix` column when `x` has one (read with

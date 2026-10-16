@@ -201,8 +201,8 @@
   HTTPS read in 25 chunks took about 15 s, as one read does, against
   about 400 s before.
   [`a5px_set_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
-  sets the budget (512 MiB by default, at most an eighth of a cgroup
-  memory limit, or `A5PX_CACHE_MB`; 0 disables it),
+  sets the budget (by default an eighth of a cgroup memory limit, or 512
+  MiB without one, or `A5PX_CACHE_MB`; 0 disables it),
   [`a5px_cache_info()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
   reports it and
   [`a5px_clear_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)

@@ -520,8 +520,8 @@ for each provider’s settings.
 Remote reads keep the byte ranges they fetch in a session cache, so a
 read split into chunks, or repeated, fetches each block once.
 [`a5px_set_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
-sets its budget (512 MiB, or an eighth of a container memory limit, by
-default),
+sets its budget (an eighth of a container memory limit, or 512 MiB
+without one, by default),
 [`a5px_cache_info()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)
 reports its size and the requests made, and
 [`a5px_clear_cache()`](https://belian-earth.github.io/a5px/reference/a5px_set_cache.md)

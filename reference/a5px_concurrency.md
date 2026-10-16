@@ -49,9 +49,10 @@ CPU quotas (a job limited to 4 CPUs on a 20-core host gets 4); for
 
 `a5px_concurrency()` works like
 [`options()`](https://rdrr.io/r/base/options.html) and
-`a5R::a5_threads()`: called with no settings it returns them, and called
-with settings it changes them and returns the previous ones, which
-restore them when passed back or when used with
+[`a5R::a5_threads()`](https://belian-earth.github.io/a5R/reference/a5_threads.html):
+called with no settings it returns them, and called with settings it
+changes them and returns the previous ones, which restore them when
+passed back or when used with
 [`with()`](https://rdrr.io/r/base/with.html).
 
 ## Examples

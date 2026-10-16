@@ -540,10 +540,10 @@ credentials file and <code>AWS_PROFILE</code> are not read. See
 <code><a href="../reference/a5px-package.html">?a5px</a></code> for each provider’s settings.</p>
 <p>Remote reads keep the byte ranges they fetch in a session cache, so a
 read split into chunks, or repeated, fetches each block once.
-<code><a href="../reference/a5px_set_cache.html">a5px_set_cache()</a></code> sets its budget (512 MiB, or an eighth of
-a container memory limit, by default), <code><a href="../reference/a5px_set_cache.html">a5px_cache_info()</a></code>
-reports its size and the requests made, and
-<code><a href="../reference/a5px_set_cache.html">a5px_clear_cache()</a></code> empties it.</p>
+<code><a href="../reference/a5px_set_cache.html">a5px_set_cache()</a></code> sets its budget (an eighth of a container
+memory limit, or 512 MiB without one, by default),
+<code><a href="../reference/a5px_set_cache.html">a5px_cache_info()</a></code> reports its size and the requests made,
+and <code><a href="../reference/a5px_set_cache.html">a5px_clear_cache()</a></code> empties it.</p>
 </div>
 <div class="section level2">
 <h2 id="performance">Performance<a class="anchor" aria-label="anchor" href="#performance"></a>

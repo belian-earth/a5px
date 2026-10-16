@@ -111,7 +111,7 @@ reports the block grid and envelope to build the chunks from.
 sets and reports the session defaults for the worker pool
 (`cpu_workers`) and the number of remote requests in flight
 (`io_concurrency`). They are independent of
-[`a5R::a5_set_threads()`](https://belian-earth.github.io/a5R/reference/a5_threads.html).
+[`a5R::a5_set_threads()`](https://belian-earth.github.io/a5R/reference/a5_set_threads.html).
 Remote reads are usually limited by latency, so a higher
 `io_concurrency` often helps. Remote reads keep the byte ranges they
 fetch in a session cache, so reads split into `bbox` chunks fetch each

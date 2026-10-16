@@ -170,7 +170,7 @@ and envelope to build the chunks from.</p>
 <p><code><a href="a5px_concurrency.html">a5px_concurrency()</a></code> sets and reports the session
 defaults for the worker pool (<code>cpu_workers</code>) and the number of remote
 requests in flight (<code>io_concurrency</code>). They are independent of
-<code><a href="https://belian-earth.github.io/a5R/reference/a5_threads.html" class="external-link">a5R::a5_set_threads()</a></code>. Remote reads are usually limited by latency,
+<code><a href="https://belian-earth.github.io/a5R/reference/a5_set_threads.html" class="external-link">a5R::a5_set_threads()</a></code>. Remote reads are usually limited by latency,
 so a higher <code>io_concurrency</code> often helps. Remote reads keep the byte
 ranges they fetch in a session cache, so reads split into <code>bbox</code> chunks
 fetch each block once; <code><a href="a5px_set_cache.html">a5px_set_cache()</a></code> sets its budget.</p>

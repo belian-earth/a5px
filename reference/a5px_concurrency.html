@@ -88,7 +88,7 @@ CPU quotas (a job limited to 4 CPUs on a 20-core host gets 4); for
 <code>a5px_concurrency()</code>, <code>options(a5px.cpu_workers = ...)</code> and
 <code>options(a5px.io_concurrency = ...)</code>, or the environment variables
 <code>A5PX_CPU_WORKERS</code> and <code>A5PX_IO_CONCURRENCY</code>.</p>
-<p><code>a5px_concurrency()</code> works like <code><a href="https://rdrr.io/r/base/options.html" class="external-link">options()</a></code> and <code>a5R::a5_threads()</code>:
+<p><code>a5px_concurrency()</code> works like <code><a href="https://rdrr.io/r/base/options.html" class="external-link">options()</a></code> and <code><a href="https://belian-earth.github.io/a5R/reference/a5_threads.html" class="external-link">a5R::a5_threads()</a></code>:
 called with no settings it returns them, and called with settings it
 changes them and returns the previous ones, which restore them when
 passed back or when used with <code><a href="https://rdrr.io/r/base/with.html" class="external-link">with()</a></code>.</p>
