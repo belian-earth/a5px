@@ -109,7 +109,7 @@ and envelope to build the chunks from.
 
 \section{Configuration}{
 
-\code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}} and \code{\link[=a5px_get_concurrency]{a5px_get_concurrency()}} set the session
+\code{\link[=a5px_concurrency]{a5px_concurrency()}} sets and reports the session
 defaults for the worker pool (\code{cpu_workers}) and the number of remote
 requests in flight (\code{io_concurrency}). They are independent of
 \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}. Remote reads are usually limited by latency,
@@ -135,7 +135,7 @@ one column per band and stat. \code{var} and \code{sd} use the sample formula
 GDAL \code{DESCRIPTION} band tag. For band-interleaved files only the
 selected bands are fetched.
 \item \code{scoff}, \code{dequant}: decode stored values per pixel before aggregation.
-\item \code{cpu_workers}, \code{io_concurrency}: see \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.
+\item \code{cpu_workers}, \code{io_concurrency}: see \code{\link[=a5px_concurrency]{a5px_concurrency()}}.
 }
 }
 

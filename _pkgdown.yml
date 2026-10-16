@@ -49,7 +49,7 @@ reference:
 - title: Configuration
   desc: Worker and fetch concurrency, and the session cache of remote reads.
   contents:
-  - a5px_set_concurrency
+  - a5px_concurrency
   - a5px_set_cache
 - title: Package overview
   desc: Common arguments, remote sources and supported formats.

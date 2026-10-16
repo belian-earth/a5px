@@ -162,7 +162,7 @@ respects container and cgroup CPU limits.}
 across all sources; adjacent blocks of a band share a request. For
 local files, the blocks read at once. \code{NULL} (default) resolves from
 \code{getOption("a5px.io_concurrency")}, env \code{A5PX_IO_CONCURRENCY}, then
-32. See \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}}.}
+32. See \code{\link[=a5px_concurrency]{a5px_concurrency()}}.}
 
 \item{scoff}{Logical. If \code{TRUE}, apply the scale and offset the file
 declares for each band (\code{value * scale + offset}, from the GDAL band

@@ -20,6 +20,13 @@
   from a worker are now reported instead of "consumer pool dropped
   channel".
 
+* **Breaking:** `a5px_set_concurrency()` and `a5px_get_concurrency()`
+  become one function, `a5px_concurrency()`, which works like `options()`
+  and a5R's `a5_threads()`: with no arguments it returns the settings,
+  with arguments it sets them and returns the previous ones, which
+  `a5px_concurrency(old)` or `with(a5px_concurrency(cpu_workers = 1),
+  expr)` restore.
+
 * **Breaking:** `a5_store_config()` is now `a5px_store_config()`,
   `a5_write_parquet()` is now `a5px_write_parquet()`, and
   `a5_aggregate()` takes `resolution` in place of `to_resolution`. The

@@ -211,7 +211,7 @@
 #'   across all sources; adjacent blocks of a band share a request. For
 #'   local files, the blocks read at once. `NULL` (default) resolves from
 #'   `getOption("a5px.io_concurrency")`, env `A5PX_IO_CONCURRENCY`, then
-#'   32. See [a5px_set_concurrency()].
+#'   32. See [a5px_concurrency()].
 #' @param scoff Logical. If `TRUE`, apply the scale and offset the file
 #'   declares for each band (`value * scale + offset`, from the GDAL band
 #'   metadata reported by [a5_raster_info()]) per pixel before aggregation.

@@ -12,48 +12,80 @@
 #'   (a band's blocks along a row, say) are fetched in one request. For
 #'   local files it is the number of blocks read at once.
 #'
-#' These two knobs replace the old `threads` arg, which conflated tokio
-#' worker count and tile-level parallelism in confusing ways.
-#'
 #' Defaults are resolved per call: function args > options > env vars >
 #' built-in default. For `cpu_workers` that is the number of CPUs available
 #' to the R process, which respects affinity masks and container or cgroup
 #' CPU quotas (a job limited to 4 CPUs on a 20-core host gets 4); for
-#' `io_concurrency` it is 32. Set globally via
-#' [a5px_set_concurrency()], `options(a5px.cpu_workers = ...)`,
-#' `options(a5px.io_concurrency = ...)`, or environment variables
-#' `A5PX_CPU_WORKERS` / `A5PX_IO_CONCURRENCY`.
+#' `io_concurrency` it is 32. Set them for the session with
+#' `a5px_concurrency()`, `options(a5px.cpu_workers = ...)` and
+#' `options(a5px.io_concurrency = ...)`, or the environment variables
+#' `A5PX_CPU_WORKERS` and `A5PX_IO_CONCURRENCY`.
 #'
-#' @param cpu_workers Integer scalar (>= 1) or `NULL`.
-#' @param io_concurrency Integer scalar (>= 1) or `NULL`.
-#' @returns `a5px_set_concurrency()` returns the previous setting invisibly.
-#'   `a5px_get_concurrency()` returns a list with the current resolved
-#'   defaults.
+#' `a5px_concurrency()` works like [options()] and `a5R::a5_threads()`:
+#' called with no settings it returns them, and called with settings it
+#' changes them and returns the previous ones, which restore them when
+#' passed back or when used with [with()].
+#'
+#' @param cpu_workers Integer scalar (>= 1), `NULL` to leave it unchanged,
+#'   or the result of an earlier call, to restore both settings.
+#' @param io_concurrency Integer scalar (>= 1), or `NULL` to leave it
+#'   unchanged.
+#' @returns With no settings, a list of the current `cpu_workers` and
+#'   `io_concurrency`. Otherwise the previous settings, invisibly, as an
+#'   `a5px_concurrency` object.
 #'
 #' @export
 #' @examples
-#' a5px_set_concurrency(cpu_workers = 8, io_concurrency = 32)
-#' a5px_get_concurrency()
-a5px_set_concurrency <- function(cpu_workers = NULL, io_concurrency = NULL) {
-  prev <- a5px_get_concurrency()
-  if (!is.null(cpu_workers)) {
-    cpu_workers <- check_scalar_count(cpu_workers, "cpu_workers")
-    options(a5px.cpu_workers = as.integer(cpu_workers))
+#' a5px_concurrency()
+#' old <- a5px_concurrency(cpu_workers = 2, io_concurrency = 64)
+#' a5px_concurrency(old) # restore
+#'
+#' # for one expression
+#' with(a5px_concurrency(cpu_workers = 1), a5px_concurrency()$cpu_workers)
+a5px_concurrency <- function(cpu_workers = NULL, io_concurrency = NULL) {
+  if (inherits(cpu_workers, "a5px_concurrency")) {
+    prev <- concurrency_options()
+    options(a5px.cpu_workers = cpu_workers$cpu_workers,
+            a5px.io_concurrency = cpu_workers$io_concurrency)
+    return(invisible(prev))
   }
-  if (!is.null(io_concurrency)) {
-    io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
-    options(a5px.io_concurrency = as.integer(io_concurrency))
+  if (is.null(cpu_workers) && is.null(io_concurrency)) {
+    return(list(cpu_workers = resolve_cpu_workers(),
+                io_concurrency = resolve_io_concurrency()))
   }
+  # check both before changing either
+  if (!is.null(cpu_workers)) cpu_workers <- check_scalar_count(cpu_workers, "cpu_workers")
+  if (!is.null(io_concurrency)) io_concurrency <- check_scalar_count(io_concurrency, "io_concurrency")
+  prev <- concurrency_options()
+  if (!is.null(cpu_workers)) options(a5px.cpu_workers = as.integer(cpu_workers))
+  if (!is.null(io_concurrency)) options(a5px.io_concurrency = as.integer(io_concurrency))
   invisible(prev)
 }
 
-#' @rdname a5px_set_concurrency
-#' @export
-a5px_get_concurrency <- function() {
-  list(
-    cpu_workers    = resolve_cpu_workers(),
-    io_concurrency = resolve_io_concurrency()
+#' The session options behind the settings, `NULL` where unset, so a
+#' restore also returns an unset option to its default.
+#' @noRd
+concurrency_options <- function() {
+  structure(
+    list(cpu_workers = getOption("a5px.cpu_workers"),
+         io_concurrency = getOption("a5px.io_concurrency")),
+    class = "a5px_concurrency"
   )
+}
+
+#' @export
+with.a5px_concurrency <- function(data, expr, ...) {
+  on.exit(a5px_concurrency(data), add = TRUE)
+  eval(substitute(expr), parent.frame())
+}
+
+#' @export
+print.a5px_concurrency <- function(x, ...) {
+  shown <- function(v) if (is.null(v)) "default" else format(v)
+  cat("<a5px_concurrency> previous settings\n",
+      "  cpu_workers:    ", shown(x$cpu_workers), "\n",
+      "  io_concurrency: ", shown(x$io_concurrency), "\n", sep = "")
+  invisible(x)
 }
 
 #' @noRd
