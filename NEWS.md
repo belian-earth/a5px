@@ -180,9 +180,9 @@
   compressed blocks) in a session cache, so a read split into `bbox`
   chunks, or repeated, fetches each block once: a 1 km AEF box over HTTPS
   read in 25 chunks took about 15 s, as one read does, against about 400
-  s before. `a5px_set_cache()` sets the budget (512 MiB by default, at
-  most an eighth of a cgroup memory limit, or `A5PX_CACHE_MB`; 0 disables
-  it), `a5px_cache_info()` reports it and `a5px_clear_cache()` empties
+  s before. `a5px_set_cache()` sets the budget (by default an eighth
+  of a cgroup memory limit, or 512 MiB without one, or `A5PX_CACHE_MB`; 0
+  disables it), `a5px_cache_info()` reports it and `a5px_clear_cache()` empties
   it. Local files bypass the cache.
 
 * A read that finds no pixels keeps the `npix` column when it was asked
