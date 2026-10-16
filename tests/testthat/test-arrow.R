@@ -246,7 +246,10 @@ test_that("Arrow and Parquet outputs record the read's provenance", {
   m <- tab$metadata
   expect_true(all(keys %in% names(m)))
   expect_equal(m$a5_index, "1.0")
-  expect_equal(m$a5_crate, a5R::a5_info()$crate)
+  # a5px's own crate, which a unit test ties to the Cargo.toml pin; a5R
+  # may build another release with the same cell ids
+  expect_equal(m$a5_crate, a5px:::a5px_a5_crate_version_rs())
+  expect_match(m$a5_crate, "^1\\.")
   expect_equal(m$a5px_mode, "forward")
   expect_equal(m$a5px_decode, "none")
   expect_equal(m$a5px_overviews, "allowed")

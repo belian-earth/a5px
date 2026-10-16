@@ -20,3 +20,5 @@ docs
 dev/
 /.quarto/
 benchmarks/ab-out/
+tests/testthat/_problems/
+tests/testthat/testthat-problems.rds

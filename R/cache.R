@@ -20,8 +20,9 @@
 #'   cache and frees what it holds.
 #' @returns `a5px_set_cache()` returns the previous budget in MiB,
 #'   invisibly. `a5px_cache_info()` returns a list: `entries`, `size_mb`,
-#'   `max_mb`, and the `hits` and `misses` since the cache was last
-#'   cleared. `a5px_clear_cache()` returns `NULL`, invisibly.
+#'   `max_mb`, and since the cache was last cleared the `hits` and
+#'   `misses`, the remote `requests` made and the `fetched_mb` they
+#'   returned. `a5px_clear_cache()` returns `NULL`, invisibly.
 #' @export
 #' @examples
 #' a5px_set_cache(1024)

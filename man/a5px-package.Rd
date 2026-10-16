@@ -110,8 +110,8 @@ and envelope to build the chunks from.
 \section{Configuration}{
 
 \code{\link[=a5px_set_concurrency]{a5px_set_concurrency()}} and \code{\link[=a5px_get_concurrency]{a5px_get_concurrency()}} set the session
-defaults for the worker pool (\code{cpu_workers}) and the number of tile
-fetches in flight (\code{io_concurrency}). They are independent of
+defaults for the worker pool (\code{cpu_workers}) and the number of remote
+requests in flight (\code{io_concurrency}). They are independent of
 \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}. Remote reads are usually limited by latency,
 so a higher \code{io_concurrency} often helps. Remote reads keep the byte
 ranges they fetch in a session cache, so reads split into \code{bbox} chunks
@@ -154,15 +154,21 @@ request.
 \code{AWS_ENDPOINT_URL_S3}, \code{AWS_CONTAINER_CREDENTIALS_RELATIVE_URI} and
 \code{AWS_WEB_IDENTITY_TOKEN_FILE}, plus GDAL's \code{AWS_NO_SIGN_REQUEST=YES}
 for public buckets (mapped to \code{aws_skip_signature}). Without static,
-container or web-identity credentials the client falls back to
-instance metadata, which off AWS waits for a long timeout before
-failing, so set \code{AWS_NO_SIGN_REQUEST} or \code{store_opts = c(aws_skip_signature = "true")} for public data. The shared credentials file
+container or web-identity credentials the client takes them from the
+instance metadata service (on EC2, ECS or Batch); where none answers
+within 300 ms and signing was not set either way, requests go
+unsigned, which reads public data and gets "access denied" from a
+private bucket. The shared credentials file
 (\verb{~/.aws/credentials}) and \code{AWS_PROFILE} are not read. With no region
 the client assumes \code{us-east-1} and a bucket elsewhere fails, so set
 \code{AWS_REGION} or \code{aws_region}. Path-style
 \verb{https://s3.<region>.amazonaws.com/<bucket>/...} and virtual-hosted
 \verb{https://<bucket>.s3.<region>.amazonaws.com/...} URLs are treated as
-S3 rather than plain HTTP and take the same configuration.
+S3 rather than plain HTTP and take the same configuration, so stale
+credentials in the environment can be refused where an unsigned
+request would succeed; set \code{aws_skip_signature} for public data. An
+\verb{http://} endpoint (\code{AWS_ENDPOINT}, as for MinIO) is allowed without
+\code{allow_http}.
 \item GCS: the \verb{GOOGLE_*} variables (\code{GOOGLE_SERVICE_ACCOUNT},
 \code{GOOGLE_SERVICE_ACCOUNT_KEY}, \code{GOOGLE_APPLICATION_CREDENTIALS});
 \code{google_skip_signature} for public buckets.
@@ -170,7 +176,11 @@ S3 rather than plain HTTP and take the same configuration.
 \code{AZURE_STORAGE_ACCESS_KEY}, \code{AZURE_STORAGE_SAS_KEY}, ...);
 \code{azure_skip_signature} for public containers.
 \item Plain HTTP(S): no authentication. \code{store_opts} accepts client keys
-such as \code{timeout}, \code{connect_timeout} and \code{allow_http}.
+such as \code{timeout} and \code{connect_timeout}.
+\item GDAL paths \verb{/vsis3/bucket/key}, \verb{/vsigs/bucket/key},
+\verb{/vsiaz/container/key} and \verb{/vsicurl/<url>} are read as the matching
+\verb{s3://}, \verb{gs://}, \verb{az://} or plain URL. Other \verb{/vsi} paths, such as
+\verb{/vsizip/}, are not supported.
 }
 }
 

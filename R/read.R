@@ -207,13 +207,11 @@
 #'   `NULL` (default) resolves from `getOption("a5px.cpu_workers")`, env
 #'   `A5PX_CPU_WORKERS`, then the CPUs available to the R process, which
 #'   respects container and cgroup CPU limits.
-#' @param io_concurrency Maximum in-flight fetch tasks the producer issues
-#'   to the I/O stage; each task carries one block, or a run of up to four
-#'   adjacent blocks on files without a predictor. `NULL` (default) resolves from
+#' @param io_concurrency Maximum remote requests in flight for the read,
+#'   across all sources; adjacent blocks of a band share a request. For
+#'   local files, the blocks read at once. `NULL` (default) resolves from
 #'   `getOption("a5px.io_concurrency")`, env `A5PX_IO_CONCURRENCY`, then
-#'   `min(16, max(cpu_workers, 8))`. Bump this for cloud reads of multi-band
-#'   embedding rasters where the network can absorb more parallelism than
-#'   the CPU pool. See [a5px_set_concurrency()].
+#'   32. See [a5px_set_concurrency()].
 #' @param scoff Logical. If `TRUE`, apply the scale and offset the file
 #'   declares for each band (`value * scale + offset`, from the GDAL band
 #'   metadata reported by [a5_raster_info()]) per pixel before aggregation.
@@ -322,7 +320,7 @@ a5_read_raster <- function(src,
   }
   cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
                  else check_scalar_count(cpu_workers, "cpu_workers")
-  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
+  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency()
                     else check_scalar_count(io_concurrency, "io_concurrency")
   if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
     cli::cli_abort("{.arg as_vector} must be a length-1 non-NA logical.")

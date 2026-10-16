@@ -4,6 +4,7 @@ mod a5r_api;
 mod band_fetch;
 mod cell_mask;
 mod composite;
+mod decoders;
 mod error;
 mod geo;
 mod grid_proj;

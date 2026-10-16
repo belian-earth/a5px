@@ -14,6 +14,8 @@ use async_tiff::metadata::TiffMetadataReader;
 use async_tiff::reader::{Endianness, ObjectReader};
 
 use crate::range_cache::CachedReader;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use async_tiff::TIFF;
 use proj4rs::Proj;
 
@@ -69,9 +71,14 @@ pub(crate) struct OpenedSource {
     pub band_names: Vec<String>,
 }
 
-async fn open_source(spec: SourceSpec, store_opts: &StoreOpts) -> Result<OpenedSource> {
+async fn open_source(
+    spec: SourceSpec,
+    store_opts: &StoreOpts,
+    limit: Option<Arc<Semaphore>>,
+) -> Result<OpenedSource> {
     let (store, path) = parse_src(&spec.src, store_opts)?;
-    let reader = CachedReader::new(ObjectReader::new(store, path), cache_key(&spec.src, store_opts));
+    let reader =
+        CachedReader::new(ObjectReader::new(store, path), cache_key(&spec.src, store_opts)).with_limit(limit);
     let cache = crate::meta_cache::ChunkedMetadataCache::new(reader.clone());
     let mut meta = TiffMetadataReader::try_open(&cache).await?;
     let ifds = meta.read_all_ifds(&cache).await?;
@@ -92,9 +99,14 @@ async fn open_source(spec: SourceSpec, store_opts: &StoreOpts) -> Result<OpenedS
     Ok(OpenedSource { spec, reader, tiff, endianness, ifd0, n_bands, band_names })
 }
 
-/// Open every source's header concurrently, in input order.
-pub(crate) async fn open_sources(specs: Vec<SourceSpec>, store_opts: &StoreOpts) -> Result<Vec<OpenedSource>> {
-    futures::future::try_join_all(specs.into_iter().map(|s| open_source(s, store_opts))).await
+/// Open every source's header concurrently, in input order. Every remote
+/// request of the read, these included, shares `limit`.
+pub(crate) async fn open_sources(
+    specs: Vec<SourceSpec>,
+    store_opts: &StoreOpts,
+    limit: Option<Arc<Semaphore>>,
+) -> Result<Vec<OpenedSource>> {
+    futures::future::try_join_all(specs.into_iter().map(|s| open_source(s, store_opts, limit.clone()))).await
 }
 
 /// The band selection resolved over all sources.

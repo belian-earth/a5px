@@ -49,22 +49,6 @@ impl ValueType {
         }
     }
 
-    /// Array of `n` values drawn from `it`.
-    fn array_from_iter(self, n: usize, it: impl Iterator<Item = f64>) -> ArrayRef {
-        match self {
-            Self::Float64 => {
-                let mut v: Vec<f64> = Vec::with_capacity(n);
-                v.extend(it);
-                Arc::new(Float64Array::new(Buffer::from_vec(v).into(), None))
-            }
-            Self::Float32 => {
-                let mut v: Vec<f32> = Vec::with_capacity(n);
-                v.extend(it.map(|x| x as f32));
-                Arc::new(Float32Array::new(Buffer::from_vec(v).into(), None))
-            }
-        }
-    }
-
     /// Array of `n` values produced by `f(i)`.
     fn array(self, n: usize, f: impl Fn(usize) -> f64) -> ArrayRef {
         match self {
@@ -110,17 +94,6 @@ impl CompressionChoice {
 
 fn pq_err(what: &str, e: impl std::fmt::Display) -> A5CogError {
     A5CogError::Parquet(format!("{what}: {e}"))
-}
-
-/// Run `f` over `0..n` on the pool when there is one, else in order.
-fn par_map<T: Send>(pool: Option<&rayon::ThreadPool>, n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    match pool {
-        Some(p) if n > 1 => p.install(|| {
-            use rayon::prelude::*;
-            (0..n).into_par_iter().map(&f).collect()
-        }),
-        _ => (0..n).map(f).collect(),
-    }
 }
 
 /// Output schema fields plus the column names, for `stats` x `band_names`.
@@ -183,12 +156,24 @@ pub(crate) fn write_aggregate_parquet<L: AccLayout>(
             columns.push(fsl_column(value_type, n_bands, inner));
         }
     } else {
-        let cols: Vec<ArrayRef> = par_map(pool, agg.stats.len() * n_bands, |k| {
-            let stat = agg.stats[k / n_bands];
-            let b = k % n_bands;
-            value_type.array_from_iter(n, agg.column_iter(stat, b))
-        });
-        columns.extend(cols);
+        for &stat in &agg.stats {
+            match value_type {
+                ValueType::Float64 => {
+                    let mut cols: Vec<Vec<f64>> = vec![Vec::new(); n_bands];
+                    agg.columns_into(stat, &mut cols, |x| x);
+                    columns.extend(cols.into_iter().map(|v| {
+                        Arc::new(Float64Array::new(Buffer::from_vec(v).into(), None)) as ArrayRef
+                    }));
+                }
+                ValueType::Float32 => {
+                    let mut cols: Vec<Vec<f32>> = vec![Vec::new(); n_bands];
+                    agg.columns_into(stat, &mut cols, |x| x as f32);
+                    columns.extend(cols.into_iter().map(|v| {
+                        Arc::new(Float32Array::new(Buffer::from_vec(v).into(), None)) as ArrayRef
+                    }));
+                }
+            }
+        }
     }
     let mut fields = fields_for(&agg.band_names, &stats, value_type, n_bands, as_vector);
     if let Some(npix) = agg.npix() {

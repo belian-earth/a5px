@@ -78,7 +78,7 @@ a5_read_raster_arrow <- function(src,
   }
   cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
                  else check_scalar_count(cpu_workers, "cpu_workers")
-  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
+  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency()
                     else check_scalar_count(io_concurrency, "io_concurrency")
   value_type <- rlang::arg_match(value_type)
   if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
@@ -275,7 +275,7 @@ a5_raster_to_parquet <- function(src,
   compression <- rlang::arg_match(compression)
   cpu_workers <- if (is.null(cpu_workers)) resolve_cpu_workers()
                  else check_scalar_count(cpu_workers, "cpu_workers")
-  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency(cpu_workers)
+  io_concurrency <- if (is.null(io_concurrency)) resolve_io_concurrency()
                     else check_scalar_count(io_concurrency, "io_concurrency")
   if (!is.logical(as_vector) || length(as_vector) != 1L || is.na(as_vector)) {
     cli::cli_abort("{.arg as_vector} must be a length-1 non-NA logical.")

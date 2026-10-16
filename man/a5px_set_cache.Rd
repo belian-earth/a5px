@@ -19,8 +19,9 @@ cache and frees what it holds.}
 \value{
 \code{a5px_set_cache()} returns the previous budget in MiB,
 invisibly. \code{a5px_cache_info()} returns a list: \code{entries}, \code{size_mb},
-\code{max_mb}, and the \code{hits} and \code{misses} since the cache was last
-cleared. \code{a5px_clear_cache()} returns \code{NULL}, invisibly.
+\code{max_mb}, and since the cache was last cleared the \code{hits} and
+\code{misses}, the remote \code{requests} made and the \code{fetched_mb} they
+returned. \code{a5px_clear_cache()} returns \code{NULL}, invisibly.
 }
 \description{
 Remote reads keep the byte ranges they fetch (header chunks and

@@ -6,7 +6,7 @@ check_resolution <- function(resolution,
                              max = 29L,
                              call = rlang::caller_env()) {
   if (any(resolution == 30L, na.rm = TRUE)) {
-    # the a5 crate (1.0.0-beta.3) returns resolution-29 cells for some
+    # the a5 crate (1.0.0) returns resolution-29 cells for some
     # points at 30, so a read's cells would mix resolutions
     cli::cli_abort(
       "Resolution 30 is not supported yet: A5 returns resolution-29 cells for some points at 30. Use resolution 29 or less.",

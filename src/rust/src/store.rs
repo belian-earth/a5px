@@ -6,8 +6,12 @@
 //! on-AWS (issue #4). This module builds each provider from its
 //! `from_env()` builder, applies GDAL's `AWS_NO_SIGN_REQUEST` convention,
 //! then layers caller-supplied `store_opts` on top so explicit options win.
+//!
+//! GDAL's `/vsis3/`, `/vsigs/`, `/vsiaz/` and `/vsicurl/` paths name the
+//! same objects as URLs and are read as those URLs.
 
-use std::sync::Arc;
+use std::borrow::Cow;
+use std::sync::{Arc, OnceLock};
 
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
 use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
@@ -49,6 +53,29 @@ fn env_truthy(name: &str) -> bool {
     }
 }
 
+/// `src` with a GDAL virtual file system prefix turned into the URL it
+/// names; other sources unchanged.
+pub(crate) fn gdal_path(src: &str) -> Result<Cow<'_, str>> {
+    let Some(rest) = src.strip_prefix("/vsi") else {
+        return Ok(Cow::Borrowed(src));
+    };
+    for (prefix, scheme) in [("s3/", "s3://"), ("gs/", "gs://"), ("az/", "az://")] {
+        if let Some(path) = rest.strip_prefix(prefix) {
+            return Ok(Cow::Owned(format!("{scheme}{path}")));
+        }
+    }
+    for prefix in ["curl/", "curl_streaming/"] {
+        if let Some(url) = rest.strip_prefix(prefix) {
+            return Ok(Cow::Borrowed(url));
+        }
+    }
+    let name = src.split('/').nth(1).unwrap_or(src);
+    Err(A5CogError::Invalid(format!(
+        "{src}: GDAL's /{name}/ is not supported; give the file's URL or path \
+         (/vsis3/, /vsigs/, /vsiaz/ and /vsicurl/ paths are read as URLs)"
+    )))
+}
+
 fn unknown_key(provider: &str, key: &str) -> A5CogError {
     A5CogError::Invalid(format!(
         "store_opts: unknown option {key:?} for {provider} sources \
@@ -74,6 +101,8 @@ fn reject_opts(what: &str, opts: &StoreOpts) -> Result<()> {
 /// can point one URL at another endpoint. `None` for a local file (no URL
 /// scheme, or `file`), which the cache skips.
 pub(crate) fn cache_key(src: &str, opts: &StoreOpts) -> Option<String> {
+    let src = gdal_path(src).ok()?;
+    let src = src.as_ref();
     match url::Url::parse(src) {
         Ok(u) if u.scheme().len() > 1 && u.scheme() != "file" => {
             let mut opts: Vec<String> = opts.iter().map(|(k, v)| format!("{k}={v}")).collect();
@@ -85,6 +114,8 @@ pub(crate) fn cache_key(src: &str, opts: &StoreOpts) -> Option<String> {
 }
 
 pub(crate) fn parse_src(src: &str, opts: &StoreOpts) -> Result<(Arc<dyn ObjectStore>, ObjPath)> {
+    let src = gdal_path(src)?;
+    let src = src.as_ref();
     if let Ok(url) = url::Url::parse(src) {
         if url.scheme().len() > 1 {
             return build_remote(&url, opts);
@@ -123,7 +154,54 @@ fn s3_builder(url: &url::Url, opts: &StoreOpts) -> Result<AmazonS3Builder> {
             .map_err(|_| unknown_key("S3", k))?;
         b = b.with_config(key, v.clone());
     }
+    let get = |k: AmazonS3ConfigKey| b.get_config_value(&k).unwrap_or_default();
+    let allow_http = AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp);
+    // an http:// endpoint (MinIO, a local mock) is what the caller asked for
+    let http_endpoint = get(AmazonS3ConfigKey::Endpoint).starts_with("http://") && !opts_set(opts, &allow_http);
+    // With no credentials configured the client asks the instance metadata
+    // service, which off AWS retries for 14-27 s and then fails; where it
+    // does not answer, and signing was not chosen either way, sign
+    // nothing, as GDAL's /vsicurl/ reads such a URL.
+    // Signing chosen either way (an option, or the variables) is kept.
+    let chosen = opts_set(opts, &AmazonS3ConfigKey::SkipSignature)
+        || std::env::var_os("AWS_SKIP_SIGNATURE").is_some()
+        || std::env::var_os("AWS_NO_SIGN_REQUEST").is_some();
+    let creds = !get(AmazonS3ConfigKey::AccessKeyId).is_empty()
+        || !get(AmazonS3ConfigKey::WebIdentityTokenFile).is_empty()
+        || !get(AmazonS3ConfigKey::ContainerCredentialsRelativeUri).is_empty()
+        || !get(AmazonS3ConfigKey::ContainerCredentialsFullUri).is_empty();
+    let unsigned = !chosen && !creds && !metadata_service_answers(&get(AmazonS3ConfigKey::MetadataEndpoint));
+    if http_endpoint {
+        b = b.with_allow_http(true);
+    }
+    if unsigned {
+        b = b.with_skip_signature(true);
+    }
     Ok(b)
+}
+
+/// Whether `opts` sets the S3 key `key`.
+fn opts_set(opts: &StoreOpts, key: &AmazonS3ConfigKey) -> bool {
+    opts.iter().any(|(k, _)| k.parse::<AmazonS3ConfigKey>().is_ok_and(|p| &p == key))
+}
+
+/// Whether the instance metadata service at `endpoint` (object_store's
+/// default when empty) accepts a connection within 300 ms; probed once per
+/// endpoint per session.
+fn metadata_service_answers(endpoint: &str) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> = OnceLock::new();
+    let endpoint = if endpoint.is_empty() { "http://169.254.169.254" } else { endpoint };
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some(&ok) = seen.lock().unwrap_or_else(|e| e.into_inner()).get(endpoint) {
+        return ok;
+    }
+    let ok = url::Url::parse(endpoint)
+        .ok()
+        .and_then(|u| u.socket_addrs(|| Some(80)).ok())
+        .and_then(|a| a.into_iter().next())
+        .is_some_and(|a| std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_millis(300)).is_ok());
+    seen.lock().unwrap_or_else(|e| e.into_inner()).insert(endpoint.to_string(), ok);
+    ok
 }
 
 fn gcs_builder(url: &url::Url, opts: &StoreOpts) -> Result<GoogleCloudStorageBuilder> {
@@ -150,7 +228,11 @@ fn azure_builder(url: &url::Url, opts: &StoreOpts) -> Result<MicrosoftAzureBuild
 
 fn http_builder(url: &url::Url, opts: &StoreOpts) -> Result<HttpBuilder> {
     let base = &url[..url::Position::BeforePath];
+    // an http:// URL is what the caller asked for
     let mut b = HttpBuilder::new().with_url(base);
+    if url.scheme() == "http" {
+        b = b.with_config(ClientConfigKey::AllowHttp, "true");
+    }
     for (k, v) in opts {
         let key = k
             .parse::<ClientConfigKey>()
@@ -200,7 +282,8 @@ fn s3_url_region(host: &str) -> Option<String> {
 /// returned, only whether static credentials are set. Building the store
 /// validates the configuration without touching the network.
 pub(crate) fn describe(src: &str, opts: &StoreOpts) -> Result<Vec<(String, String)>> {
-    let url = match url::Url::parse(src) {
+    let src = gdal_path(src)?;
+    let url = match url::Url::parse(src.as_ref()) {
         Ok(u) if u.scheme().len() > 1 => u,
         _ => {
             reject_opts("local path", opts)?;
@@ -291,4 +374,19 @@ pub(crate) fn describe(src: &str, opts: &StoreOpts) -> Result<Vec<(String, Strin
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod gdal_tests {
+    use super::gdal_path;
+
+    #[test]
+    fn gdal_paths_become_urls() {
+        assert_eq!(gdal_path("/vsis3/b/k.tif").unwrap(), "s3://b/k.tif");
+        assert_eq!(gdal_path("/vsigs/b/k.tif").unwrap(), "gs://b/k.tif");
+        assert_eq!(gdal_path("/vsiaz/c/k.tif").unwrap(), "az://c/k.tif");
+        assert_eq!(gdal_path("/vsicurl/https://h/k.tif").unwrap(), "https://h/k.tif");
+        assert_eq!(gdal_path("/data/k.tif").unwrap(), "/data/k.tif");
+        assert!(gdal_path("/vsizip/a.zip/k.tif").is_err());
+    }
 }

@@ -51,12 +51,15 @@ test_that("local sources report provider local and refuse store options", {
 
 test_that("S3 config comes from env, then store_opts, and AWS_NO_SIGN_REQUEST maps to skip_signature", {
   withr::local_envvar(aws_env_clear)
+  # an instance metadata endpoint that refuses connections
+  withr::local_envvar(AWS_METADATA_ENDPOINT = "http://127.0.0.1:9")
 
+  # no credentials and no metadata service: unsigned
   cfg <- a5px_store_config(s3_url)
   expect_equal(cfg[["provider"]], "s3")
   expect_equal(cfg[["host"]], "us-west-2.opendata.source.coop")
   expect_equal(cfg[["region"]], "")
-  expect_equal(cfg[["skip_signature"]], "false")
+  expect_equal(cfg[["skip_signature"]], "true")
   expect_equal(cfg[["static_credentials"]], "false")
 
   withr::local_envvar(AWS_REGION = "eu-west-1", AWS_NO_SIGN_REQUEST = "yes")
@@ -73,11 +76,26 @@ test_that("S3 config comes from env, then store_opts, and AWS_NO_SIGN_REQUEST ma
   withr::local_envvar(AWS_NO_SIGN_REQUEST = "NO")
   expect_equal(a5px_store_config(s3_url)[["skip_signature"]], "false")
 
-  # static credentials are reported as a flag, never echoed
-  withr::local_envvar(AWS_ACCESS_KEY_ID = "AKIAEXAMPLE", AWS_SECRET_ACCESS_KEY = "secret")
+  # static credentials are reported as a flag, never echoed, and signed
+  withr::local_envvar(AWS_ACCESS_KEY_ID = "AKIAEXAMPLE", AWS_SECRET_ACCESS_KEY = "secret",
+                      AWS_NO_SIGN_REQUEST = NA)
   cfg <- a5px_store_config(s3_url)
   expect_equal(cfg[["static_credentials"]], "true")
+  expect_equal(cfg[["skip_signature"]], "false")
   expect_false(any(grepl("AKIAEXAMPLE|secret", cfg)))
+})
+
+test_that("GDAL /vsi paths read as URLs, and http:// needs no allow_http", {
+  withr::local_envvar(aws_env_clear)
+  withr::local_envvar(AWS_METADATA_ENDPOINT = "http://127.0.0.1:9")
+  cfg <- a5px_store_config("/vsis3/us-west-2.opendata.source.coop/tge-labs/x.tiff")
+  expect_equal(cfg[["provider"]], "s3")
+  expect_equal(cfg[["host"]], "us-west-2.opendata.source.coop")
+  expect_equal(a5px_store_config("/vsigs/bucket/x.tiff")[["provider"]], "gcs")
+  expect_equal(a5px_store_config("/vsicurl/https://data.source.coop/x.tiff")[["provider"]], "http")
+  expect_error(a5px_store_config("/vsizip/a.zip/x.tif"), "not supported")
+  expect_error(a5_raster_info("/vsizip/a.zip/x.tif"), "not supported")
+  expect_equal(a5px_store_config("http://example.com/x.tiff")[["provider"]], "http")
 })
 
 test_that("S3-shaped https URLs resolve to the S3 provider with the URL's region", {
