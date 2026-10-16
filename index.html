@@ -44,6 +44,7 @@
     <div id="navbar" class="collapse navbar-collapse ms-3">
       <ul class="navbar-nav me-auto">
 <li class="nav-item"><a class="nav-link" href="reference/index.html">Reference</a></li>
+<li class="nav-item"><a class="nav-link" href="articles/a5px.html">Get started</a></li>
 <li class="nav-item"><a class="nav-link" href="news/index.html">Changelog</a></li>
       </ul>
 <ul class="navbar-nav">
@@ -75,7 +76,7 @@
 <div class="sourceCode" id="cb1"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="co"># install.packages("pak")</span></span>
 <span><span class="fu">pak</span><span class="fu">::</span><span class="fu"><a href="https://pak.r-lib.org/reference/pak.html" class="external-link">pak</a></span><span class="op">(</span><span class="st">"belian-earth/a5px"</span><span class="op">)</span></span></code></pre></div>
-<p>Building from source needs a <a href="https://rustup.rs/" class="external-link">Rust toolchain</a> with <code>rustc</code> 1.85 or later. pak also installs <a href="https://github.com/belian-earth/a5R" class="external-link">a5R</a>, which provides the cell type. The examples below plot with <a href="https://github.com/belian-earth/a5view" class="external-link">a5view</a>:</p>
+<p>Building from source needs a <a href="https://rustup.rs/" class="external-link">Rust toolchain</a> with <code>rustc</code> 1.89 or later. pak also installs <a href="https://github.com/belian-earth/a5R" class="external-link">a5R</a>, which provides the cell type. The examples below plot with <a href="https://github.com/belian-earth/a5view" class="external-link">a5view</a>:</p>
 <div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu">pak</span><span class="fu">::</span><span class="fu"><a href="https://pak.r-lib.org/reference/pak.html" class="external-link">pak</a></span><span class="op">(</span><span class="st">"belian-earth/a5view"</span><span class="op">)</span></span></code></pre></div>
 </div>
@@ -129,233 +130,30 @@
 <p><img src="reference/figures/README-glacier-1.png" alt="" width="100%"></p>
 </div>
 <div class="section level2">
-<h2 id="usage">Usage<a class="anchor" aria-label="anchor" href="#usage"></a>
-</h2>
-<div class="section level3">
-<h3 id="readers">Readers<a class="anchor" aria-label="anchor" href="#readers"></a>
-</h3>
-<p>Three readers share one engine and differ only in what they return:</p>
-<div class="sourceCode" id="cb6"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># tibble: one numeric column per band</span></span>
-<span><span class="va">tbl</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">src</span>, <span class="va">resolution</span>, <span class="va">stat</span>, <span class="va">bands</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># Arrow table: a cell column and a FixedSizeList&lt;float, n_bands&gt; per stat</span></span>
-<span><span class="va">arr</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/a5_read_raster_arrow.html">a5_read_raster_arrow</a></span><span class="op">(</span><span class="va">src</span>, <span class="va">resolution</span>, <span class="va">stat</span>, <span class="va">bands</span>, value_type <span class="op">=</span> <span class="st">"float64"</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># Parquet written directly from Rust, with no R-side Arrow round trip</span></span>
-<span><span class="fu"><a href="reference/a5_raster_to_parquet.html">a5_raster_to_parquet</a></span><span class="op">(</span><span class="va">src</span>, <span class="va">dest</span>, <span class="va">resolution</span>, <span class="va">stat</span>, <span class="va">bands</span>, <span class="va">value_type</span>, <span class="va">compression</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># write a tibble or Arrow table from the first two</span></span>
-<span><span class="fu"><a href="reference/a5px_write_parquet.html">a5px_write_parquet</a></span><span class="op">(</span><span class="va">x</span>, <span class="va">dest</span>, compression <span class="op">=</span> <span class="st">"zstd"</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># metadata without reading pixels</span></span>
-<span><span class="fu"><a href="reference/a5_raster_info.html">a5_raster_info</a></span><span class="op">(</span><span class="va">src</span><span class="op">)</span>   <span class="co"># dimensions, data type, block grid, overviews, CRS, envelope</span></span>
-<span><span class="fu"><a href="reference/a5px_store_config.html">a5px_store_config</a></span><span class="op">(</span><span class="va">src</span><span class="op">)</span>  <span class="co"># resolved object store configuration for a remote src</span></span></code></pre></div>
-<p>Their main arguments:</p>
-<ul>
-<li>
-<code>src</code>: one or more paths or URLs: local, <code>file://</code>, <code>http(s)://</code>, <code>s3://</code>, <code>gs://</code> or <code>az://</code>. Remote reads fetch byte ranges and never download the whole file.</li>
-<li>
-<code>separate</code>, <code>composite</code>: how several files combine (see <a href="#several-files">Several files</a>).</li>
-<li>
-<code>resolution</code>: A5 resolution, 0 to 29 (30 is not yet supported). <code><a href="https://belian-earth.github.io/a5R/reference/a5_resolution_stats.html" class="external-link">a5R::a5_cell_area()</a></code> gives the cell area at each.</li>
-<li>
-<code>stat</code>: one or more of <code>"mean"</code>, <code>"sum"</code>, <code>"count"</code>, <code>"min"</code>, <code>"max"</code>, <code>"var"</code>, <code>"sd"</code>, <code>"majority"</code> and <code>"fractions"</code>. With several, the tibble has one column per band and stat, and the Arrow and Parquet outputs one list column per stat.</li>
-<li>
-<code>bands</code>: <code>NULL</code> (all), 1-based indices, or names matched against the GDAL <code>DESCRIPTION</code> band tag.</li>
-<li>
-<code>bbox</code>, <code>bbox_align</code>: a WGS 84 subset, by pixel or by whole COG block (see <a href="#chunked-reads">Chunked reads</a>).</li>
-<li>
-<code>aoi</code>, <code>containment</code>: keep only the A5 cells of a polygon (see <a href="#areas-of-interest">Areas of interest</a>).</li>
-<li>
-<code>mode</code>: <code>"forward"</code>, <code>"overlay"</code> or <code>"centroid"</code> sampling.</li>
-<li>
-<code>scoff</code>, <code>dequant</code>: decode stored values per pixel before aggregation (see <a href="#decoding-stored-values">Decoding stored values</a>).</li>
-<li>
-<code>use_overviews</code>: whether <code>stat = "mean"</code> may read a COG overview.</li>
-<li>
-<code>cpu_workers</code>, <code>io_concurrency</code>: CPU threads and remote requests in flight.</li>
-<li>
-<code>store_opts</code>: object store options (see <a href="#remote-sources">Remote sources</a>).</li>
-</ul>
-</div>
-<div class="section level3">
-<h3 id="several-files">Several files<a class="anchor" aria-label="anchor" href="#several-files"></a>
-</h3>
-<p>Several files are read in one pass and share the fetch queue and workers. How they combine depends on what they hold:</p>
-<div class="sourceCode" id="cb7"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># bands stored one per file: one column per file, named by names(src)</span></span>
-<span><span class="co"># or the file name</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>red <span class="op">=</span> <span class="va">red_url</span>, nir <span class="op">=</span> <span class="va">nir_url</span><span class="op">)</span>, <span class="fl">14L</span>, separate <span class="op">=</span> <span class="cn">TRUE</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># adjacent tiles, or repeat captures, of one product: pixels pooled</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="va">tile_a</span>, <span class="va">tile_b</span><span class="op">)</span>, <span class="fl">14L</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># a statistic per capture, reduced across captures for each cell</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">dates</span>, <span class="fl">14L</span>, composite <span class="op">=</span> <span class="st">"median"</span><span class="op">)</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">dates</span>, <span class="fl">14L</span>, composite <span class="op">=</span> <span class="st">"count"</span><span class="op">)</span> <span class="co"># captures per cell</span></span></code></pre></div>
-<p>Pooled files must have the same bands and pixel size. Every valid pixel enters its cell once, so cells on a seam between tiles combine exactly. Where files overlap, every capture counts, unlike GDAL’s last-wins rule: <code>sum</code> and <code>count</code> include the overlap once per file. <code>composite</code> instead computes <code>stat</code> for each file, then reduces across files per cell, weighting each file by its valid pixel count there; the cell grid is shared, so the files need not be aligned. Single-band files without band descriptions look identical to the pooling check, so set <code>separate = TRUE</code> for files that hold different bands.</p>
-</div>
-<div class="section level3">
-<h3 id="several-statistics-in-one-pass">Several statistics in one pass<a class="anchor" aria-label="anchor" href="#several-statistics-in-one-pass"></a>
-</h3>
-<div class="sourceCode" id="cb8"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># sum and count let you merge partial results without re-reading</span></span>
-<span><span class="va">agg</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">src</span>, resolution <span class="op">=</span> <span class="fl">14L</span>, stat <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"mean"</span>, <span class="st">"sum"</span>, <span class="st">"count"</span><span class="op">)</span><span class="op">)</span></span>
-<span><span class="co"># columns: cell, B02_mean, B02_sum, B02_count, B03_mean, ...</span></span></code></pre></div>
-</div>
-<div class="section level3">
-<h3 id="coarser-resolutions">Coarser resolutions<a class="anchor" aria-label="anchor" href="#coarser-resolutions"></a>
-</h3>
-<p><code><a href="reference/a5_aggregate.html">a5_aggregate()</a></code> summarises a result at a coarser resolution without re-reading the raster. Each cell goes to the coarse cell that contains its centre:</p>
-<div class="sourceCode" id="cb9"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="va">coarse</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/a5_aggregate.html">a5_aggregate</a></span><span class="op">(</span><span class="va">fine</span>, to_resolution <span class="op">=</span> <span class="fl">10L</span><span class="op">)</span></span></code></pre></div>
-</div>
-<div class="section level3">
-<h3 id="decoding-stored-values">Decoding stored values<a class="anchor" aria-label="anchor" href="#decoding-stored-values"></a>
-</h3>
-<p><code>scoff = TRUE</code> applies the scale and offset each band declares (see <code><a href="reference/a5_raster_info.html">a5_raster_info()</a></code>), for example to turn integer reflectance into physical units. The decode is linear, so it can run before or after averaging with the same result.</p>
-<p>Quantized sources are different. A nonlinear decode does not commute with the mean, so averaging raw codes and decoding the result gives the wrong answer. <code>dequant</code> decodes each pixel in Rust before aggregation:</p>
-<div class="sourceCode" id="cb10"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># Alpha Earth Foundations int8 codes: sign(x) * (x / 127.5)^2</span></span>
-<span><span class="va">emb</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">url</span>, resolution <span class="op">=</span> <span class="fl">14L</span>, bands <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">8</span>, dequant <span class="op">=</span> <span class="va">dequant_aef</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># or any vectorised R function over the integer codes</span></span>
-<span><span class="va">emb</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">url</span>, resolution <span class="op">=</span> <span class="fl">14L</span>, dequant <span class="op">=</span> <span class="kw">function</span><span class="op">(</span><span class="va">x</span><span class="op">)</span> <span class="va">x</span> <span class="op">/</span> <span class="fl">250</span><span class="op">)</span></span></code></pre></div>
-<p>Any R function works because the codes are a finite set: a5px evaluates the function once per possible code and passes Rust a lookup table. So <code>dequant</code> needs an integer source of 16 bits or fewer (int8, uint8, int16 or uint16). NoData is matched against the raw code.</p>
-<p>Setting <code>dequant</code> also turns <code>use_overviews</code> off by default. COG overviews are usually built by averaging, and an average of codes decodes wrongly. Set <code>use_overviews = TRUE</code> (it warns) only when the overviews were built with nearest or mode resampling.</p>
-</div>
-<div class="section level3">
-<h3 id="overlay-sampling">Overlay sampling<a class="anchor" aria-label="anchor" href="#overlay-sampling"></a>
-</h3>
-<p>The default forward mode assigns each pixel to the cell containing its centre. <code>mode = "overlay"</code> instead splits each pixel between the cells it overlaps, in proportion to area, estimated by supersampling each pixel (<code>subsamples</code>, chosen automatically by default):</p>
-<div class="sourceCode" id="cb11"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># area-weighted mean: boundary pixels are shared, not all-or-nothing</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">src</span>, resolution <span class="op">=</span> <span class="fl">12L</span>, mode <span class="op">=</span> <span class="st">"overlay"</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># mass-preserving sum: totals such as population counts are conserved</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">src</span>, resolution <span class="op">=</span> <span class="fl">12L</span>, mode <span class="op">=</span> <span class="st">"overlay"</span>, stat <span class="op">=</span> <span class="st">"sum"</span><span class="op">)</span></span></code></pre></div>
-<p>Pixels wholly inside one cell cost the same as in forward mode; only pixels on a cell boundary are supersampled.</p>
-</div>
-<div class="section level3">
-<h3 id="categorical-rasters">Categorical rasters<a class="anchor" aria-label="anchor" href="#categorical-rasters"></a>
-</h3>
-<p>For integer class labels such as land cover, <code>stat = "majority"</code> gives each cell’s dominant class and <code>stat = "fractions"</code> the share of each class as a list column. Under <code>mode = "overlay"</code> both are area-weighted:</p>
-<div class="sourceCode" id="cb12"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">landcover</span>, resolution <span class="op">=</span> <span class="fl">12L</span>, stat <span class="op">=</span> <span class="st">"majority"</span>, mode <span class="op">=</span> <span class="st">"overlay"</span><span class="op">)</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">landcover</span>, resolution <span class="op">=</span> <span class="fl">12L</span>, stat <span class="op">=</span> <span class="st">"fractions"</span><span class="op">)</span></span></code></pre></div>
-</div>
-<div class="section level3">
-<h3 id="cells-finer-than-pixels">Cells finer than pixels<a class="anchor" aria-label="anchor" href="#cells-finer-than-pixels"></a>
-</h3>
-<p>When cells are smaller than pixels, <code>mode = "centroid"</code> samples one value at each cell centre. <code>interp</code> picks the kernel: <code>"nearest"</code> (default), <code>"bilinear"</code>, <code>"bicubic"</code> (Keys) or <code>"lanczos"</code>.</p>
-<div class="sourceCode" id="cb13"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">dem</span>, resolution <span class="op">=</span> <span class="fl">18L</span>, mode <span class="op">=</span> <span class="st">"centroid"</span>, interp <span class="op">=</span> <span class="st">"bilinear"</span><span class="op">)</span></span></code></pre></div>
-</div>
-<div class="section level3">
-<h3 id="band-selection">Band selection<a class="anchor" aria-label="anchor" href="#band-selection"></a>
-</h3>
-<p>For COGs that store each band separately (<code>INTERLEAVE=BAND</code>), common for embedding rasters such as Alpha Earth Foundations, <code>bands</code> limits the download to the selected bands. Reading 8 of 64 bands from a 2.8 GB AEF tile takes 24 s instead of 62 s.</p>
-<div class="sourceCode" id="cb14"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="fu"><a href="reference/a5_raster_to_parquet.html">a5_raster_to_parquet</a></span><span class="op">(</span></span>
-<span>  <span class="va">url</span>, <span class="st">"embeddings.parquet"</span>,</span>
-<span>  resolution     <span class="op">=</span> <span class="fl">14L</span>,</span>
-<span>  bands          <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">8</span>,</span>
-<span>  value_type     <span class="op">=</span> <span class="st">"float32"</span>,</span>
-<span>  compression    <span class="op">=</span> <span class="st">"zstd"</span>,</span>
-<span>  cpu_workers    <span class="op">=</span> <span class="fl">16L</span>,</span>
-<span>  io_concurrency <span class="op">=</span> <span class="fl">32L</span></span>
-<span><span class="op">)</span></span></code></pre></div>
-</div>
-<div class="section level3">
-<h3 id="remote-sources">Remote sources<a class="anchor" aria-label="anchor" href="#remote-sources"></a>
-</h3>
-<p>Cloud clients take their configuration from the environment first (every <code>AWS_*</code>, <code>GOOGLE_*</code> and <code>AZURE_*</code> variable that <code>object_store</code> understands, plus GDAL’s <code>AWS_NO_SIGN_REQUEST=YES</code> for public buckets) and from <code>store_opts</code> second, so an explicit option always wins.</p>
-<div class="sourceCode" id="cb15"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="co"># public bucket outside us-east-1, no credentials</span></span>
-<span><span class="fu"><a href="https://rdrr.io/r/base/Sys.setenv.html" class="external-link">Sys.setenv</a></span><span class="op">(</span>AWS_NO_SIGN_REQUEST <span class="op">=</span> <span class="st">"YES"</span>, AWS_REGION <span class="op">=</span> <span class="st">"us-west-2"</span><span class="op">)</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="st">"s3://us-west-2.opendata.source.coop/tge-labs/aef/.../tile.tiff"</span>, <span class="fl">14L</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># the same without touching the environment</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">src</span>, <span class="fl">14L</span>, store_opts <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>aws_region <span class="op">=</span> <span class="st">"us-west-2"</span>,</span>
-<span>                                        aws_skip_signature <span class="op">=</span> <span class="st">"true"</span><span class="op">)</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># check region, endpoint and signing before a long read</span></span>
-<span><span class="fu"><a href="reference/a5px_store_config.html">a5px_store_config</a></span><span class="op">(</span><span class="va">src</span>, store_opts <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>aws_region <span class="op">=</span> <span class="st">"us-west-2"</span><span class="op">)</span><span class="op">)</span></span></code></pre></div>
-<p>a5px does not read the shared credentials file or <code>AWS_PROFILE</code>. Without credentials or <code>aws_skip_signature</code>, the client falls back to instance metadata, which off AWS waits for a long timeout before failing.</p>
-</div>
-<div class="section level3">
-<h3 id="areas-of-interest">Areas of interest<a class="anchor" aria-label="anchor" href="#areas-of-interest"></a>
-</h3>
-<p><code>aoi</code> restricts a read to the A5 cells of a polygon, selected as by <code><a href="https://belian-earth.github.io/a5R/reference/a5_polygon_to_cells.html" class="external-link">a5R::a5_polygon_to_cells()</a></code>: <code>containment = "centre"</code> keeps cells whose centre is inside and <code>"overlapping"</code> every cell the polygon touches. Selection is by cell: an included cell gets the statistics of all its valid pixels, including any outside the polygon.</p>
-<div class="sourceCode" id="cb16"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">src</span>, <span class="fl">14L</span>, aoi <span class="op">=</span> <span class="fu">sf</span><span class="fu">::</span><span class="fu"><a href="https://r-spatial.github.io/sf/reference/st_geometry.html" class="external-link">st_geometry</a></span><span class="op">(</span><span class="va">catchment</span><span class="op">)</span>, containment <span class="op">=</span> <span class="st">"overlapping"</span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># centroid mode samples the AOI cells directly, covering the polygon without gaps</span></span>
-<span><span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">dem</span>, <span class="fl">18L</span>, mode <span class="op">=</span> <span class="st">"centroid"</span>, aoi <span class="op">=</span> <span class="va">catchment</span>, containment <span class="op">=</span> <span class="st">"overlapping"</span><span class="op">)</span></span></code></pre></div>
-</div>
-<div class="section level3">
-<h3 id="chunked-reads">Chunked reads<a class="anchor" aria-label="anchor" href="#chunked-reads"></a>
-</h3>
-<p>The accumulators hold every touched cell in memory, so split very large reads by <code>bbox</code>. <code>bbox_align = "block"</code> takes the COG blocks whose origin lies in the bbox, so a partition of bboxes fetches every block exactly once and per-cell <code>sum</code> and <code>count</code> partials add up exactly.</p>
-<div class="sourceCode" id="cb17"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="va">info</span> <span class="op">&lt;-</span> <span class="fu"><a href="reference/a5_raster_info.html">a5_raster_info</a></span><span class="op">(</span><span class="va">src</span><span class="op">)</span>           <span class="co"># block grid and WGS 84 envelope</span></span>
-<span><span class="va">chunks</span> <span class="op">&lt;-</span> <span class="fu">split_bbox</span><span class="op">(</span><span class="va">info</span><span class="op">$</span><span class="va">bbox</span>, <span class="fl">4</span>, <span class="fl">4</span><span class="op">)</span> <span class="co"># your own grid over info$bbox</span></span>
-<span><span class="va">parts</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/lapply.html" class="external-link">lapply</a></span><span class="op">(</span><span class="va">chunks</span>, <span class="kw">function</span><span class="op">(</span><span class="va">b</span><span class="op">)</span> <span class="op">{</span></span>
-<span>  <span class="fu"><a href="reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">src</span>, <span class="fl">18L</span>, bbox <span class="op">=</span> <span class="va">b</span>, bbox_align <span class="op">=</span> <span class="st">"block"</span>,</span>
-<span>                 stat <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"sum"</span>, <span class="st">"count"</span><span class="op">)</span>, use_overviews <span class="op">=</span> <span class="cn">FALSE</span><span class="op">)</span></span>
-<span><span class="op">}</span><span class="op">)</span></span></code></pre></div>
-</div>
-<div class="section level3">
-<h3 id="configuration">Configuration<a class="anchor" aria-label="anchor" href="#configuration"></a>
-</h3>
-<div class="sourceCode" id="cb18"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="fu"><a href="reference/a5px_set_concurrency.html">a5px_set_concurrency</a></span><span class="op">(</span>cpu_workers <span class="op">=</span> <span class="fl">8</span>, io_concurrency <span class="op">=</span> <span class="fl">32</span><span class="op">)</span> <span class="co"># session default</span></span>
-<span><span class="fu"><a href="reference/a5px_set_concurrency.html">a5px_get_concurrency</a></span><span class="op">(</span><span class="op">)</span>                                     <span class="co"># current setting</span></span>
-<span><span class="fu"><a href="https://rdrr.io/r/base/Sys.setenv.html" class="external-link">Sys.setenv</a></span><span class="op">(</span>A5PX_PROFILE <span class="op">=</span> <span class="st">"1"</span><span class="op">)</span>                             <span class="co"># stage timings to stderr</span></span></code></pre></div>
-</div>
-</div>
-<div class="section level2">
-<h2 id="supported">Supported<a class="anchor" aria-label="anchor" href="#supported"></a>
+<h2 id="what-else-it-does">What else it does<a class="anchor" aria-label="anchor" href="#what-else-it-does"></a>
 </h2>
 <ul>
 <li>
-<strong>Formats</strong>: tiled GeoTIFF and COG with ZSTD, Deflate, LZW, JPEG or no compression, from local files or S3, GCS, Azure and HTTP(S) stores.</li>
+<strong>Three outputs</strong> from one engine: a tibble (<code><a href="reference/a5_read_raster.html">a5_read_raster()</a></code>), an Arrow table (<code><a href="reference/a5_read_raster_arrow.html">a5_read_raster_arrow()</a></code>) or a Parquet file written straight from Rust (<code><a href="reference/a5_raster_to_parquet.html">a5_raster_to_parquet()</a></code>).</li>
 <li>
-<strong>Coordinate reference systems</strong>: EPSG codes, WKT in citation fields, and reconstruction from GeoKey parameters. Custom projections written by GDAL without an EPSG code, such as a centred Lambert azimuthal equal-area (<code>+proj=laea +lon_0=... +lat_0=...</code>), Albers, Lambert conformal conic or polar stereographic, are recognised.</li>
+<strong>Statistics</strong> in one pass: mean, sum, count, min, max, variance, standard deviation, majority class and class fractions.</li>
 <li>
-<strong>NoData</strong>: the dataset-wide <code>TIFFTAG_GDAL_NODATA</code>, compared safely for NaN.</li>
+<strong>Sampling modes</strong>: pixel centres (the default), area-weighted overlay that conserves sums, or centroid sampling for cells finer than pixels.</li>
+<li>
+<strong>Subsets</strong> by bounding box or polygon, and chunked reads that fetch each COG block once.</li>
+<li>
+<strong>Several files</strong> in one read: bands stored one per file, tiles pooled into one product, or captures composited per cell.</li>
+<li>
+<strong>Decoding</strong> of scale and offset, or of quantized codes such as Alpha Earth Foundations embeddings, before aggregation.</li>
+<li>
+<strong>Cloud sources</strong> on S3, GCS, Azure and HTTP(S), configured from the environment, with a session cache of the byte ranges fetched.</li>
 </ul>
-</div>
-<div class="section level2">
-<h2 id="not-yet-supported">Not yet supported<a class="anchor" aria-label="anchor" href="#not-yet-supported"></a>
-</h2>
-<ul>
-<li>Strip-based GeoTIFFs. They fail with a clear error.</li>
-<li>Per-band NoData. GeoTIFF does not store it; it will come with VRT support.</li>
-<li>Rasters that cross the antimeridian.</li>
-</ul>
-</div>
-<div class="section level2">
-<h2 id="stack">Stack<a class="anchor" aria-label="anchor" href="#stack"></a>
-</h2>
-<ul>
-<li>
-<a href="https://crates.io/crates/async-tiff" class="external-link"><code>async-tiff</code></a> and <a href="https://crates.io/crates/object_store" class="external-link"><code>object_store</code></a> for streamed reads.</li>
-<li>
-<a href="https://crates.io/crates/proj4rs" class="external-link"><code>proj4rs</code></a> for pure-Rust reprojection, and <a href="https://crates.io/crates/proj4wkt" class="external-link"><code>proj4wkt</code></a> for CRSs given only as WKT.</li>
-<li>
-<a href="https://crates.io/crates/a5" class="external-link"><code>a5</code></a> for cell maths.</li>
-<li>
-<a href="https://crates.io/crates/arrow-array" class="external-link"><code>arrow-array</code></a> and <a href="https://crates.io/crates/parquet" class="external-link"><code>parquet</code></a> for the Parquet writer.</li>
-<li>
-<a href="https://extendr.github.io/extendr/extendr_api/" class="external-link"><code>extendr-api</code></a> for the R bindings.</li>
-</ul>
+<p><a href="https://belian-earth.github.io/a5px/articles/a5px.html">Getting started</a> covers each of these with examples, and the <a href="https://belian-earth.github.io/a5px/reference/">reference</a> documents every argument.</p>
 </div>
 <div class="section level2">
 <h2 id="acknowledgements">Acknowledgements<a class="anchor" aria-label="anchor" href="#acknowledgements"></a>
 </h2>
-<p>Built on the <a href="https://github.com/felixpalmer/a5-rs" class="external-link">a5 Rust crate</a> by <a href="https://github.com/felixpalmer" class="external-link">Felix Palmer</a> and on <a href="https://github.com/belian-earth/a5R" class="external-link">a5R</a> for the cell type and Arrow interop. Streaming I/O and TIFF parsing come from the <a href="https://github.com/developmentseed/async-tiff" class="external-link"><code>async-tiff</code></a> team at Development Seed.</p>
+<p>Built on the <a href="https://github.com/felixpalmer/a5-rs" class="external-link">a5 Rust crate</a> by <a href="https://github.com/felixpalmer" class="external-link">Felix Palmer</a> and on <a href="https://github.com/belian-earth/a5R" class="external-link">a5R</a> for the cell type and Arrow interop. Streaming I/O and TIFF parsing come from the <a href="https://github.com/developmentseed/async-tiff" class="external-link"><code>async-tiff</code></a> team at Development Seed, with <a href="https://crates.io/crates/object_store" class="external-link"><code>object_store</code></a> for cloud reads, <a href="https://crates.io/crates/proj4rs" class="external-link"><code>proj4rs</code></a> for reprojection and <a href="https://extendr.github.io/extendr/extendr_api/" class="external-link"><code>extendr</code></a> for the R bindings.</p>
 </div>
 </div>
   </main><aside class="col-md-3"><div class="links">

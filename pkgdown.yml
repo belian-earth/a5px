@@ -1,8 +1,9 @@
 pandoc: 3.8.3
 pkgdown: 2.2.1
 pkgdown_sha: ~
-articles: {}
-last_built: 2026-10-16T09:28Z
+articles:
+  a5px: a5px.html
+last_built: 2026-10-16T11:18Z
 urls:
   reference: https://belian-earth.github.io/a5px/reference
   article: https://belian-earth.github.io/a5px/articles

@@ -22,6 +22,7 @@
 
     <div id="navbar" class="collapse navbar-collapse ms-3">
       <ul class="navbar-nav me-auto"><li class="nav-item"><a class="nav-link" href="../reference/index.html">Reference</a></li>
+<li class="nav-item"><a class="nav-link" href="../articles/a5px.html">Get started</a></li>
 <li class="active nav-item"><a class="nav-link" href="../news/index.html">Changelog</a></li>
       </ul><ul class="navbar-nav"><li class="nav-item"><form class="form-inline" role="search">
  <input class="form-control" type="search" name="search-input" id="search-input" autocomplete="off" aria-label="Search site" placeholder="Search for" data-search-index="../search.json"></form></li>
@@ -55,7 +56,8 @@
 </ul></li>
 <li><p>S3 sources with no credentials configured are read unsigned where no instance metadata service answers within 300 ms, as GDAL’s <code>/vsicurl/</code> reads a URL; they waited 14-27 s on the metadata service and then failed. An explicit <code>aws_skip_signature</code> or <code>AWS_NO_SIGN_REQUEST</code> is kept either way. GDAL paths <code>/vsis3/</code>, <code>/vsigs/</code>, <code>/vsiaz/</code> and <code>/vsicurl/</code> are read as the matching URL, and <code>http://</code> sources, or an <code>http://</code> S3 endpoint, no longer need <code>allow_http</code>.</p></li>
 <li><p>Installing the package no longer builds the <code>document</code> binary, a debug build of every dependency that added about a minute; only development builds (<code>NOT_CRAN</code> or <code>DEBUG</code> set, as devtools and pkgbuild do) regenerate <code>R/extendr-wrappers.R</code>.</p></li>
-<li><p>Reads return rows in ascending cell id, whatever the worker count, in tibbles, Arrow tables and Parquet files, so row order is reproducible (sums of floating-point values can still differ in the last bit between runs with more than one worker).</p></li>
+<li><p>A “Getting started” vignette now holds the usage guide, and the README keeps the worked example and a summary of features.</p></li>
+<li><p>Reads return rows in ascending cell id, whatever the worker count, in tibbles, Arrow tables and Parquet files (and <code><a href="../reference/a5_aggregate.html">a5_aggregate()</a></code> returns its cells in the same order), so row order is reproducible (sums of floating-point values can still differ in the last bit between runs with more than one worker).</p></li>
 <li><p>A read can be interrupted from R (Ctrl-C, or Esc in an IDE): it stops within a quarter of a second with an <code>a5px_error_interrupted</code> error, where it ran to completion.</p></li>
 <li><p>Internal mask bands (GDAL’s <code>GDAL_TIFF_INTERNAL_MASK</code>, common in JPEG COGs and orthophotos) are applied: masked pixels are missing data in forward, overlay and centroid reads, where every pixel counted.</p></li>
 <li><p>Arrow and Parquet outputs record the read’s provenance in their metadata: <code>a5_index</code> (the A5 index version of the cell ids), <code>a5_crate</code>, <code>a5px_version</code>, <code>a5px_mode</code>, <code>a5px_decode</code>, <code>a5px_overviews</code> and <code>a5px_src_nodata</code>, so an id from A5 0.x can no longer pass for a 1.0 id.</p></li>

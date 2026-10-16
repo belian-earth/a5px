@@ -56,8 +56,9 @@ a5_aggregate(
 
 ## Value
 
-A tibble keyed by supercells at `resolution`, with the selected columns
-reduced. The cell column retains its original name and the
+A tibble keyed by supercells at `resolution`, in ascending cell id, with
+the selected columns reduced. The cell column retains its original name
+and the
 [a5R::a5_cell](https://belian-earth.github.io/a5R/reference/a5_cell.html)
 class.
 
