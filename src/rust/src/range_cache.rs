@@ -33,9 +33,10 @@ use async_tiff::reader::{AsyncFileReader, ObjectReader};
 use bytes::Bytes;
 use extendr_api::prelude::*;
 
-/// Default budget in MiB, overridden by `A5PX_CACHE_MB` at first use, and
-/// held to an eighth of a cgroup memory limit (a container or a systemd
-/// scope), so a 2 GiB task caches at most 256 MiB.
+/// Default budget in MiB without a cgroup memory limit. Under one (a
+/// container or a systemd scope) the budget is an eighth of the limit, so a
+/// 2 GiB task caches 256 MiB and a 14 GiB task 1.75 GiB. `A5PX_CACHE_MB`
+/// overrides both at first use.
 const DEFAULT_BUDGET_MB: u64 = 512;
 
 /// Ranges at most this far apart are fetched in one request: the gap is
@@ -104,10 +105,7 @@ impl RangeCache {
 static CACHE: LazyLock<Mutex<RangeCache>> = LazyLock::new(|| {
     let budget = match std::env::var("A5PX_CACHE_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
         Some(mb) => mb.saturating_mul(1 << 20),
-        None => {
-            let d = DEFAULT_BUDGET_MB << 20;
-            cgroup_memory_limit().map_or(d, |lim| d.min(lim / 8))
-        }
+        None => default_budget(cgroup_memory_limit()),
     };
     Mutex::new(RangeCache {
         map: HashMap::new(),
@@ -117,6 +115,12 @@ static CACHE: LazyLock<Mutex<RangeCache>> = LazyLock::new(|| {
         budget,
     })
 });
+
+/// The default budget in bytes: an eighth of a cgroup memory limit, or
+/// `DEFAULT_BUDGET_MB` without one.
+fn default_budget(cgroup_limit: Option<u64>) -> u64 {
+    cgroup_limit.map_or(DEFAULT_BUDGET_MB << 20, |lim| lim / 8)
+}
 
 /// The memory limit of this process's cgroup in bytes, the smallest set on
 /// it or an ancestor (cgroup v2), or the v1 memory controller's; `None`
@@ -400,6 +404,13 @@ mod tests {
 
     fn key(s: &str, a: u64) -> Key {
         (Arc::from(s), a, a + 10)
+    }
+
+    #[test]
+    fn default_budget_is_an_eighth_of_a_cgroup_limit() {
+        assert_eq!(default_budget(None), 512 << 20);
+        assert_eq!(default_budget(Some(2 << 30)), 256 << 20);
+        assert_eq!(default_budget(Some(14 << 30)), 1792 << 20);
     }
 
     #[test]
