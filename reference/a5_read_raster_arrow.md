@@ -73,6 +73,16 @@ with two columns:
   the band names so dimension order is preserved when the table is
   written to Parquet and read back in another language.
 
+The schema metadata records the layout (`a5px_band_names`,
+`a5px_resolution`, `a5px_stats`, `a5px_layout`) and the read's
+provenance: `a5_index` (the A5 index version of the cell ids, `"1.0"`),
+`a5_crate` (the a5 crate version), `a5px_version`, `a5px_mode`,
+`a5px_decode` (`"none"`, `"scoff"` or `"dequant"`), `a5px_overviews`
+(`"allowed"` or `"off"`) and `a5px_src_nodata` (the override, or
+`"file"`).
+[`a5_raster_to_parquet()`](https://belian-earth.github.io/a5px/reference/a5_raster_to_parquet.md)
+writes the same keys.
+
 ## See also
 
 [`a5px_write_parquet()`](https://belian-earth.github.io/a5px/reference/a5px_write_parquet.md)

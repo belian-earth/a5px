@@ -108,7 +108,14 @@ or <code>"float32"</code> (halves disk size for embeddings).</p></dd>
 <li><p><code>value</code>: <code>FixedSizeList&lt;float, n_bands&gt;</code>. Field-level metadata records
 the band names so dimension order is preserved when the table is
 written to Parquet and read back in another language.</p></li>
-</ul></div>
+</ul><p>The schema metadata records the layout (<code>a5px_band_names</code>,
+<code>a5px_resolution</code>, <code>a5px_stats</code>, <code>a5px_layout</code>) and the read's
+provenance: <code>a5_index</code> (the A5 index version of the cell ids, <code>"1.0"</code>),
+<code>a5_crate</code> (the a5 crate version), <code>a5px_version</code>, <code>a5px_mode</code>,
+<code>a5px_decode</code> (<code>"none"</code>, <code>"scoff"</code> or <code>"dequant"</code>), <code>a5px_overviews</code>
+(<code>"allowed"</code> or <code>"off"</code>) and <code>a5px_src_nodata</code> (the override, or
+<code>"file"</code>). <code><a href="a5_raster_to_parquet.html">a5_raster_to_parquet()</a></code> writes the same keys.</p>
+    </div>
     <div class="section level2">
     <h2 id="see-also">See also<a class="anchor" aria-label="anchor" href="#see-also"></a></h2>
     <div class="dont-index"><p><code><a href="a5px_write_parquet.html">a5px_write_parquet()</a></code> to write the result to Parquet,
