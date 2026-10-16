@@ -13,7 +13,7 @@ test_that("known cell ids round-trip through the Rust cell encoding", {
   f <- system.file("extdata", "overview_cog.tif", package = "a5px")
   skip_if(f == "")
   cells <- a5_read_raster(f, 12L, use_overviews = FALSE)$cell
-  aoi <- a5R::a5_cell_to_parent(cells[1], resolution = 10L)
+  aoi <- a5R::a5_cell_to_parent(cells[1], 10L)
   expected <- a5R::a5_uncompact(
     a5R::a5_polygon_to_cells(aoi, 12L, containment = "overlapping"), 12L
   )
