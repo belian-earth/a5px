@@ -109,7 +109,10 @@ level (<code>level</code> = IFD index, <code>width</code>, <code>height</code>, 
 <li><p><code>crs</code>: <code>EPSG:&lt;code&gt;</code> when the file carries an EPSG code, otherwise
 the proj string a5px resolved.</p></li>
 <li><p><code>geotransform</code>: the 6-element GDAL geotransform.</p></li>
-<li><p><code>bbox</code>: WGS 84 envelope <code>c(xmin, ymin, xmax, ymax)</code> of the footprint.</p></li>
+<li><p><code>bbox</code>: WGS 84 envelope <code>c(xmin, ymin, xmax, ymax)</code> of the footprint.
+For a raster across the antimeridian <code>xmax</code> exceeds 180, as
+<code><a href="https://belian-earth.github.io/a5R/reference/a5_bbox.html" class="external-link">a5R::a5_bbox()</a></code> reports such polygons; one containing a pole spans
+every longitude and reaches the pole.</p></li>
 </ul></div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>

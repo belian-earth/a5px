@@ -79,6 +79,10 @@ A list with elements:
 - `geotransform`: the 6-element GDAL geotransform.
 
 - `bbox`: WGS 84 envelope `c(xmin, ymin, xmax, ymax)` of the footprint.
+  For a raster across the antimeridian `xmax` exceeds 180, as
+  [`a5R::a5_bbox()`](https://belian-earth.github.io/a5R/reference/a5_bbox.html)
+  reports such polygons; one containing a pole spans every longitude and
+  reaches the pole.
 
 ## Details
 
