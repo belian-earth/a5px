@@ -35,9 +35,9 @@ otherwise. Rows with weight 0 or \code{NA} do not count. The weights column
 is summed, like \code{npix}.}
 }
 \value{
-A tibble keyed by supercells at \code{resolution}, with the
-selected columns reduced. The cell column retains its original name
-and the \link[a5R:a5_cell]{a5R::a5_cell} class.
+A tibble keyed by supercells at \code{resolution}, in ascending
+cell id, with the selected columns reduced. The cell column retains
+its original name and the \link[a5R:a5_cell]{a5R::a5_cell} class.
 }
 \description{
 Lifts each row's A5 cell to its supercell at \code{resolution} via

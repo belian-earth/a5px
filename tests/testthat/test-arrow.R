@@ -1,14 +1,3 @@
-tif_dir <- function() {
-  dev <- normalizePath(file.path(testthat::test_path(), "..", "..", "test-tifs"),
-                       mustWork = FALSE)
-  if (dir.exists(dev)) dev else NA_character_
-}
-
-skip_no_tifs <- function() {
-  d <- tif_dir()
-  if (is.na(d)) testthat::skip("test-tifs/ not present")
-}
-
 test_that("a5_read_raster_arrow default (wide) returns one column per band", {
   testthat::skip_if_not_installed("arrow")
   skip_no_tifs()

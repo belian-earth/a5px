@@ -19,3 +19,5 @@
 ^\.github$
 ^codecov\.yml$
 ^tests/testthat/_problems$
+^doc$
+^Meta$

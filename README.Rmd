@@ -48,7 +48,7 @@ pak::pak("belian-earth/a5px")
 ```
 
 Building from source needs a [Rust toolchain](https://rustup.rs/) with
-`rustc` 1.85 or later. pak also installs
+`rustc` 1.89 or later. pak also installs
 [a5R](https://github.com/belian-earth/a5R), which provides the cell
 type. The examples below plot with
 [a5view](https://github.com/belian-earth/a5view):
@@ -108,285 +108,27 @@ ggplot(glacier, aes(cell = cell, fill = cells_rgb(B04, B03, B02, range = c(0, 45
   theme_void()
 ```
 
-## Usage
+## What else it does
 
-### Readers
+- **Three outputs** from one engine: a tibble (`a5_read_raster()`), an
+  Arrow table (`a5_read_raster_arrow()`) or a Parquet file written
+  straight from Rust (`a5_raster_to_parquet()`).
+- **Statistics** in one pass: mean, sum, count, min, max, variance,
+  standard deviation, majority class and class fractions.
+- **Sampling modes**: pixel centres (the default), area-weighted overlay
+  that conserves sums, or centroid sampling for cells finer than pixels.
+- **Subsets** by bounding box or polygon, and chunked reads that fetch
+  each COG block once.
+- **Several files** in one read: bands stored one per file, tiles pooled
+  into one product, or captures composited per cell.
+- **Decoding** of scale and offset, or of quantized codes such as Alpha
+  Earth Foundations embeddings, before aggregation.
+- **Cloud sources** on S3, GCS, Azure and HTTP(S), configured from the
+  environment, with a session cache of the byte ranges fetched.
 
-Three readers share one engine and differ only in what they return:
-
-```r
-# tibble: one numeric column per band
-tbl <- a5_read_raster(src, resolution, stat, bands)
-
-# Arrow table: a cell column and a FixedSizeList<float, n_bands> per stat
-arr <- a5_read_raster_arrow(src, resolution, stat, bands, value_type = "float64")
-
-# Parquet written directly from Rust, with no R-side Arrow round trip
-a5_raster_to_parquet(src, dest, resolution, stat, bands, value_type, compression)
-
-# write a tibble or Arrow table from the first two
-a5px_write_parquet(x, dest, compression = "zstd")
-
-# metadata without reading pixels
-a5_raster_info(src)   # dimensions, data type, block grid, overviews, CRS, envelope
-a5px_store_config(src)  # resolved object store configuration for a remote src
-```
-
-Their main arguments:
-
-- `src`: one or more paths or URLs: local, `file://`, `http(s)://`,
-  `s3://`, `gs://` or `az://`. Remote reads fetch byte ranges and never
-  download the whole file.
-- `separate`, `composite`: how several files combine (see [Several
-  files](#several-files)).
-- `resolution`: A5 resolution, 0 to 29 (30 is not yet supported).
-  `a5R::a5_cell_area()` gives the cell area at each.
-- `stat`: one or more of `"mean"`, `"sum"`, `"count"`, `"min"`,
-  `"max"`, `"var"`, `"sd"`, `"majority"` and `"fractions"`. With
-  several, the tibble has one column per band and stat, and the Arrow
-  and Parquet outputs one list column per stat.
-- `bands`: `NULL` (all), 1-based indices, or names matched against the
-  GDAL `DESCRIPTION` band tag.
-- `bbox`, `bbox_align`: a WGS 84 subset, by pixel or by whole COG block
-  (see [Chunked reads](#chunked-reads)).
-- `aoi`, `containment`: keep only the A5 cells of a polygon (see [Areas
-  of interest](#areas-of-interest)).
-- `mode`: `"forward"`, `"overlay"` or `"centroid"` sampling.
-- `scoff`, `dequant`: decode stored values per pixel before aggregation
-  (see [Decoding stored values](#decoding-stored-values)).
-- `use_overviews`: whether `stat = "mean"` may read a COG overview.
-- `cpu_workers`, `io_concurrency`: CPU threads and remote requests in flight.
-- `store_opts`: object store options (see [Remote
-  sources](#remote-sources)).
-
-### Several files
-
-Several files are read in one pass and share the fetch queue and
-workers. How they combine depends on what they hold:
-
-```r
-# bands stored one per file: one column per file, named by names(src)
-# or the file name
-a5_read_raster(c(red = red_url, nir = nir_url), 14L, separate = TRUE)
-
-# adjacent tiles, or repeat captures, of one product: pixels pooled
-a5_read_raster(c(tile_a, tile_b), 14L)
-
-# a statistic per capture, reduced across captures for each cell
-a5_read_raster(dates, 14L, composite = "median")
-a5_read_raster(dates, 14L, composite = "count") # captures per cell
-```
-
-Pooled files must have the same bands and pixel size. Every valid pixel
-enters its cell once, so cells on a seam between tiles combine exactly.
-Where files overlap, every capture counts, unlike GDAL's last-wins rule:
-`sum` and `count` include the overlap once per file. `composite`
-instead computes `stat` for each file, then reduces across files per
-cell, weighting each file by its valid pixel count there; the cell grid
-is shared, so the files need not be aligned. Single-band files without
-band descriptions look identical to the pooling check, so set
-`separate = TRUE` for files that hold different bands.
-
-### Several statistics in one pass
-
-```r
-# sum and count let you merge partial results without re-reading
-agg <- a5_read_raster(src, resolution = 14L, stat = c("mean", "sum", "count"))
-# columns: cell, B02_mean, B02_sum, B02_count, B03_mean, ...
-```
-
-### Coarser resolutions
-
-`a5_aggregate()` summarises a result at a coarser resolution without
-re-reading the raster. Each cell goes to the coarse cell that contains
-its centre:
-
-```r
-coarse <- a5_aggregate(fine, to_resolution = 10L)
-```
-
-### Decoding stored values
-
-`scoff = TRUE` applies the scale and offset each band declares (see
-`a5_raster_info()`), for example to turn integer reflectance into
-physical units. The decode is linear, so it can run before or after
-averaging with the same result.
-
-Quantized sources are different. A nonlinear decode does not commute
-with the mean, so averaging raw codes and decoding the result gives the
-wrong answer. `dequant` decodes each pixel in Rust before aggregation:
-
-```r
-# Alpha Earth Foundations int8 codes: sign(x) * (x / 127.5)^2
-emb <- a5_read_raster(url, resolution = 14L, bands = 1:8, dequant = dequant_aef)
-
-# or any vectorised R function over the integer codes
-emb <- a5_read_raster(url, resolution = 14L, dequant = function(x) x / 250)
-```
-
-Any R function works because the codes are a finite set: a5px evaluates
-the function once per possible code and passes Rust a lookup table. So
-`dequant` needs an integer source of 16 bits or fewer (int8, uint8,
-int16 or uint16). NoData is matched against the raw code.
-
-Setting `dequant` also turns `use_overviews` off by default. COG
-overviews are usually built by averaging, and an average of codes
-decodes wrongly. Set `use_overviews = TRUE` (it warns) only when the
-overviews were built with nearest or mode resampling.
-
-### Overlay sampling
-
-The default forward mode assigns each pixel to the cell containing its
-centre. `mode = "overlay"` instead splits each pixel between the cells
-it overlaps, in proportion to area, estimated by supersampling each
-pixel (`subsamples`, chosen automatically by default):
-
-```r
-# area-weighted mean: boundary pixels are shared, not all-or-nothing
-a5_read_raster(src, resolution = 12L, mode = "overlay")
-
-# mass-preserving sum: totals such as population counts are conserved
-a5_read_raster(src, resolution = 12L, mode = "overlay", stat = "sum")
-```
-
-Pixels wholly inside one cell cost the same as in forward mode; only
-pixels on a cell boundary are supersampled.
-
-### Categorical rasters
-
-For integer class labels such as land cover, `stat = "majority"` gives
-each cell's dominant class and `stat = "fractions"` the share of each
-class as a list column. Under `mode = "overlay"` both are area-weighted:
-
-```r
-a5_read_raster(landcover, resolution = 12L, stat = "majority", mode = "overlay")
-a5_read_raster(landcover, resolution = 12L, stat = "fractions")
-```
-
-### Cells finer than pixels
-
-When cells are smaller than pixels, `mode = "centroid"` samples one value
-at each cell centre. `interp` picks the kernel: `"nearest"` (default),
-`"bilinear"`, `"bicubic"` (Keys) or `"lanczos"`.
-
-```r
-a5_read_raster(dem, resolution = 18L, mode = "centroid", interp = "bilinear")
-```
-
-### Band selection
-
-For COGs that store each band separately (`INTERLEAVE=BAND`), common for
-embedding rasters such as Alpha Earth Foundations, `bands` limits the
-download to the selected bands. Reading 8 of 64 bands from a 2.8 GB AEF
-tile takes 24 s instead of 62 s.
-
-```r
-a5_raster_to_parquet(
-  url, "embeddings.parquet",
-  resolution     = 14L,
-  bands          = 1:8,
-  value_type     = "float32",
-  compression    = "zstd",
-  cpu_workers    = 16L,
-  io_concurrency = 32L
-)
-```
-
-### Remote sources
-
-Cloud clients take their configuration from the environment first
-(every `AWS_*`, `GOOGLE_*` and `AZURE_*` variable that `object_store`
-understands, plus GDAL's `AWS_NO_SIGN_REQUEST=YES` for public buckets)
-and from `store_opts` second, so an explicit option always wins.
-
-```r
-# public bucket outside us-east-1, no credentials
-Sys.setenv(AWS_NO_SIGN_REQUEST = "YES", AWS_REGION = "us-west-2")
-a5_read_raster("s3://us-west-2.opendata.source.coop/tge-labs/aef/.../tile.tiff", 14L)
-
-# the same without touching the environment
-a5_read_raster(src, 14L, store_opts = c(aws_region = "us-west-2",
-                                        aws_skip_signature = "true"))
-
-# check region, endpoint and signing before a long read
-a5px_store_config(src, store_opts = c(aws_region = "us-west-2"))
-```
-
-a5px does not read the shared credentials file or `AWS_PROFILE`. Without
-credentials or `aws_skip_signature`, the client falls back to instance
-metadata, which off AWS waits for a long timeout before failing.
-
-### Areas of interest
-
-`aoi` restricts a read to the A5 cells of a polygon, selected as by
-`a5R::a5_polygon_to_cells()`: `containment = "centre"` keeps cells whose
-centre is inside and `"overlapping"` every cell the polygon touches.
-Selection is by cell: an included cell gets the statistics of all its
-valid pixels, including any outside the polygon.
-
-```r
-a5_read_raster(src, 14L, aoi = sf::st_geometry(catchment), containment = "overlapping")
-
-# centroid mode samples the AOI cells directly, covering the polygon without gaps
-a5_read_raster(dem, 18L, mode = "centroid", aoi = catchment, containment = "overlapping")
-```
-
-### Chunked reads
-
-The accumulators hold every touched cell in memory, so split very large
-reads by `bbox`. `bbox_align = "block"` takes the COG blocks whose origin
-lies in the bbox, so a partition of bboxes fetches every block exactly
-once and per-cell `sum` and `count` partials add up exactly.
-
-```r
-info <- a5_raster_info(src)           # block grid and WGS 84 envelope
-chunks <- split_bbox(info$bbox, 4, 4) # your own grid over info$bbox
-parts <- lapply(chunks, function(b) {
-  a5_read_raster(src, 18L, bbox = b, bbox_align = "block",
-                 stat = c("sum", "count"), use_overviews = FALSE)
-})
-```
-
-### Configuration
-
-```r
-a5px_set_concurrency(cpu_workers = 8, io_concurrency = 32) # session default
-a5px_get_concurrency()                                     # current setting
-Sys.setenv(A5PX_PROFILE = "1")                             # stage timings to stderr
-```
-
-## Supported
-
-- **Formats**: tiled GeoTIFF and COG with ZSTD, Deflate, LZW, JPEG or no
-  compression, from local files or S3, GCS, Azure and HTTP(S) stores.
-- **Coordinate reference systems**: EPSG codes, WKT in citation fields,
-  and reconstruction from GeoKey parameters. Custom projections written
-  by GDAL without an EPSG code, such as a centred Lambert azimuthal
-  equal-area (`+proj=laea +lon_0=... +lat_0=...`), Albers, Lambert
-  conformal conic or polar stereographic, are recognised.
-- **NoData**: the dataset-wide `TIFFTAG_GDAL_NODATA`, compared safely
-  for NaN.
-
-## Not yet supported
-
-- Strip-based GeoTIFFs. They fail with a clear error.
-- Per-band NoData. GeoTIFF does not store it; it will come with VRT
-  support.
-- Rasters that cross the antimeridian.
-
-## Stack
-
-- [`async-tiff`](https://crates.io/crates/async-tiff) and
-  [`object_store`](https://crates.io/crates/object_store) for streamed
-  reads.
-- [`proj4rs`](https://crates.io/crates/proj4rs) for pure-Rust
-  reprojection, and [`proj4wkt`](https://crates.io/crates/proj4wkt) for
-  CRSs given only as WKT.
-- [`a5`](https://crates.io/crates/a5) for cell maths.
-- [`arrow-array`](https://crates.io/crates/arrow-array) and
-  [`parquet`](https://crates.io/crates/parquet) for the Parquet writer.
-- [`extendr-api`](https://extendr.github.io/extendr/extendr_api/) for
-  the R bindings.
+[Getting started](https://belian-earth.github.io/a5px/articles/a5px.html) covers each of these with examples, and the
+[reference](https://belian-earth.github.io/a5px/reference/) documents
+every argument.
 
 ## Acknowledgements
 
@@ -395,4 +137,8 @@ Built on the [a5 Rust crate](https://github.com/felixpalmer/a5-rs) by
 [a5R](https://github.com/belian-earth/a5R) for the cell type and Arrow
 interop. Streaming I/O and TIFF parsing come from the
 [`async-tiff`](https://github.com/developmentseed/async-tiff) team at
-Development Seed.
+Development Seed, with
+[`object_store`](https://crates.io/crates/object_store) for cloud reads,
+[`proj4rs`](https://crates.io/crates/proj4rs) for reprojection and
+[`extendr`](https://extendr.github.io/extendr/extendr_api/) for the R
+bindings.

@@ -46,9 +46,9 @@
 #'   otherwise. Rows with weight 0 or `NA` do not count. The weights column
 #'   is summed, like `npix`.
 #'
-#' @returns A tibble keyed by supercells at `resolution`, with the
-#'   selected columns reduced. The cell column retains its original name
-#'   and the [a5R::a5_cell] class.
+#' @returns A tibble keyed by supercells at `resolution`, in ascending
+#'   cell id, with the selected columns reduced. The cell column retains
+#'   its original name and the [a5R::a5_cell] class.
 #'
 #' @export
 #' @examples
@@ -126,7 +126,9 @@ a5_aggregate <- function(x,
     st <- if (nm == "npix" || identical(nm, weights)) "sum" else stat
     out_cols[[nm]] <- reduce_column(x[[nm]], gid, st, nm, w)
   }
-  tibble::tibble(!!!out_cols)
+  out <- tibble::tibble(!!!out_cols)
+  # ascending cell id, as the readers return; zero-padded hex sorts as the id
+  out[order(a5R::a5_u64_to_hex(uniq_parents)), , drop = FALSE]
 }
 
 #' Row weights for a weighted mean from the `weights` column, or `NULL`

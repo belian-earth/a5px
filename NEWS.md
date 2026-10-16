@@ -81,8 +81,12 @@
   development builds (`NOT_CRAN` or `DEBUG` set, as devtools and pkgbuild
   do) regenerate `R/extendr-wrappers.R`.
 
+* A "Getting started" vignette now holds the usage guide, and the README
+  keeps the worked example and a summary of features.
+
 * Reads return rows in ascending cell id, whatever the worker count,
-  in tibbles, Arrow tables and Parquet files, so row order is
+  in tibbles, Arrow tables and Parquet files (and `a5_aggregate()`
+  returns its cells in the same order), so row order is
   reproducible (sums of floating-point values can still differ in the
   last bit between runs with more than one worker).
 
