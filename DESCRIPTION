@@ -21,7 +21,7 @@ BugReports: https://github.com/belian-earth/a5px/issues
 Depends:
     R (>= 4.2)
 Imports:
-    a5R (>= 0.9.9.9003),
+    a5R (>= 0.9.9.9006),
     cli,
     rlang (>= 1.1.0),
     stats,

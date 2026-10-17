@@ -55,7 +55,7 @@ The spatial rule is exact for centre placement but approximate for area,
 because fine cells straddle coarse-cell boundaries. If you need
 conservative aggregation (counts that must sum exactly), use a higher
 input resolution so boundary error is small relative to cell area.
-Locating centres runs in parallel under \code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}.
+Locating centres runs in parallel under \code{\link[a5R:a5_threads]{a5R::a5_threads()}}.
 
 A cell's mean summarises its pixels, so \code{"mean"} is weighted by each
 row's pixel count: the \code{npix} column when \code{x} has one (read with

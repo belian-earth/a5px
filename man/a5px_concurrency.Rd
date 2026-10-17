@@ -43,7 +43,7 @@ CPU quotas (a job limited to 4 CPUs on a 20-core host gets 4); for
 \code{options(a5px.io_concurrency = ...)}, or the environment variables
 \code{A5PX_CPU_WORKERS} and \code{A5PX_IO_CONCURRENCY}.
 
-\code{a5px_concurrency()} works like \code{\link[=options]{options()}} and \code{a5R::a5_threads()}:
+\code{a5px_concurrency()} works like \code{\link[=options]{options()}} and \code{\link[a5R:a5_threads]{a5R::a5_threads()}}:
 called with no settings it returns them, and called with settings it
 changes them and returns the previous ones, which restore them when
 passed back or when used with \code{\link[=with]{with()}}.

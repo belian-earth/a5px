@@ -84,7 +84,7 @@
 #' [a5px_concurrency()] sets and reports the session
 #' defaults for the worker pool (`cpu_workers`) and the number of remote
 #' requests in flight (`io_concurrency`). They are independent of
-#' [a5R::a5_set_threads()]. Remote reads are usually limited by latency,
+#' [a5R::a5_threads()]. Remote reads are usually limited by latency,
 #' so a higher `io_concurrency` often helps. Remote reads keep the byte
 #' ranges they fetch in a session cache, so reads split into `bbox` chunks
 #' fetch each block once; [a5px_set_cache()] sets its budget.

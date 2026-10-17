@@ -112,7 +112,7 @@ and envelope to build the chunks from.
 \code{\link[=a5px_concurrency]{a5px_concurrency()}} sets and reports the session
 defaults for the worker pool (\code{cpu_workers}) and the number of remote
 requests in flight (\code{io_concurrency}). They are independent of
-\code{\link[a5R:a5_set_threads]{a5R::a5_set_threads()}}. Remote reads are usually limited by latency,
+\code{\link[a5R:a5_threads]{a5R::a5_threads()}}. Remote reads are usually limited by latency,
 so a higher \code{io_concurrency} often helps. Remote reads keep the byte
 ranges they fetch in a session cache, so reads split into \code{bbox} chunks
 fetch each block once; \code{\link[=a5px_set_cache]{a5px_set_cache()}} sets its budget.
