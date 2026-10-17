@@ -29,7 +29,8 @@
   and a5R’s `a5_threads()`: with no arguments it returns the settings,
   with arguments it sets them and returns the previous ones, which
   `a5px_concurrency(old)` or
-  `with(a5px_concurrency(cpu_workers = 1), expr)` restore.
+  `with(a5px_concurrency(cpu_workers = 1), expr)` restore. a5px now
+  needs a5R \>= 0.9.9.9006, which brings `a5_threads()`.
 
 - **Breaking:** `a5_store_config()` is now
   [`a5px_store_config()`](https://belian-earth.github.io/a5px/reference/a5px_store_config.md),

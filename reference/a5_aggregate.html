@@ -117,7 +117,7 @@ The spatial rule is exact for centre placement but approximate for area,
 because fine cells straddle coarse-cell boundaries. If you need
 conservative aggregation (counts that must sum exactly), use a higher
 input resolution so boundary error is small relative to cell area.
-Locating centres runs in parallel under <code><a href="https://belian-earth.github.io/a5R/reference/a5_set_threads.html" class="external-link">a5R::a5_set_threads()</a></code>.</p>
+Locating centres runs in parallel under <code><a href="https://belian-earth.github.io/a5R/reference/a5_threads.html" class="external-link">a5R::a5_threads()</a></code>.</p>
 <p>A cell's mean summarises its pixels, so <code>"mean"</code> is weighted by each
 row's pixel count: the <code>npix</code> column when <code>x</code> has one (read with
 <code>stat = c("mean", "npix")</code>), or the column named by <code>weights</code>. The
