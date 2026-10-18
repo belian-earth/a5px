@@ -38,6 +38,7 @@ Suggests:
     knitr,
     parallel,
     rmarkdown,
+    s2,
     sf,
     terra,
     testthat (>= 3.0.0),
