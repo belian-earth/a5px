@@ -366,6 +366,17 @@ its pixels outside the polygon:</p>
 <p><img src="a5px_files/figure-html/aoi-map-1.png" class="r-plt" alt="" width="100%"></p>
 <p>In centroid mode the AOI’s cells are sampled directly, so the polygon
 is covered without gaps.</p>
+<p><code>mask</code> selects pixels instead: a pixel whose centre lies
+outside the polygon is dropped, as a nodata pixel is, so a boundary
+cell’s statistics come only from its pixels inside. It takes the same
+geometries as <code>aoi</code>, with great-circle edges, and combines
+with it:</p>
+<div class="sourceCode" id="cb13"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="va">out</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">cog</span>, resolution <span class="op">=</span> <span class="fl">13L</span>, stat <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"mean"</span>, <span class="st">"count"</span><span class="op">)</span>,</span>
+<span>                      aoi <span class="op">=</span> <span class="va">aoi</span>, containment <span class="op">=</span> <span class="st">"overlapping"</span>, mask <span class="op">=</span> <span class="va">aoi</span><span class="op">)</span></span>
+<span><span class="fu"><a href="https://rdrr.io/r/base/summary.html" class="external-link">summary</a></span><span class="op">(</span><span class="va">out</span><span class="op">$</span><span class="va">band_01_count</span><span class="op">)</span></span>
+<span><span class="co">#&gt;    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. </span></span>
+<span><span class="co">#&gt;       3     323     560     431     563     566</span></span></code></pre></div>
 </div>
 <div class="section level3">
 <h3 id="chunked-reads">Chunked reads<a class="anchor" aria-label="anchor" href="#chunked-reads"></a>
@@ -376,7 +387,7 @@ very large reads are best split by <code>bbox</code>.
 in each box, so a set of boxes that tiles the raster fetches every block
 once, and <code>sum</code> and <code>count</code> add up exactly across
 chunks:</p>
-<div class="sourceCode" id="cb13"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb14"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">east</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="op">(</span><span class="va">b</span><span class="op">[</span><span class="fl">1</span><span class="op">]</span> <span class="op">+</span> <span class="va">b</span><span class="op">[</span><span class="fl">3</span><span class="op">]</span><span class="op">)</span> <span class="op">/</span> <span class="fl">2</span>, <span class="va">b</span><span class="op">[</span><span class="fl">2</span><span class="op">]</span>, <span class="va">b</span><span class="op">[</span><span class="fl">3</span><span class="op">]</span>, <span class="va">b</span><span class="op">[</span><span class="fl">4</span><span class="op">]</span><span class="op">)</span></span>
 <span><span class="va">parts</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/lapply.html" class="external-link">lapply</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/list.html" class="external-link">list</a></span><span class="op">(</span><span class="va">west</span>, <span class="va">east</span><span class="op">)</span>, <span class="kw">function</span><span class="op">(</span><span class="va">bb</span><span class="op">)</span> <span class="op">{</span></span>
 <span>  <span class="fu"><a href="../reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">cog</span>, resolution <span class="op">=</span> <span class="fl">13L</span>, bbox <span class="op">=</span> <span class="va">bb</span>, bbox_align <span class="op">=</span> <span class="st">"block"</span>,</span>
@@ -396,7 +407,7 @@ session cache (see <a href="#remote-sources">Remote sources</a>).</p>
 </h2>
 <p><code>src</code> takes several files, read in one pass. How they
 combine depends on what they hold:</p>
-<div class="sourceCode" id="cb14"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb15"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="co"># bands stored one file each: one column per file, named by names(src)</span></span>
 <span><span class="fu"><a href="../reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>red <span class="op">=</span> <span class="va">red_url</span>, nir <span class="op">=</span> <span class="va">nir_url</span><span class="op">)</span>, <span class="fl">14L</span>, separate <span class="op">=</span> <span class="cn">TRUE</span><span class="op">)</span></span>
 <span></span>
@@ -420,7 +431,7 @@ bands.</p>
 </h2>
 <p><code>scoff = TRUE</code> applies the scale and offset each band
 declares, turning stored integers into physical units:</p>
-<div class="sourceCode" id="cb15"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb16"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">sc</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/system.file.html" class="external-link">system.file</a></span><span class="op">(</span><span class="st">"extdata"</span>, <span class="st">"scoff_int16.tif"</span>, package <span class="op">=</span> <span class="st">"a5px"</span><span class="op">)</span></span>
 <span><span class="fu"><a href="../reference/a5_raster_info.html">a5_raster_info</a></span><span class="op">(</span><span class="va">sc</span><span class="op">)</span><span class="op">[</span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"scale"</span>, <span class="st">"offset"</span><span class="op">)</span><span class="op">]</span></span>
 <span><span class="co">#&gt; $scale</span></span>
@@ -451,7 +462,7 @@ it once per possible code and passes the table to Rust, so the source
 must be an integer type of 16 bits or fewer. <code>dequant_aef</code>
 decodes Alpha Earth Foundations embeddings,
 <code>sign(x) * (x / 127.5)^2</code>:</p>
-<div class="sourceCode" id="cb16"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb17"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">aef</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/system.file.html" class="external-link">system.file</a></span><span class="op">(</span><span class="st">"extdata"</span>, <span class="st">"aef_int8.tif"</span>, package <span class="op">=</span> <span class="st">"a5px"</span><span class="op">)</span></span>
 <span><span class="fu"><a href="../reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">aef</span>, resolution <span class="op">=</span> <span class="fl">13L</span>, dequant <span class="op">=</span> <span class="va">dequant_aef</span><span class="op">)</span></span>
 <span><span class="co">#&gt; <span style="color: #949494;"># A tibble: 194 × 3</span></span></span>
@@ -480,7 +491,7 @@ decode wrongly.</p>
 resolution without re-reading the raster. Each cell goes to the coarse
 cell containing its centre, and means are weighted by each cell’s pixel
 count:</p>
-<div class="sourceCode" id="cb17"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb18"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">fine</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/a5_read_raster.html">a5_read_raster</a></span><span class="op">(</span><span class="va">cog</span>, resolution <span class="op">=</span> <span class="fl">14L</span>, stat <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"mean"</span>, <span class="st">"npix"</span><span class="op">)</span><span class="op">)</span></span>
 <span><span class="va">coarse</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/a5_aggregate.html">a5_aggregate</a></span><span class="op">(</span><span class="va">fine</span>, resolution <span class="op">=</span> <span class="fl">11L</span><span class="op">)</span></span>
 <span><span class="va">coarse</span></span>
@@ -500,7 +511,7 @@ count:</p>
 <span><span class="co">#&gt; <span style="color: #949494;"># ℹ 34 more rows</span></span></span></code></pre></div>
 <p>Coarse cells along the raster’s edge extend past it, and their means
 cover only the part with pixels:</p>
-<div class="sourceCode" id="cb18"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb19"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">both</span> <span class="op">&lt;-</span> <span class="fu">vctrs</span><span class="fu">::</span><span class="fu"><a href="https://vctrs.r-lib.org/reference/vec_bind.html" class="external-link">vec_rbind</a></span><span class="op">(</span></span>
 <span>  <span class="fu">tibble</span><span class="fu">::</span><span class="fu"><a href="https://tibble.tidyverse.org/reference/tibble.html" class="external-link">tibble</a></span><span class="op">(</span>cell <span class="op">=</span> <span class="va">fine</span><span class="op">$</span><span class="va">cell</span>, band_01 <span class="op">=</span> <span class="va">fine</span><span class="op">$</span><span class="va">band_01</span>, res <span class="op">=</span> <span class="st">"resolution 14"</span><span class="op">)</span>,</span>
 <span>  <span class="fu">tibble</span><span class="fu">::</span><span class="fu"><a href="https://tibble.tidyverse.org/reference/tibble.html" class="external-link">tibble</a></span><span class="op">(</span>cell <span class="op">=</span> <span class="va">coarse</span><span class="op">$</span><span class="va">cell</span>, band_01 <span class="op">=</span> <span class="va">coarse</span><span class="op">$</span><span class="va">band_01</span>, res <span class="op">=</span> <span class="st">"resolution 11"</span><span class="op">)</span></span>
@@ -525,7 +536,7 @@ every <code>AWS_*</code>, <code>GOOGLE_*</code> and <code>AZURE_*</code>
 variable that <code>object_store</code> understands plus GDAL’s
 <code>AWS_NO_SIGN_REQUEST</code>, and from <code>store_opts</code>
 second, so an explicit option wins.</p>
-<div class="sourceCode" id="cb19"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb20"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">url</span> <span class="op">&lt;-</span> <span class="st">"s3://us-west-2.opendata.source.coop/tge-labs/aef/v1/annual/2020/22S/tile.tiff"</span></span>
 <span></span>
 <span><span class="co"># a public bucket outside us-east-1</span></span>
@@ -573,7 +584,7 @@ size of Arrow and Parquet output.</li>
 <code>Sys.setenv(A5PX_PROFILE = "1")</code> prints the time spent in
 each stage of a read.</li>
 </ul>
-<div class="sourceCode" id="cb20"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb21"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/a5_raster_to_parquet.html">a5_raster_to_parquet</a></span><span class="op">(</span></span>
 <span>  <span class="va">url</span>, <span class="st">"embeddings.parquet"</span>,</span>
 <span>  resolution <span class="op">=</span> <span class="fl">14L</span>, bands <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">8</span>, dequant <span class="op">=</span> <span class="va">dequant_aef</span>,</span>

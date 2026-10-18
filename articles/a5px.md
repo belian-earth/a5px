@@ -328,6 +328,20 @@ ggplot(vctrs::vec_rbind(!!!by_rule)) +
 In centroid mode the AOI’s cells are sampled directly, so the polygon is
 covered without gaps.
 
+`mask` selects pixels instead: a pixel whose centre lies outside the
+polygon is dropped, as a nodata pixel is, so a boundary cell’s
+statistics come only from its pixels inside. It takes the same
+geometries as `aoi`, with great-circle edges, and combines with it:
+
+``` r
+
+out <- a5_read_raster(cog, resolution = 13L, stat = c("mean", "count"),
+                      aoi = aoi, containment = "overlapping", mask = aoi)
+summary(out$band_01_count)
+#>    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#>       3     323     560     431     563     566
+```
+
 ### Chunked reads
 
 A read holds every cell it touches in memory until it finishes, so very

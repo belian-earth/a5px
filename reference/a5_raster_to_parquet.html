@@ -70,6 +70,7 @@ from its existing flat buffer, and writes Parquet via the
 <span>  bbox_align <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"pixel"</span>, <span class="st">"block"</span><span class="op">)</span>,</span>
 <span>  aoi <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  containment <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"centre"</span>, <span class="st">"overlapping"</span><span class="op">)</span>,</span>
+<span>  mask <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  src_nodata <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  mode <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"forward"</span>, <span class="st">"overlay"</span>, <span class="st">"centroid"</span><span class="op">)</span>,</span>
 <span>  subsamples <span class="op">=</span> <span class="cn">NULL</span>,</span>
@@ -92,7 +93,7 @@ from its existing flat buffer, and writes Parquet via the
     <h2 id="arguments">Arguments<a class="anchor" aria-label="anchor" href="#arguments"></a></h2>
 
 
-<dl><dt id="arg-src-resolution-stat-bands-bbox-src-nodata-cpu-workers-io-concurrency-scoff-dequant-subsamples-interp-as-vector-use-overviews-store-opts-bbox-align-aoi-containment-separate-composite">src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, scoff, dequant, subsamples, interp, as_vector, use_overviews, store_opts, bbox_align, aoi, containment, separate, composite<a class="anchor" aria-label="anchor" href="#arg-src-resolution-stat-bands-bbox-src-nodata-cpu-workers-io-concurrency-scoff-dequant-subsamples-interp-as-vector-use-overviews-store-opts-bbox-align-aoi-containment-separate-composite"></a></dt>
+<dl><dt id="arg-src-resolution-stat-bands-bbox-src-nodata-cpu-workers-io-concurrency-scoff-dequant-subsamples-interp-as-vector-use-overviews-store-opts-bbox-align-aoi-containment-mask-separate-composite">src, resolution, stat, bands, bbox, src_nodata, cpu_workers, io_concurrency, scoff, dequant, subsamples, interp, as_vector, use_overviews, store_opts, bbox_align, aoi, containment, mask, separate, composite<a class="anchor" aria-label="anchor" href="#arg-src-resolution-stat-bands-bbox-src-nodata-cpu-workers-io-concurrency-scoff-dequant-subsamples-interp-as-vector-use-overviews-store-opts-bbox-align-aoi-containment-mask-separate-composite"></a></dt>
 <dd><p>See
 <code><a href="a5_read_raster.html">a5_read_raster()</a></code>.</p></dd>
 

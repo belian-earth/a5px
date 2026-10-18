@@ -60,6 +60,7 @@ into a tibble keyed by cell.</p>
 <span>  bbox_align <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"pixel"</span>, <span class="st">"block"</span><span class="op">)</span>,</span>
 <span>  aoi <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  containment <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"centre"</span>, <span class="st">"overlapping"</span><span class="op">)</span>,</span>
+<span>  mask <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  src_nodata <span class="op">=</span> <span class="cn">NULL</span>,</span>
 <span>  mode <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"forward"</span>, <span class="st">"overlay"</span>, <span class="st">"centroid"</span><span class="op">)</span>,</span>
 <span>  subsamples <span class="op">=</span> <span class="cn">NULL</span>,</span>
@@ -182,6 +183,23 @@ one 180 degrees wide or more is an error unless it covers the globe.</p></dd>
 centre lies inside the polygon; <code>"overlapping"</code> also keeps every cell
 the polygon boundary touches, for gap-free coverage. Only used with
 <code>aoi</code>.</p></dd>
+
+
+<dt id="arg-mask">mask<a class="anchor" aria-label="anchor" href="#arg-mask"></a></dt>
+<dd><p>Optional polygons in WGS 84 that select pixels, accepted in
+the same forms as <code>aoi</code>. A pixel whose centre lies outside <code>mask</code>
+(hole interiors count as outside) is dropped before aggregation, as a
+nodata pixel is: it adds to no statistic, <code>"count"</code> and <code>"npix"</code>
+included. Several features form one mask (their union). Where <code>aoi</code>
+selects whole cells, <code>mask</code> selects pixels, and the two combine: a
+cell of the AOI receives its pixels inside the mask. Edges are great
+circles, as for <code>aoi</code>; densify a polygon whose edges should follow
+lines of constant latitude. Tiles are selected by the mask's bounding
+box, so a mask outside the raster gives an empty result. Combines with
+<code>bbox</code> and <code>bbox_align</code>. In <code>mode = "overlay"</code> a kept pixel's area is
+still split among the cells it overlaps; <code>mask</code> is not used in
+<code>mode = "centroid"</code>. Each polygon must lie within 80 degrees of the
+mean of its vertices.</p></dd>
 
 
 <dt id="arg-src-nodata">src_nodata<a class="anchor" aria-label="anchor" href="#arg-src-nodata"></a></dt>

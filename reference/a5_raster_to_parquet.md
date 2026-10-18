@@ -22,6 +22,7 @@ a5_raster_to_parquet(
   bbox_align = c("pixel", "block"),
   aoi = NULL,
   containment = c("centre", "overlapping"),
+  mask = NULL,
   src_nodata = NULL,
   mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
@@ -44,8 +45,8 @@ a5_raster_to_parquet(
 
 - src, resolution, stat, bands, bbox, src_nodata, cpu_workers,
   io_concurrency, scoff, dequant, subsamples, interp, as_vector,
-  use_overviews, store_opts, bbox_align, aoi, containment, separate,
-  composite:
+  use_overviews, store_opts, bbox_align, aoi, containment, mask,
+  separate, composite:
 
   See
   [`a5_read_raster()`](https://belian-earth.github.io/a5px/reference/a5_read_raster.md).
