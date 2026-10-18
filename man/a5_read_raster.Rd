@@ -13,6 +13,7 @@ a5_read_raster(
   bbox_align = c("pixel", "block"),
   aoi = NULL,
   containment = c("centre", "overlapping"),
+  mask = NULL,
   src_nodata = NULL,
   mode = c("forward", "overlay", "centroid"),
   subsamples = NULL,
@@ -120,6 +121,21 @@ one 180 degrees wide or more is an error unless it covers the globe.}
 centre lies inside the polygon; \code{"overlapping"} also keeps every cell
 the polygon boundary touches, for gap-free coverage. Only used with
 \code{aoi}.}
+
+\item{mask}{Optional polygons in WGS 84 that select pixels, accepted in
+the same forms as \code{aoi}. A pixel whose centre lies outside \code{mask}
+(hole interiors count as outside) is dropped before aggregation, as a
+nodata pixel is: it adds to no statistic, \code{"count"} and \code{"npix"}
+included. Several features form one mask (their union). Where \code{aoi}
+selects whole cells, \code{mask} selects pixels, and the two combine: a
+cell of the AOI receives its pixels inside the mask. Edges are great
+circles, as for \code{aoi}; densify a polygon whose edges should follow
+lines of constant latitude. Tiles are selected by the mask's bounding
+box, so a mask outside the raster gives an empty result. Combines with
+\code{bbox} and \code{bbox_align}. In \code{mode = "overlay"} a kept pixel's area is
+still split among the cells it overlaps; \code{mask} is not used in
+\code{mode = "centroid"}. Each polygon must lie within 80 degrees of the
+mean of its vertices.}
 
 \item{src_nodata}{Optional numeric scalar overriding the source nodata.
 Use this when the file's \code{TIFFTAG_GDAL_NODATA} tag is missing or wrong;

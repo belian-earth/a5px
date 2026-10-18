@@ -1,5 +1,15 @@
 # a5px 0.2.0
 
+* `mask` selects pixels by polygon in `a5_read_raster()`,
+  `a5_read_raster_arrow()` and `a5_raster_to_parquet()`: a pixel whose
+  centre lies outside it (holes included) adds to no statistic, as a
+  nodata pixel does, where `aoi` keeps or drops whole cells. Edges are
+  great circles, tested exactly in a gnomonic projection with a grid index
+  over the edges, so a mask of 100,000 vertices adds about 0.3 s to a
+  16-million-pixel read. Tiles are selected by the mask's bounding box. It
+  combines with `aoi`, `bbox`, `bbox_align` and overlay mode, and is an
+  error in centroid mode.
+
 * `src` takes several files, read in one pass: their tiles share the
   fetch queue (`io_concurrency`) and the workers (`cpu_workers`). With
   `separate = TRUE` each file adds its bands, as `gdalbuildvrt -separate`,

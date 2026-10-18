@@ -31,13 +31,14 @@ Imports:
     vctrs (>= 0.6.0),
     wk
 Suggests:
-    a5view,
+    a5view (>= 0.3.0.9000),
     arrow,
     exactextractr,
     ggplot2,
     knitr,
     parallel,
     rmarkdown,
+    s2,
     sf,
     terra,
     testthat (>= 3.0.0),
