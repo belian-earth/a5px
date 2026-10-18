@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use crate::cell_mask::{CellMask, MaskCache};
+use crate::poly_mask::PolyMask;
 use crate::grid_proj::{wrap_lon, Boxes, ExactMap, GridProjector};
 use crate::locator::{a5_spherical, CellLocator, NO_CELL};
 use crate::a5r_api::{cells_from_u64, cells_to_u64};
@@ -1335,6 +1336,8 @@ struct TileCtx<'a> {
     bbox_lonlat: Option<&'a Boxes>,
     dequant: Option<&'a Decode>,
     mask: Option<&'a CellMask>,
+    /// Pixels whose centre lies outside these polygons are dropped.
+    poly_mask: Option<&'a PolyMask>,
     cfg: AccCfg,
     /// Sub-point grid dimension for overlay mode; `None` is the forward path.
     overlay_k: Option<usize>,
@@ -1578,6 +1581,22 @@ fn process_tile<L: AccLayout>(
                     continue;
                 }
             }
+            if let Some(pm) = ctx.poly_mask {
+                let inside = match p.lonlat.and_then(|(lon, lat, m)| pm.classify(lon, lat, m)) {
+                    Some(x) => x,
+                    None => {
+                        let ll = match exact_ll {
+                            Some(x) => x,
+                            None => map.lonlat(colf, rowf)?,
+                        };
+                        exact_ll = Some(ll);
+                        ll.is_some_and(|(lon, lat)| pm.contains(lon, lat))
+                    }
+                };
+                if !inside {
+                    continue;
+                }
+            }
             let mut exact = || -> Option<a5::coordinate_systems::Spherical> {
                 let ll = match exact_ll {
                     Some(x) => x,
@@ -1764,6 +1783,24 @@ fn push_pixel<L: AccLayout>(
     Ok(())
 }
 
+/// Whether each pixel centre of a `w` x `h` window from pixel `(x0, y0)`
+/// lies inside `pm`, row-major.
+fn pixel_centres_in(pm: &PolyMask, map: &ExactMap, x0: f64, y0: f64, w: usize, h: usize) -> Result<Vec<bool>> {
+    let gp = GridProjector::new(map, x0, y0, w, h, 0.5)?;
+    let mut out = vec![false; w * h];
+    for j in 0..h {
+        for i in 0..w {
+            out[j * w + i] = match gp.point(i, j).lonlat.and_then(|(lon, lat, m)| pm.classify(lon, lat, m)) {
+                Some(x) => x,
+                None => map
+                    .lonlat(x0 + i as f64 + 0.5, y0 + j as f64 + 0.5)?
+                    .is_some_and(|(lon, lat)| pm.contains(lon, lat)),
+            };
+        }
+    }
+    Ok(out)
+}
+
 /// Area-weighted processing of rows `rows` of one tile for
 /// `mode = "overlay"`: each pixel contributes to every A5 cell it overlaps,
 /// weighted by the overlapped fraction of its area, approximated by k x k
@@ -1867,6 +1904,13 @@ fn process_tile_overlay<L: AccLayout>(
     }
 
     let (h_stride, w_stride, b_stride) = ctx.strides(tile.data_n_bands)?;
+    // the polygon mask keeps or drops whole pixels, by their centres
+    let centre_in = match ctx.poly_mask {
+        Some(pm) => Some(pixel_centres_in(
+            pm, &map, (tx * tile_w) as f64, (ty * tile_h + r0) as f64, actual_w, rows.len(),
+        )?),
+        None => None,
+    };
 
     let n = actual_w * rows.len();
     let mut store: CellStore<L> = CellStore::new(n_out, cfg, (n / 64).clamp(16, 65_536));
@@ -1879,6 +1923,9 @@ fn process_tile_overlay<L: AccLayout>(
     for r in rows.clone() {
         for c in 0..actual_w {
             if tile.mask.is_some_and(|m| !m[r * tile_w + c]) {
+                continue;
+            }
+            if centre_in.as_ref().is_some_and(|m| !m[(r - r0) * actual_w + c]) {
                 continue;
             }
             let pixel_base = r * h_stride + c * w_stride;
@@ -2068,6 +2115,7 @@ pub(crate) struct ReadArgs {
     pub bbox_align_block: bool,
     pub tile_bbox: Option<Boxes>,
     pub mask: Option<Arc<CellMask>>,
+    pub poly_mask: Option<Arc<PolyMask>>,
     /// Reduce per-source cell values across sources instead of pooling
     /// their pixels.
     pub composite: Option<Reducer>,
@@ -2477,7 +2525,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
     let ReadArgs {
         sources, separate, store_opts, resolution, stats, bands_idx, bands_names, bbox_lonlat,
         src_nodata_override, cpu_workers, io_concurrency, overview_target_m, dequant, scoff,
-        overlay, fractions, npix, bbox_align_block, tile_bbox, mask, composite,
+        overlay, fractions, npix, bbox_align_block, tile_bbox, mask, poly_mask, composite,
     } = a;
     let cfg = AccCfg::from_stats(&stats, fractions, npix);
     if separate && npix {
@@ -2640,6 +2688,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
         let registry = Arc::clone(&registry_arc);
         let bbox_lonlat_c = bbox_pixel_filter.clone();
         let mask_c = mask.clone();
+        let poly_mask_c = poly_mask.clone();
         let pool = index_pool.clone();
         let parts = Arc::clone(&parts);
         consumer_handles.push(tokio::task::spawn_blocking(move || {
@@ -2698,6 +2747,7 @@ async fn read_raster_async_impl<L: AccLayout>(a: ReadArgs) -> Result<ReadResult<
                     bbox_lonlat: bbox_lonlat_c.as_deref(),
                     dequant: p.decode.as_deref(),
                     mask: mask_c.as_deref(),
+                    poly_mask: poly_mask_c.as_deref(),
                     cfg,
                     overlay_k: p.overlay_k,
                     slots: p.slots.as_deref().map(|v| v.as_slice()),
@@ -3587,6 +3637,8 @@ fn a5_read_raster_rs(
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
     aoi_covering: Robj,
+    mask_xy: Vec<f64>,
+    mask_rings: Vec<i32>,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -3618,6 +3670,7 @@ fn a5_read_raster_rs(
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = parse_boxes_arg(tile_bbox, "tile_bbox")?;
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
+    let poly_mask = PolyMask::from_rings(&mask_xy, &mask_rings)?.map(Arc::new);
 
     let out: Output = crate::runtime::block_on_interruptible(read_raster_async(ReadArgs {
         sources: source_specs(src, src_labels)?,
@@ -3641,6 +3694,7 @@ fn a5_read_raster_rs(
         bbox_align_block,
         tile_bbox: tile_bbox_opt,
         mask,
+        poly_mask,
     }))?;
 
     let t_rout = Instant::now();
@@ -3756,6 +3810,8 @@ fn a5_read_raster_flat_rs(
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
     aoi_covering: Robj,
+    mask_xy: Vec<f64>,
+    mask_rings: Vec<i32>,
     store_keys: Vec<String>,
     store_values: Vec<String>,
 ) -> Result<Robj> {
@@ -3792,6 +3848,7 @@ fn a5_read_raster_flat_rs(
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = parse_boxes_arg(tile_bbox, "tile_bbox")?;
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
+    let poly_mask = PolyMask::from_rings(&mask_xy, &mask_rings)?.map(Arc::new);
 
     let out: Output = crate::runtime::block_on_interruptible(read_raster_async(ReadArgs {
         sources: source_specs(src, src_labels)?,
@@ -3815,6 +3872,7 @@ fn a5_read_raster_flat_rs(
         bbox_align_block,
         tile_bbox: tile_bbox_opt,
         mask,
+        poly_mask,
     }))?;
 
     let t_rout = Instant::now();
@@ -3907,6 +3965,8 @@ fn a5_raster_to_parquet_rs(
     bbox_align_block: bool,
     tile_bbox: Vec<f64>,
     aoi_covering: Robj,
+    mask_xy: Vec<f64>,
+    mask_rings: Vec<i32>,
     meta_keys: Vec<String>,
     meta_values: Vec<String>,
     store_keys: Vec<String>,
@@ -3948,6 +4008,7 @@ fn a5_raster_to_parquet_rs(
     let overlay_opt = parse_overlay_args(overlay, subsamples, cell_edge_m)?;
     let tile_bbox_opt = parse_boxes_arg(tile_bbox, "tile_bbox")?;
     let mask = CellMask::from_cells(&cells_to_u64(&aoi_covering)?).map(Arc::new);
+    let poly_mask = PolyMask::from_rings(&mask_xy, &mask_rings)?.map(Arc::new);
 
 
     crate::runtime::block_on_interruptible(read_raster_to_parquet_async(
@@ -3973,6 +4034,7 @@ fn a5_raster_to_parquet_rs(
         bbox_align_block,
         tile_bbox: tile_bbox_opt,
         mask,
+        poly_mask,
     },
         dest,
         resolution,

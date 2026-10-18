@@ -11,6 +11,7 @@ mod grid_proj;
 pub mod locator;
 mod meta_cache;
 mod parquet_write;
+mod poly_mask;
 mod range_cache;
 mod read;
 mod runtime;

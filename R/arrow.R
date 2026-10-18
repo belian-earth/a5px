@@ -6,7 +6,7 @@
 #' Arrow array constructor), making it the right entry point for embedding
 #' rasters destined for Parquet.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,separate,composite See [a5_read_raster()].
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,mask,separate,composite See [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
 #'   argument is ignored (one sample per cell) and the table metadata
@@ -47,6 +47,7 @@ a5_read_raster_arrow <- function(src,
                                  bbox_align = c("pixel", "block"),
                                  aoi = NULL,
                                  containment = c("centre", "overlapping"),
+                                 mask = NULL,
                                  src_nodata = NULL,
                                  mode = c("forward", "overlay", "centroid"),
                                  subsamples = NULL,
@@ -88,6 +89,7 @@ a5_read_raster_arrow <- function(src,
   bbox_v <- check_bbox(bbox)
   bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
   aoi_v <- check_aoi(aoi, resolution, containment)
+  mask_v <- check_mask(mask, mode)
   src_nodata_v <- check_src_nodata(src_nodata)
   dequant_v <- check_dequant(dequant, scoff)
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE, scoff = scoff)
@@ -142,8 +144,10 @@ a5_read_raster_arrow <- function(src,
       subsamples = subsamples_v,
       cell_edge_m = cell_edge_metres(mode, resolution),
       bbox_align_block = bbox_align_block,
-      tile_bbox = aoi_v$tile_bbox,
-      aoi_covering = aoi_v$covering_stored
+      tile_bbox = tile_boxes(aoi_v$tile_bbox, mask_v$tile_bbox),
+      aoi_covering = aoi_v$covering_stored,
+      mask_xy = mask_v$xy,
+      mask_rings = mask_v$rings
     ))
   }
 
@@ -210,7 +214,7 @@ a5_read_raster_arrow <- function(src,
 #' the per-cell list-of-vectors construction that the R-Arrow path
 #' does, which is the main remaining cost in that pipeline.
 #'
-#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,separate,composite See
+#' @param src,resolution,stat,bands,bbox,src_nodata,cpu_workers,io_concurrency,scoff,dequant,subsamples,interp,as_vector,use_overviews,store_opts,bbox_align,aoi,containment,mask,separate,composite See
 #'   [a5_read_raster()].
 #' @param mode Sampling mode: `"forward"` (default), `"overlay"`, or
 #'   `"centroid"`. See [a5_read_raster()]. Under `"centroid"` the `stat`
@@ -241,6 +245,7 @@ a5_raster_to_parquet <- function(src,
                                  bbox_align = c("pixel", "block"),
                                  aoi = NULL,
                                  containment = c("centre", "overlapping"),
+                                 mask = NULL,
                                  src_nodata = NULL,
                                  mode = c("forward", "overlay", "centroid"),
                                  subsamples = NULL,
@@ -284,6 +289,7 @@ a5_raster_to_parquet <- function(src,
   bbox_v <- check_bbox(bbox)
   bbox_align_block <- check_bbox_align(bbox_align, bbox_v, mode)
   aoi_v <- check_aoi(aoi, resolution, containment)
+  mask_v <- check_mask(mask, mode)
   src_nodata_v <- check_src_nodata(src_nodata)
   dequant_v <- check_dequant(dequant, scoff)
   check_stat_context(stats, dequant, as_vector, fractions_ok = FALSE, scoff = scoff)
@@ -350,8 +356,10 @@ a5_raster_to_parquet <- function(src,
     subsamples = subsamples_v,
     cell_edge_m = cell_edge_metres(mode, resolution),
     bbox_align_block = bbox_align_block,
-    tile_bbox = aoi_v$tile_bbox,
+    tile_bbox = tile_boxes(aoi_v$tile_bbox, mask_v$tile_bbox),
     aoi_covering = aoi_v$covering_stored,
+    mask_xy = mask_v$xy,
+    mask_rings = mask_v$rings,
     meta_keys = names(prov),
     meta_values = unname(prov)
   )))
