@@ -1,5 +1,13 @@
 # a5px 0.2.0
 
+* Band-interleaved (planar) rasters of more than one band with a
+  horizontal (2) or floating-point (3) predictor now read correctly; they
+  returned wrong values, often NaN or out of range. async-tiff 0.4.0
+  reversed the predictor across the whole block instead of per band, so
+  async-tiff is pinned to the upstream fix (developmentseed/async-tiff#348)
+  until a release carries it. Rasters without a predictor, such as the
+  AlphaEarth embeddings, were not affected.
+
 * `mask` selects pixels by polygon in `a5_read_raster()`,
   `a5_read_raster_arrow()` and `a5_raster_to_parquet()`: a pixel whose
   centre lies outside it (holes included) adds to no statistic, as a
