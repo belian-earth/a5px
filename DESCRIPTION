@@ -1,6 +1,6 @@
 Package: a5px
 Title: Read GeoTIFF and Cloud-Optimised GeoTIFF Rasters as A5 Cells
-Version: 0.2.0
+Version: 0.2.0.9000
 Authors@R: c(
     person("Hugh", "Graham", role = c("aut", "cre"),
            email = "hugh@belian.earth"),
@@ -44,7 +44,6 @@ Suggests:
     testthat (>= 3.0.0),
     withr
 Remotes:
-    belian-earth/a5R,
     belian-earth/a5view,
     r-spatial/geoarrowWidget
 VignetteBuilder: knitr
